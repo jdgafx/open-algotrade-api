@@ -207,6 +207,8 @@ class StrategyTypeInfo(BaseModel):
     default_symbol: str
     default_timeframe: str
     default_params: Dict[str, Any]
+    category: str = "trend"
+    risk_level: str = "medium"
 
 
 class StrategyRegistryOut(BaseModel):
@@ -239,3 +241,54 @@ class DashboardStats(BaseModel):
     win_rate: float
     vault_equity: Optional[float] = None
     active_positions: int
+
+
+# Vault history
+class VaultHistoryPoint(BaseModel):
+    timestamp: datetime
+    equity: float
+    nav_per_share: float
+
+
+class VaultHistoryOut(BaseModel):
+    data: List[VaultHistoryPoint]
+    total_points: int
+
+
+# Dashboard performance
+class EquityCurvePoint(BaseModel):
+    timestamp: datetime
+    equity: float
+
+
+class StrategyPerformanceBreakdown(BaseModel):
+    name: str
+    strategy_type: str
+    total_pnl: float
+    total_trades: int
+    winning_trades: int
+    losing_trades: int
+    win_rate: float
+    max_drawdown: float
+    status: str
+
+
+class DashboardPerformance(BaseModel):
+    total_pnl: float
+    win_rate: float
+    total_trades: int
+    max_drawdown: float
+    equity_curve: List[EquityCurvePoint]
+    strategy_breakdown: List[StrategyPerformanceBreakdown]
+
+
+# Extended strategy registry info (includes category and risk_level)
+class StrategyTypeInfoFull(BaseModel):
+    strategy_type: str
+    tier: str
+    description: str
+    default_symbol: str
+    default_timeframe: str
+    default_params: Dict[str, Any]
+    category: str
+    risk_level: str
