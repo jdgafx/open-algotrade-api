@@ -1,0 +1,8 @@
+hyperliquid-python-sdk
+python-dotenv
+eth-account
+web3
+fastapi
+uvicorn[standard]
+sqlalchemy
+pydantic
