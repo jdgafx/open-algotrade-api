@@ -9,7 +9,7 @@ class UserBase(BaseModel):
 
 
 class UserCreate(UserBase):
-    pass
+    password: str
 
 
 class User(UserBase):
@@ -21,6 +21,22 @@ class User(UserBase):
     class Config:
         from_attributes = True
 
+class AuthSignIn(BaseModel):
+    email: str
+    password: str
+
+
+class AuthResponse(BaseModel):
+    id: str
+    email: Optional[str] = None
+    name: str
+    avatar: Optional[str] = None
+    status: str = "ONLINE"
+
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
 
 class DepositCreate(BaseModel):
     user_id: int

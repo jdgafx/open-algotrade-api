@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from . import models, schemas
 from .database import engine, get_db
+from .auth import get_password_hash, verify_password, create_access_token, require_current_user
 
 models.Base.metadata.create_all(bind=engine)
 
@@ -137,6 +138,58 @@ def health():
     return {"status": "ok", "service": "open-algotrade-api"}
 
 
+
+
+@app.post("/auth/sign-in", response_model=schemas.AuthResponse)
+def auth_sign_in(credentials: schemas.AuthSignIn, db: Session = Depends(get_db)):
+    user = db.query(models.User).filter(models.User.email == credentials.email).first()
+    if not user or not verify_password(credentials.password, user.hashed_password):
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    if not user.is_active:
+        raise HTTPException(status_code=403, detail="Account is disabled")
+    return schemas.AuthResponse(
+        id=str(user.id),
+        email=user.email,
+        name=user.username,
+        avatar=None,
+        status="ONLINE",
+    )
+
+
+@app.post("/auth/register", response_model=schemas.AuthResponse)
+def auth_register(user_data: schemas.UserCreate, db: Session = Depends(get_db)):
+    if db.query(models.User).filter(models.User.email == user_data.email).first():
+        raise HTTPException(status_code=400, detail="Email already registered")
+    if db.query(models.User).filter(models.User.username == user_data.username).first():
+        raise HTTPException(status_code=400, detail="Username already taken")
+    db_user = models.User(
+        username=user_data.username,
+        email=user_data.email,
+        hashed_password=get_password_hash(user_data.password),
+    )
+    db.add(db_user)
+    db.commit()
+    db.refresh(db_user)
+    return schemas.AuthResponse(
+        id=str(db_user.id),
+        email=db_user.email,
+        name=db_user.username,
+        avatar=None,
+        status="ONLINE",
+    )
+
+
+@app.get("/auth/me", response_model=schemas.AuthResponse)
+async def auth_me(user: models.User = Depends(require_current_user)):
+    return schemas.AuthResponse(
+        id=str(user.id),
+        email=user.email,
+        name=user.username,
+        avatar=None,
+        status="ONLINE",
+    )
+
+
 @app.post("/users", response_model=schemas.User)
 def create_user(user: schemas.UserCreate, db: Session = Depends(get_db)):
     existing = (
@@ -144,7 +197,7 @@ def create_user(user: schemas.UserCreate, db: Session = Depends(get_db)):
     )
     if existing:
         raise HTTPException(status_code=400, detail="Username already exists")
-    db_user = models.User(username=user.username, email=user.email)
+    db_user = models.User(username=user.username, email=user.email, hashed_password=get_password_hash(user.password))
     db.add(db_user)
     db.commit()
     db.refresh(db_user)
