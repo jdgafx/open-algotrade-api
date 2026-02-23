@@ -15,7 +15,7 @@ models.Base.metadata.create_all(bind=engine)
 
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Open Algotrade API", version="1.0.0")
+app = FastAPI(title="Open Algotrade API", version="2.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -133,12 +133,18 @@ def _get_market_price(symbol: str) -> Optional[schemas.MarketPrice]:
         return None
 
 
+# ──────────────────────────────────────────────
+# Health
+# ──────────────────────────────────────────────
+
 @app.get("/health")
 def health():
-    return {"status": "ok", "service": "open-algotrade-api"}
+    return {"status": "ok", "service": "open-algotrade-api", "version": "2.0.0"}
 
 
-
+# ──────────────────────────────────────────────
+# Auth
+# ──────────────────────────────────────────────
 
 @app.post("/auth/sign-in", response_model=schemas.AuthResponse)
 def auth_sign_in(credentials: schemas.AuthSignIn, db: Session = Depends(get_db)):
@@ -190,6 +196,10 @@ async def auth_me(user: models.User = Depends(require_current_user)):
     )
 
 
+# ──────────────────────────────────────────────
+# Users
+# ──────────────────────────────────────────────
+
 @app.post("/users", response_model=schemas.User)
 def create_user(user: schemas.UserCreate, db: Session = Depends(get_db)):
     existing = (
@@ -211,6 +221,10 @@ def get_user(user_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="User not found")
     return user
 
+
+# ──────────────────────────────────────────────
+# Vault
+# ──────────────────────────────────────────────
 
 @app.get("/vault/status", response_model=schemas.VaultStatus)
 def vault_status(db: Session = Depends(get_db)):
@@ -309,6 +323,10 @@ def get_portfolio(user_id: int, db: Session = Depends(get_db)):
     )
 
 
+# ──────────────────────────────────────────────
+# Positions & Trades
+# ──────────────────────────────────────────────
+
 @app.get("/positions", response_model=List[schemas.Position])
 def get_positions():
     return _get_live_positions()
@@ -321,6 +339,10 @@ def get_trades(limit: int = 50, open_only: bool = False, db: Session = Depends(g
         query = query.filter(models.Trade.is_open == True)
     return query.order_by(models.Trade.opened_at.desc()).limit(limit).all()
 
+
+# ──────────────────────────────────────────────
+# Legacy single-strategy endpoints (backwards compat)
+# ──────────────────────────────────────────────
 
 @app.get("/strategy/status", response_model=schemas.StrategyStatusOut)
 def strategy_status(db: Session = Depends(get_db)):
@@ -351,6 +373,188 @@ def strategy_stop(db: Session = Depends(get_db)):
     return {"status": "stopped"}
 
 
+# ──────────────────────────────────────────────
+# Multi-Strategy Endpoints (v2)
+# ──────────────────────────────────────────────
+
+@app.get("/strategies/registry", response_model=schemas.StrategyRegistryOut)
+def get_strategy_registry():
+    """List all available strategy types with their default configs."""
+    from src.strategies.registry import list_strategies
+    strategies = list_strategies()
+    return schemas.StrategyRegistryOut(
+        available_strategies=[
+            schemas.StrategyTypeInfo(**s) for s in strategies
+        ],
+        total=len(strategies),
+    )
+
+
+@app.get("/strategies", response_model=List[schemas.StrategyInstanceOut])
+def list_strategy_instances(db: Session = Depends(get_db)):
+    """List all configured strategy instances."""
+    instances = db.query(models.StrategyInstance).all()
+    return instances
+
+
+@app.post("/strategies", response_model=schemas.StrategyInstanceOut)
+def create_strategy_instance(
+    data: schemas.StrategyInstanceCreate, db: Session = Depends(get_db)
+):
+    """Create a new strategy instance."""
+    from src.strategies.registry import get_strategy_class, list_strategies
+
+    # Validate strategy type
+    available = [s["strategy_type"] for s in list_strategies()]
+    if data.strategy_type not in available:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown strategy type: {data.strategy_type}. Available: {available}",
+        )
+
+    # Check name uniqueness
+    existing = db.query(models.StrategyInstance).filter(
+        models.StrategyInstance.name == data.name
+    ).first()
+    if existing:
+        raise HTTPException(status_code=400, detail=f"Strategy name '{data.name}' already exists")
+
+    # Get tier from registry
+    registry_info = next(s for s in list_strategies() if s["strategy_type"] == data.strategy_type)
+
+    instance = models.StrategyInstance(
+        name=data.name,
+        strategy_type=data.strategy_type,
+        tier=registry_info["tier"],
+        symbol=data.symbol,
+        timeframe=data.timeframe,
+        leverage=data.leverage,
+        size_usd=data.size_usd,
+        target_pct=data.target_pct,
+        max_loss_pct=data.max_loss_pct,
+        lookback_days=data.lookback_days,
+        interval_seconds=data.interval_seconds,
+        enabled=data.enabled,
+        params={**registry_info["default_params"], **data.params},
+    )
+    db.add(instance)
+    db.commit()
+    db.refresh(instance)
+    return instance
+
+
+@app.get("/strategies/{name}", response_model=schemas.StrategyInstanceOut)
+def get_strategy_instance(name: str, db: Session = Depends(get_db)):
+    """Get a specific strategy instance by name."""
+    instance = db.query(models.StrategyInstance).filter(
+        models.StrategyInstance.name == name
+    ).first()
+    if not instance:
+        raise HTTPException(status_code=404, detail=f"Strategy '{name}' not found")
+    return instance
+
+
+@app.patch("/strategies/{name}", response_model=schemas.StrategyInstanceOut)
+def update_strategy_instance(
+    name: str, data: schemas.StrategyInstanceUpdate, db: Session = Depends(get_db)
+):
+    """Update a strategy instance's configuration."""
+    instance = db.query(models.StrategyInstance).filter(
+        models.StrategyInstance.name == name
+    ).first()
+    if not instance:
+        raise HTTPException(status_code=404, detail=f"Strategy '{name}' not found")
+
+    update_data = data.model_dump(exclude_unset=True)
+    for field, value in update_data.items():
+        if field == "params" and value is not None:
+            current_params = instance.params or {}
+            current_params.update(value)
+            instance.params = current_params
+        else:
+            setattr(instance, field, value)
+
+    db.commit()
+    db.refresh(instance)
+    return instance
+
+
+@app.delete("/strategies/{name}")
+def delete_strategy_instance(name: str, db: Session = Depends(get_db)):
+    """Delete a strategy instance."""
+    instance = db.query(models.StrategyInstance).filter(
+        models.StrategyInstance.name == name
+    ).first()
+    if not instance:
+        raise HTTPException(status_code=404, detail=f"Strategy '{name}' not found")
+    if instance.status == "running":
+        raise HTTPException(status_code=400, detail="Cannot delete a running strategy. Stop it first.")
+    db.delete(instance)
+    db.commit()
+    return {"status": "deleted", "name": name}
+
+
+@app.post("/strategies/{name}/start")
+def start_strategy_instance(name: str, db: Session = Depends(get_db)):
+    """Start a strategy instance."""
+    instance = db.query(models.StrategyInstance).filter(
+        models.StrategyInstance.name == name
+    ).first()
+    if not instance:
+        raise HTTPException(status_code=404, detail=f"Strategy '{name}' not found")
+    instance.status = "running"
+    instance.started_at = datetime.utcnow()
+    instance.error_message = None
+    db.commit()
+    return {"status": "running", "name": name, "strategy_type": instance.strategy_type, "symbol": instance.symbol}
+
+
+@app.post("/strategies/{name}/stop")
+def stop_strategy_instance(name: str, db: Session = Depends(get_db)):
+    """Stop a strategy instance."""
+    instance = db.query(models.StrategyInstance).filter(
+        models.StrategyInstance.name == name
+    ).first()
+    if not instance:
+        raise HTTPException(status_code=404, detail=f"Strategy '{name}' not found")
+    instance.status = "stopped"
+    db.commit()
+    return {"status": "stopped", "name": name}
+
+
+# ──────────────────────────────────────────────
+# Dashboard
+# ──────────────────────────────────────────────
+
+@app.get("/dashboard/stats", response_model=schemas.DashboardStats)
+def dashboard_stats(db: Session = Depends(get_db)):
+    """Get aggregated dashboard statistics."""
+    instances = db.query(models.StrategyInstance).all()
+    total = len(instances)
+    running = sum(1 for i in instances if i.status == "running")
+    total_pnl = sum(i.total_pnl for i in instances)
+    total_trades = sum(i.total_trades for i in instances)
+    winning = sum(i.winning_trades for i in instances)
+    win_rate = (winning / total_trades * 100) if total_trades > 0 else 0.0
+
+    live_equity = _get_live_vault_equity()
+    positions = _get_live_positions()
+
+    return schemas.DashboardStats(
+        total_strategies=total,
+        running_strategies=running,
+        total_pnl=round(total_pnl, 2),
+        total_trades=total_trades,
+        win_rate=round(win_rate, 1),
+        vault_equity=live_equity,
+        active_positions=len(positions),
+    )
+
+
+# ──────────────────────────────────────────────
+# Market Data
+# ──────────────────────────────────────────────
+
 @app.get("/market/price/{symbol}", response_model=schemas.MarketPrice)
 def market_price(symbol: str):
     price = _get_market_price(symbol.upper())
@@ -359,3 +563,14 @@ def market_price(symbol: str):
             status_code=503, detail=f"Could not fetch price for {symbol}"
         )
     return price
+
+
+@app.get("/deposits/{user_id}", response_model=List[schemas.Deposit])
+def get_deposits(user_id: int, db: Session = Depends(get_db)):
+    """Get deposit history for a user."""
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    return db.query(models.Deposit).filter(
+        models.Deposit.user_id == user_id
+    ).order_by(models.Deposit.timestamp.desc()).all()

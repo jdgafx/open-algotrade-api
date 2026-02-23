@@ -6,7 +6,8 @@ from sqlalchemy import (
     ForeignKey,
     DateTime,
     Boolean,
-    Enum,
+    Text,
+    JSON,
 )
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
@@ -95,6 +96,44 @@ class Trade(Base):
     is_open = Column(Boolean, default=True)
 
 
+class StrategyInstance(Base):
+    """Per-strategy state — supports multiple concurrent strategies."""
+    __tablename__ = "strategy_instances"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, unique=True, index=True)
+    strategy_type = Column(String, index=True)
+    tier = Column(String, default="A")
+    status = Column(String, default="stopped")
+    symbol = Column(String, default="BTC")
+    timeframe = Column(String, default="1h")
+    leverage = Column(Integer, default=3)
+    size_usd = Column(Float, default=100.0)
+    max_positions = Column(Integer, default=1)
+    target_pct = Column(Float, default=5.0)
+    max_loss_pct = Column(Float, default=-10.0)
+    lookback_days = Column(Integer, default=7)
+    interval_seconds = Column(Integer, default=30)
+    enabled = Column(Boolean, default=True)
+    params = Column(JSON, default=dict)
+    total_trades = Column(Integer, default=0)
+    winning_trades = Column(Integer, default=0)
+    losing_trades = Column(Integer, default=0)
+    total_pnl = Column(Float, default=0.0)
+    max_drawdown = Column(Float, default=0.0)
+    iterations = Column(Integer, default=0)
+    errors = Column(Integer, default=0)
+    last_signal = Column(String, nullable=True)
+    last_signal_time = Column(DateTime(timezone=True), nullable=True)
+    started_at = Column(DateTime(timezone=True), nullable=True)
+    error_message = Column(String, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+# Keep legacy table for migration compatibility
 class StrategyState(Base):
     __tablename__ = "strategy_state"
 

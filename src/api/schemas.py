@@ -1,6 +1,6 @@
 from pydantic import BaseModel
 from datetime import datetime
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 
 
 class UserBase(BaseModel):
@@ -111,6 +111,7 @@ class TradeOut(BaseModel):
         from_attributes = True
 
 
+# Legacy single-strategy config (kept for backwards compat)
 class StrategyConfig(BaseModel):
     symbol: str
     timeframe: str
@@ -138,6 +139,81 @@ class StrategyStatusOut(BaseModel):
         from_attributes = True
 
 
+# Multi-strategy schemas
+class StrategyInstanceCreate(BaseModel):
+    name: str
+    strategy_type: str
+    symbol: str = "BTC"
+    timeframe: str = "1h"
+    leverage: int = 3
+    size_usd: float = 100.0
+    target_pct: float = 5.0
+    max_loss_pct: float = -10.0
+    lookback_days: int = 7
+    interval_seconds: int = 30
+    enabled: bool = True
+    params: Dict[str, Any] = {}
+
+
+class StrategyInstanceUpdate(BaseModel):
+    symbol: Optional[str] = None
+    timeframe: Optional[str] = None
+    leverage: Optional[int] = None
+    size_usd: Optional[float] = None
+    target_pct: Optional[float] = None
+    max_loss_pct: Optional[float] = None
+    interval_seconds: Optional[int] = None
+    enabled: Optional[bool] = None
+    params: Optional[Dict[str, Any]] = None
+
+
+class StrategyInstanceOut(BaseModel):
+    id: int
+    name: str
+    strategy_type: str
+    tier: str
+    status: str
+    symbol: str
+    timeframe: str
+    leverage: int
+    size_usd: float
+    target_pct: float
+    max_loss_pct: float
+    interval_seconds: int
+    enabled: bool
+    params: Dict[str, Any]
+    total_trades: int
+    winning_trades: int
+    losing_trades: int
+    total_pnl: float
+    max_drawdown: float
+    iterations: int
+    errors: int
+    last_signal: Optional[str] = None
+    last_signal_time: Optional[datetime] = None
+    started_at: Optional[datetime] = None
+    error_message: Optional[str] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class StrategyTypeInfo(BaseModel):
+    strategy_type: str
+    tier: str
+    description: str
+    default_symbol: str
+    default_timeframe: str
+    default_params: Dict[str, Any]
+
+
+class StrategyRegistryOut(BaseModel):
+    available_strategies: List[StrategyTypeInfo]
+    total: int
+
+
 class MarketPrice(BaseModel):
     symbol: str
     price: float
@@ -153,3 +229,13 @@ class Position(BaseModel):
     mark_price: float
     unrealized_pnl: float
     leverage: int
+
+
+class DashboardStats(BaseModel):
+    total_strategies: int
+    running_strategies: int
+    total_pnl: float
+    total_trades: int
+    win_rate: float
+    vault_equity: Optional[float] = None
+    active_positions: int
