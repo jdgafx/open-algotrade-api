@@ -85,6 +85,17 @@ def _register_all():
     from .sma_strategy import SMAStrategy
     from .rsi_strategy import RSIStrategy
     from .vwma_strategy import VWMAStrategy
+    from .adx_strategy import ADXStrategy
+    from .macd_strategy import MACDStrategy
+    from .ichimoku_strategy import IchimokuStrategy
+    from .elliott_wave_strategy import ElliottWaveStrategy
+    from .pivot_lines_strategy import PivotLinesStrategy
+    from .quarter_theory_strategy import QuarterTheoryStrategy
+    from .ema_bollinger_strategy import EMABollingerStrategy
+    from .grid_fib_strategy import GridFibStrategy
+    from .elliott_pivot_strategy import ElliottPivotStrategy
+    from .sma_adx_bb_vol_strategy import SMAAdxBBVolStrategy
+    from .rsi_vwap_strategy import RSIVWAPStrategy
 
     register_strategy(
         "turtle", TurtleHLStrategy, StrategyTier.A,
@@ -176,6 +187,85 @@ def _register_all():
         "BTC", "15m",
         {"fast_period": 20, "mid_period": 41, "slow_period": 75},
         category="trend", risk_level="low",
+    )
+
+    # Tier D — Backtested strategies (ported from bt_code)
+    register_strategy(
+        "adx", ADXStrategy, StrategyTier.D,
+        "ADX trend strength with +DI/-DI directional crossover",
+        "BTC", "1h",
+        {"adx_period": 14, "di_period": 14, "adx_threshold": 25, "exit_threshold": 20},
+        category="trend", risk_level="medium",
+    )
+    register_strategy(
+        "macd", MACDStrategy, StrategyTier.D,
+        "MACD/Signal crossover with histogram confirmation and MA filter",
+        "BTC", "1h",
+        {"fast_period": 12, "slow_period": 26, "signal_period": 9, "ma_filter_period": 50, "confirmation_bars": 2},
+        category="trend", risk_level="medium",
+    )
+    register_strategy(
+        "ichimoku", IchimokuStrategy, StrategyTier.D,
+        "Full Ichimoku cloud system with TK cross and cloud positioning",
+        "BTC", "4h",
+        {"tenkan_period": 9, "kijun_period": 26, "senkou_b_period": 52},
+        category="trend", risk_level="medium",
+    )
+    register_strategy(
+        "elliott_wave", ElliottWaveStrategy, StrategyTier.D,
+        "Elliott Wave swing pattern detection with Fibonacci retracement validation",
+        "BTC", "4h",
+        {"swing_lookback": 5, "fib_retracement_min": 0.382, "fib_retracement_max": 0.618, "min_swing_pct": 0.5, "reversal_exit_pct": 1.5},
+        category="pattern", risk_level="high",
+    )
+    register_strategy(
+        "pivot_lines", PivotLinesStrategy, StrategyTier.D,
+        "Classic pivot point support/resistance level trading",
+        "BTC", "1h",
+        {"pivot_lookback": 24},
+        category="reversal", risk_level="low",
+    )
+    register_strategy(
+        "quarter_theory", QuarterTheoryStrategy, StrategyTier.D,
+        "Quarter-point price level breakout strategy",
+        "BTC", "1h",
+        {"quarter_size": None, "breakout_pct": 0.1, "take_profit_quarters": 1, "stop_loss_quarters": 1},
+        category="breakout", risk_level="medium",
+    )
+    register_strategy(
+        "ema_bollinger", EMABollingerStrategy, StrategyTier.D,
+        "Combined EMA crossover trend + Bollinger Band squeeze entries",
+        "BTC", "1h",
+        {"short_ema_period": 50, "long_ema_period": 200, "bb_period": 20, "bb_std": 2.0},
+        category="trend", risk_level="medium",
+    )
+    register_strategy(
+        "grid_fibonacci", GridFibStrategy, StrategyTier.D,
+        "Grid trading at Fibonacci retracement levels with dynamic recalibration",
+        "BTC", "4h",
+        {"fib_lookback": 50, "proximity_pct": 0.3, "trend_period": 20, "take_profit_fib": 0.618, "stop_loss_fib": 1.0},
+        category="grid", risk_level="medium",
+    )
+    register_strategy(
+        "elliott_pivot", ElliottPivotStrategy, StrategyTier.D,
+        "Combined Elliott Wave patterns with pivot point levels for confluence",
+        "BTC", "4h",
+        {"swing_lookback": 5, "pivot_lookback": 24},
+        category="pattern", risk_level="medium",
+    )
+    register_strategy(
+        "sma_adx_bb_vol", SMAAdxBBVolStrategy, StrategyTier.D,
+        "Multi-indicator combo: SMA crossover + ADX strength + BB squeeze + volume confirmation",
+        "BTC", "1h",
+        {"sma_period": 20, "adx_period": 14, "bb_period": 20, "bb_std": 2.0, "min_adx": 20, "volume_multiplier": 1.5},
+        category="trend", risk_level="medium",
+    )
+    register_strategy(
+        "rsi_vwap", RSIVWAPStrategy, StrategyTier.D,
+        "Combined RSI and VWAP confluence signals for trend entries",
+        "BTC", "15m",
+        {"rsi_period": 14, "oversold": 30, "overbought": 70},
+        category="reversal", risk_level="low",
     )
 
 

@@ -133,6 +133,61 @@ class StrategyInstance(Base):
     )
 
 
+# ──────────────────────────────────────────────
+# Liquidation & Whale Tracking
+# ──────────────────────────────────────────────
+
+class TrackedWhale(Base):
+    """Whale address with user-defined labels and alert preferences."""
+    __tablename__ = "tracked_whales"
+
+    id = Column(Integer, primary_key=True, index=True)
+    address = Column(String, unique=True, index=True)
+    label = Column(String, nullable=True)
+    notes = Column(Text, nullable=True)
+    tags = Column(JSON, default=list)
+    alert_enabled = Column(Boolean, default=False)
+    account_value = Column(Float, default=0.0)
+    peak_account_value = Column(Float, default=0.0)
+    is_blown_up = Column(Boolean, default=False)
+    blown_up_at = Column(DateTime(timezone=True), nullable=True)
+    first_seen = Column(DateTime(timezone=True), server_default=func.now())
+    last_updated = Column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class LiquidationEventRecord(Base):
+    """Historical liquidation event for backtesting."""
+    __tablename__ = "liquidation_events"
+
+    id = Column(Integer, primary_key=True, index=True)
+    address = Column(String, index=True)
+    symbol = Column(String, index=True)
+    side = Column(String)
+    size = Column(Float)
+    size_usd = Column(Float)
+    price = Column(Float)
+    is_cascade = Column(Boolean, default=False)
+    timestamp = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+
+class WhaleAlertRecord(Base):
+    """Historical whale trade alert."""
+    __tablename__ = "whale_alerts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    address = Column(String, index=True)
+    label = Column(String, nullable=True)
+    action = Column(String)  # opened, closed, increased, decreased
+    symbol = Column(String, index=True)
+    side = Column(String)
+    size = Column(Float)
+    size_usd = Column(Float)
+    price = Column(Float)
+    timestamp = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+
 # Keep legacy table for migration compatibility
 class StrategyState(Base):
     __tablename__ = "strategy_state"

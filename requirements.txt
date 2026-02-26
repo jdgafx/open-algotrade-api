@@ -13,3 +13,9 @@ pandas
 numpy
 requests
 bcrypt
+ccxt
+httpx
+hmmlearn
+backtesting
+stripe
+websockets

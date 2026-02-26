@@ -20,8 +20,15 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Create StrategyOrchestrator on startup, clean up on shutdown."""
+    """Initialize all services on startup, clean up on shutdown."""
     orchestrator = None
+    risk_controller = None
+    liquidation_tracker = None
+    whale_tracker = None
+    rbi_agent = None
+    regime_detector = None
+
+    # ── 1. Core Trading Engine ──
     try:
         from src.lib.nice_funcs import HyperliquidClient
         from src.execution.hl_executor import HyperliquidVaultExecutor
@@ -31,22 +38,93 @@ async def lifespan(app: FastAPI):
 
         from src.engine.orchestrator import StrategyOrchestrator
         orchestrator = StrategyOrchestrator(client=client, executor=executor)
-        logger.info("StrategyOrchestrator initialized and attached to app.state")
+        logger.info("StrategyOrchestrator initialized")
     except Exception as e:
-        logger.warning(
-            "Could not initialize StrategyOrchestrator (trading will be unavailable): %s", e
-        )
+        logger.warning("Could not initialize StrategyOrchestrator: %s", e)
 
+    # ── 2. Risk Controller (Layer 0: The Seatbelt) ──
+    try:
+        from src.services.risk_controller import RiskController
+        if client and executor:
+            risk_controller = RiskController(client=client, executor=executor)
+            logger.info("RiskController initialized (call /risk/start to activate)")
+        else:
+            logger.warning("RiskController skipped — no client/executor available")
+    except Exception as e:
+        logger.warning("Could not initialize RiskController: %s", e)
+
+    # ── 3. Liquidation Tracker (Layer 1: The Eyes) ──
+    try:
+        from src.services.liquidation_tracker import LiquidationTracker
+        hl_base_url = client.base_url if client else "https://api.hyperliquid-testnet.xyz"
+        liquidation_tracker = LiquidationTracker(base_url=hl_base_url)
+        logger.info("LiquidationTracker initialized")
+    except Exception as e:
+        logger.warning("Could not initialize LiquidationTracker: %s", e)
+
+    # ── 4. Whale Tracker (Layer 1: The Eyes) ──
+    try:
+        from src.services.whale_tracker import WhaleTracker
+        hl_base_url = client.base_url if client else "https://api.hyperliquid-testnet.xyz"
+        whale_tracker = WhaleTracker(base_url=hl_base_url)
+        logger.info("WhaleTracker initialized")
+    except Exception as e:
+        logger.warning("Could not initialize WhaleTracker: %s", e)
+
+    # ── 5. RBI Agent (Layer 2: The Brain) ──
+    try:
+        from src.services.rbi_agent import RBIAgentManager
+        rbi_agent = RBIAgentManager()
+        logger.info("RBIAgentManager initialized")
+    except Exception as e:
+        logger.warning("Could not initialize RBIAgentManager: %s", e)
+
+    # ── 6. Regime Detector (Layer 2: The Brain) ──
+    try:
+        from src.services.regime_detector import RegimeDetector
+        regime_detector = RegimeDetector()
+        logger.info("RegimeDetector initialized")
+    except Exception as e:
+        logger.warning("Could not initialize RegimeDetector: %s", e)
+
+    # Attach all to app.state
     app.state.orchestrator = orchestrator
+    app.state.risk_controller = risk_controller
+    app.state.liquidation_tracker = liquidation_tracker
+    app.state.whale_tracker = whale_tracker
+    app.state.rbi_agent = rbi_agent
+    app.state.regime_detector = regime_detector
+
     yield
 
-    # Shutdown: stop all running strategies
+    # Shutdown: stop all services
     if orchestrator is not None:
         try:
             await orchestrator.stop_all()
             logger.info("StrategyOrchestrator shut down cleanly")
         except Exception as e:
             logger.error("Error shutting down orchestrator: %s", e)
+
+    if risk_controller is not None:
+        try:
+            await risk_controller.stop()
+            logger.info("RiskController shut down cleanly")
+        except Exception as e:
+            logger.error("Error shutting down risk controller: %s", e)
+
+    if liquidation_tracker is not None:
+        try:
+            await liquidation_tracker.stop()
+            logger.info("LiquidationTracker shut down cleanly")
+        except Exception as e:
+            logger.error("Error shutting down liquidation tracker: %s", e)
+
+    if whale_tracker is not None:
+        try:
+            await whale_tracker.stop()
+            logger.info("WhaleTracker shut down cleanly")
+        except Exception as e:
+            logger.error("Error shutting down whale tracker: %s", e)
 
 
 app = FastAPI(title="Open Algotrade API", version="2.0.0", lifespan=lifespan)
@@ -58,6 +136,25 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ── Mount all sub-routers ──────────────────────────
+from .routes import (
+    risk_router,
+    liquidations_router,
+    whales_router,
+    rbi_router,
+    backtest_router,
+    regime_router,
+)
+from .billing import router as billing_router
+
+app.include_router(risk_router, tags=["risk"])
+app.include_router(liquidations_router)
+app.include_router(whales_router)
+app.include_router(rbi_router)
+app.include_router(backtest_router)
+app.include_router(regime_router)
+app.include_router(billing_router)
 
 
 def _get_or_create_vault_state(db: Session) -> models.VaultState:
@@ -187,12 +284,15 @@ def auth_sign_in(credentials: schemas.AuthSignIn, db: Session = Depends(get_db))
         raise HTTPException(status_code=401, detail="Invalid email or password")
     if not user.is_active:
         raise HTTPException(status_code=403, detail="Account is disabled")
+    token = create_access_token(data={"sub": str(user.id)})
     return schemas.AuthResponse(
         id=str(user.id),
         email=user.email,
         name=user.username,
         avatar=None,
         status="ONLINE",
+        access_token=token,
+        token_type="bearer",
     )
 
 
@@ -210,12 +310,15 @@ def auth_register(user_data: schemas.UserCreate, db: Session = Depends(get_db)):
     db.add(db_user)
     db.commit()
     db.refresh(db_user)
+    token = create_access_token(data={"sub": str(db_user.id)})
     return schemas.AuthResponse(
         id=str(db_user.id),
         email=db_user.email,
         name=db_user.username,
         avatar=None,
         status="ONLINE",
+        access_token=token,
+        token_type="bearer",
     )
 
 
@@ -542,7 +645,7 @@ async def start_strategy_instance(request: Request, name: str, db: Session = Dep
         try:
             from src.strategies.base_strategy import StrategyConfig, StrategyTier
 
-            tier_map = {"hl_native": StrategyTier.A, "bonus_algos": StrategyTier.B, "bootcamp_bots": StrategyTier.C}
+            tier_map = {"A": StrategyTier.A, "B": StrategyTier.B, "C": StrategyTier.C, "D": StrategyTier.D}
             config = StrategyConfig(
                 name=instance.name,
                 symbol=instance.symbol,

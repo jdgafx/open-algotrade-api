@@ -32,6 +32,8 @@ class AuthResponse(BaseModel):
     name: str
     avatar: Optional[str] = None
     status: str = "ONLINE"
+    access_token: Optional[str] = None
+    token_type: str = "bearer"
 
 
 class Token(BaseModel):
