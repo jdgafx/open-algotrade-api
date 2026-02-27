@@ -33,7 +33,7 @@ async def lifespan(app: FastAPI):
 
     # ── 1. Core Trading Engine ──
     # TRADING_MODE: "paper" (no wallet needed), "testnet", or "mainnet"
-    trading_mode = os.getenv("TRADING_MODE", "testnet").lower()
+    trading_mode = os.getenv("TRADING_MODE", "paper").lower()
     paper_mode = trading_mode == "paper"
     client = None
     executor = None
