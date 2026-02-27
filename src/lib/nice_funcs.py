@@ -949,6 +949,116 @@ class HyperliquidClient:
         return current_vol > (avg_vol * vol_multiplier)
 
 
+class HyperliquidDataClient:
+    """
+    Read-only data client for Hyperliquid public API.
+
+    No wallet, no private key, no account needed.
+    Only fetches market data (OHLCV, prices, orderbooks, funding rates).
+    Drop-in replacement for HyperliquidClient where only data methods are needed.
+    """
+
+    def __init__(self, network: str = "mainnet"):
+        self.network = network.lower()
+        if self.network == "mainnet":
+            self.base_url = constants.MAINNET_API_URL
+        else:
+            self.base_url = constants.TESTNET_API_URL
+
+        self.vault_address = None
+        self.info = Info(self.base_url, skip_ws=True)
+
+        logger.info("HyperliquidDataClient initialized (read-only) | network=%s", self.network)
+
+    def get_ohlcv(
+        self,
+        symbol: str,
+        interval: str = "1h",
+        lookback_days: int = 7,
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None,
+    ) -> pd.DataFrame:
+        """Get OHLCV candle data (same as HyperliquidClient.get_ohlcv)."""
+        if end_time is None:
+            end_time = int(datetime.now().timestamp() * 1000)
+        if start_time is None:
+            start_dt = datetime.now() - timedelta(days=lookback_days)
+            start_time = int(start_dt.timestamp() * 1000)
+
+        url = f"{self.base_url}/info"
+        headers = {"Content-Type": "application/json"}
+        data = {
+            "type": "candleSnapshot",
+            "req": {
+                "coin": symbol,
+                "interval": interval,
+                "startTime": start_time,
+                "endTime": end_time,
+            },
+        }
+
+        response = requests.post(url, headers=headers, json=data)
+        response.raise_for_status()
+        snapshot = response.json()
+
+        if not snapshot:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(snapshot)
+        df = df.rename(columns={
+            "t": "timestamp", "T": "close_timestamp",
+            "o": "open", "h": "high", "l": "low", "c": "close",
+            "v": "volume", "n": "num_trades", "s": "symbol", "i": "interval",
+        })
+        for col in ["open", "high", "low", "close", "volume"]:
+            if col in df.columns:
+                df[col] = df[col].astype(float)
+        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+        return df
+
+    def ask_bid(self, symbol: str) -> Tuple[float, float, Dict]:
+        """Get current ask and bid prices."""
+        url = f"{self.base_url}/info"
+        data = {"type": "l2Book", "coin": symbol}
+        response = requests.post(url, headers={"Content-Type": "application/json"}, json=data)
+        response.raise_for_status()
+        l2_data = response.json()["levels"]
+        bid = float(l2_data[0][0]["px"])
+        ask = float(l2_data[1][0]["px"])
+        return ask, bid, l2_data
+
+    def get_all_mids(self) -> Dict[str, str]:
+        """Get mid prices for all coins."""
+        url = f"{self.base_url}/info"
+        data = {"type": "allMids"}
+        response = requests.post(url, headers={"Content-Type": "application/json"}, json=data)
+        response.raise_for_status()
+        return response.json()
+
+    def get_meta(self) -> Dict:
+        """Get exchange metadata."""
+        url = f"{self.base_url}/info"
+        data = {"type": "meta"}
+        response = requests.post(url, headers={"Content-Type": "application/json"}, json=data)
+        response.raise_for_status()
+        return response.json()
+
+    def get_funding_rate(self, symbol: str) -> Optional[float]:
+        """Get current funding rate."""
+        url = f"{self.base_url}/info"
+        data = {"type": "metaAndAssetCtxs"}
+        response = requests.post(url, headers={"Content-Type": "application/json"}, json=data)
+        response.raise_for_status()
+        result = response.json()
+        if isinstance(result, list) and len(result) >= 2:
+            universe = result[0]["universe"]
+            ctxs = result[1]
+            for i, asset in enumerate(universe):
+                if asset["name"] == symbol and i < len(ctxs):
+                    return float(ctxs[i].get("funding", 0))
+        return None
+
+
 # ──────────────────────────────────────────────
 # Module-level convenience functions
 # ──────────────────────────────────────────────

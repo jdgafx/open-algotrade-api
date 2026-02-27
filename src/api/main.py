@@ -4,6 +4,9 @@ import random
 from typing import List, Optional
 from datetime import datetime, timedelta, timezone
 from contextlib import asynccontextmanager
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from fastapi import FastAPI, Depends, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -29,45 +32,79 @@ async def lifespan(app: FastAPI):
     regime_detector = None
 
     # ── 1. Core Trading Engine ──
+    # TRADING_MODE: "paper" (no wallet needed), "testnet", or "mainnet"
+    trading_mode = os.getenv("TRADING_MODE", "testnet").lower()
+    paper_mode = trading_mode == "paper"
+    client = None
+    executor = None
+
+    if paper_mode:
+        # Paper trading: no wallet needed, simulated fills against live prices
+        try:
+            from src.execution.paper_executor import PaperTradingExecutor
+            from src.lib.nice_funcs import HyperliquidDataClient
+
+            initial_balance = float(os.getenv("PAPER_BALANCE", "10000"))
+            data_network = os.getenv("PAPER_PRICE_SOURCE", "mainnet")
+            client = HyperliquidDataClient(network=data_network)
+            executor = PaperTradingExecutor(
+                base_url=client.base_url,
+                initial_balance=initial_balance,
+            )
+            logger.info(
+                "PAPER MODE | balance=$%.0f | prices from %s",
+                initial_balance, data_network,
+            )
+        except Exception as e:
+            logger.warning("Could not initialize paper trading: %s", e)
+    else:
+        # Testnet or mainnet: requires wallet/private key
+        try:
+            from src.lib.nice_funcs import HyperliquidClient
+            from src.execution.hl_executor import HyperliquidVaultExecutor
+
+            network = "mainnet" if trading_mode == "mainnet" else "testnet"
+            client = HyperliquidClient(network=network)
+            executor = HyperliquidVaultExecutor(client=client)
+            logger.info("%s MODE | account=%s", network.upper(), client.account.address)
+        except Exception as e:
+            logger.warning("Could not initialize %s executor: %s", trading_mode, e)
+
     try:
-        from src.lib.nice_funcs import HyperliquidClient
-        from src.execution.hl_executor import HyperliquidVaultExecutor
-
-        client = HyperliquidClient()
-        executor = HyperliquidVaultExecutor(client=client)
-
         from src.engine.orchestrator import StrategyOrchestrator
-        orchestrator = StrategyOrchestrator(client=client, executor=executor)
-        logger.info("StrategyOrchestrator initialized")
+        if client and executor:
+            orchestrator = StrategyOrchestrator(client=client, executor=executor)
+            logger.info("StrategyOrchestrator initialized | mode=%s", trading_mode.upper())
     except Exception as e:
         logger.warning("Could not initialize StrategyOrchestrator: %s", e)
 
     # ── 2. Risk Controller (Layer 0: The Seatbelt) ──
     try:
         from src.services.risk_controller import RiskController
-        if client and executor:
+        if executor:
             risk_controller = RiskController(client=client, executor=executor)
-            logger.info("RiskController initialized (call /risk/start to activate)")
+            logger.info("RiskController initialized | mode=%s", trading_mode.upper())
         else:
-            logger.warning("RiskController skipped — no client/executor available")
+            logger.warning("RiskController skipped — no executor available")
     except Exception as e:
         logger.warning("Could not initialize RiskController: %s", e)
 
     # ── 3. Liquidation Tracker (Layer 1: The Eyes) ──
     try:
         from src.services.liquidation_tracker import LiquidationTracker
-        hl_base_url = client.base_url if client else "https://api.hyperliquid-testnet.xyz"
+        # Always use mainnet API for liquidation data (public, most data)
+        hl_base_url = client.base_url if client else "https://api.hyperliquid.xyz"
         liquidation_tracker = LiquidationTracker(base_url=hl_base_url)
-        logger.info("LiquidationTracker initialized")
+        logger.info("LiquidationTracker initialized | url=%s", hl_base_url)
     except Exception as e:
         logger.warning("Could not initialize LiquidationTracker: %s", e)
 
     # ── 4. Whale Tracker (Layer 1: The Eyes) ──
     try:
         from src.services.whale_tracker import WhaleTracker
-        hl_base_url = client.base_url if client else "https://api.hyperliquid-testnet.xyz"
+        hl_base_url = client.base_url if client else "https://api.hyperliquid.xyz"
         whale_tracker = WhaleTracker(base_url=hl_base_url)
-        logger.info("WhaleTracker initialized")
+        logger.info("WhaleTracker initialized | url=%s", hl_base_url)
     except Exception as e:
         logger.warning("Could not initialize WhaleTracker: %s", e)
 
@@ -94,6 +131,9 @@ async def lifespan(app: FastAPI):
     app.state.whale_tracker = whale_tracker
     app.state.rbi_agent = rbi_agent
     app.state.regime_detector = regime_detector
+    app.state.trading_mode = trading_mode
+    app.state.paper_mode = paper_mode
+    app.state.executor = executor
 
     yield
 
@@ -269,8 +309,108 @@ def _get_market_price(symbol: str) -> Optional[schemas.MarketPrice]:
 # ──────────────────────────────────────────────
 
 @app.get("/health")
-def health():
-    return {"status": "ok", "service": "open-algotrade-api", "version": "2.0.0"}
+def health(request: Request):
+    trading_mode = getattr(request.app.state, "trading_mode", "unknown")
+    executor = getattr(request.app.state, "executor", None)
+    result = {
+        "status": "ok",
+        "service": "open-algotrade-api",
+        "version": "2.0.0",
+        "trading_mode": trading_mode,
+    }
+    if executor and hasattr(executor, "get_execution_stats"):
+        result["execution_stats"] = executor.get_execution_stats()
+    return result
+
+
+# ──────────────────────────────────────────────
+# Trading Mode
+# ──────────────────────────────────────────────
+
+@app.get("/trading-mode")
+def get_trading_mode(request: Request):
+    """Get current trading mode and execution stats."""
+    trading_mode = getattr(request.app.state, "trading_mode", "unknown")
+    executor = getattr(request.app.state, "executor", None)
+    result = {
+        "mode": trading_mode,
+        "available_modes": ["paper", "testnet", "mainnet"],
+    }
+    if executor and hasattr(executor, "get_execution_stats"):
+        result["stats"] = executor.get_execution_stats()
+    return result
+
+
+@app.post("/trading-mode")
+async def set_trading_mode(request: Request):
+    """
+    Switch trading mode at runtime.
+
+    Stops all running strategies, swaps the executor and data client,
+    then lets you restart strategies in the new mode.
+    """
+    body = await request.json()
+    new_mode = body.get("mode", "").lower()
+    if new_mode not in ("paper", "testnet", "mainnet"):
+        raise HTTPException(status_code=400, detail=f"Invalid mode: {new_mode}. Use paper, testnet, or mainnet.")
+
+    old_mode = getattr(request.app.state, "trading_mode", "unknown")
+    if new_mode == old_mode:
+        return {"status": "unchanged", "mode": old_mode}
+
+    # Stop all running strategies first
+    orchestrator = getattr(request.app.state, "orchestrator", None)
+    if orchestrator:
+        try:
+            await orchestrator.stop_all()
+        except Exception as e:
+            logger.warning("Error stopping strategies during mode switch: %s", e)
+
+    client = None
+    executor = None
+
+    if new_mode == "paper":
+        from src.execution.paper_executor import PaperTradingExecutor
+        from src.lib.nice_funcs import HyperliquidDataClient
+
+        initial_balance = float(os.getenv("PAPER_BALANCE", "10000"))
+        price_source = body.get("price_source", os.getenv("PAPER_PRICE_SOURCE", "mainnet"))
+        client = HyperliquidDataClient(network=price_source)
+        executor = PaperTradingExecutor(
+            base_url=client.base_url,
+            initial_balance=initial_balance,
+        )
+        logger.info("Switched to PAPER mode | balance=$%.0f | prices=%s", initial_balance, price_source)
+    else:
+        from src.lib.nice_funcs import HyperliquidClient
+        from src.execution.hl_executor import HyperliquidVaultExecutor
+
+        network = "mainnet" if new_mode == "mainnet" else "testnet"
+        try:
+            client = HyperliquidClient(network=network)
+            executor = HyperliquidVaultExecutor(client=client)
+            logger.info("Switched to %s mode | account=%s", network.upper(), client.account.address)
+        except Exception as e:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to initialize {network} mode: {str(e)}. Check HYPERLIQUID_PRIVATE_KEY.",
+            )
+
+    # Rebuild orchestrator with new client/executor
+    if client and executor:
+        from src.engine.orchestrator import StrategyOrchestrator
+        request.app.state.orchestrator = StrategyOrchestrator(client=client, executor=executor)
+
+    request.app.state.executor = executor
+    request.app.state.trading_mode = new_mode
+    request.app.state.paper_mode = new_mode == "paper"
+
+    return {
+        "status": "switched",
+        "mode": new_mode,
+        "previous_mode": old_mode,
+        "message": f"Trading mode switched to {new_mode}. All strategies stopped — restart them to trade in {new_mode} mode.",
+    }
 
 
 # ──────────────────────────────────────────────
@@ -581,13 +721,31 @@ def create_strategy_instance(
 
 
 @app.get("/strategies/{name}", response_model=schemas.StrategyInstanceOut)
-def get_strategy_instance(name: str, db: Session = Depends(get_db)):
-    """Get a specific strategy instance by name."""
+def get_strategy_instance(name: str, request: Request, db: Session = Depends(get_db)):
+    """Get a specific strategy instance by name, enriched with live orchestrator stats."""
     instance = db.query(models.StrategyInstance).filter(
         models.StrategyInstance.name == name
     ).first()
     if not instance:
         raise HTTPException(status_code=404, detail=f"Strategy '{name}' not found")
+
+    # Merge live stats from orchestrator if strategy is running
+    orchestrator = getattr(request.app.state, "orchestrator", None)
+    if orchestrator and instance.status == "running":
+        strategy = orchestrator.get_strategy(name)
+        if strategy:
+            stats = strategy.get_stats()
+            instance.iterations = stats.get("iterations", instance.iterations)
+            instance.total_trades = stats.get("total_trades", instance.total_trades)
+            instance.winning_trades = stats.get("winning_trades", instance.winning_trades)
+            instance.losing_trades = stats.get("losing_trades", instance.losing_trades)
+            instance.total_pnl = stats.get("total_pnl", instance.total_pnl)
+            instance.max_drawdown = stats.get("max_drawdown", instance.max_drawdown)
+            instance.errors = stats.get("errors", instance.errors)
+            last_sig = stats.get("last_signal")
+            if last_sig:
+                instance.last_signal = last_sig
+
     return instance
 
 
