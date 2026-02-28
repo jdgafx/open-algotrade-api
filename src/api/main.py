@@ -692,6 +692,101 @@ def withdraw(withdrawal: schemas.WithdrawCreate, db: Session = Depends(get_db)):
     return db_withdrawal
 
 
+# ──────────────────────────────────────────────
+# Portfolio Summary & Allocation
+# (must be registered BEFORE /portfolio/{user_id} to avoid path collision)
+# ──────────────────────────────────────────────
+
+@app.get("/portfolio/summary", response_model=schemas.PortfolioSummary)
+def portfolio_summary(request: Request, db: Session = Depends(get_db)):
+    """Portfolio-level stats: total PnL, exposure, mode, strategy counts."""
+    trading_mode = getattr(request.app.state, "trading_mode", "unknown")
+    executor = getattr(request.app.state, "executor", None)
+    paper_mode = getattr(request.app.state, "paper_mode", False)
+
+    instances = db.query(models.StrategyInstance).all()
+    running = sum(1 for i in instances if i.status == "running")
+    total_trades = sum(i.total_trades for i in instances)
+    winning = sum(i.winning_trades for i in instances)
+    agg_pnl = sum(i.total_pnl for i in instances)
+    win_rate = (winning / total_trades * 100) if total_trades > 0 else 0.0
+
+    total_equity = 0.0
+    initial_equity = 0.0
+    max_dd_pct = 0.0
+    active_positions = 0
+
+    if paper_mode and executor and hasattr(executor, "get_execution_stats"):
+        stats = executor.get_execution_stats()
+        total_equity = stats.get("balance", 0)
+        initial_equity = stats.get("initial_balance", 0)
+        max_dd_pct = stats.get("max_drawdown_pct", 0)
+        active_positions = stats.get("active_positions", 0)
+        agg_pnl = stats.get("total_realized_pnl", agg_pnl)
+    else:
+        vault = _get_or_create_vault_state(db)
+        total_equity = vault.total_equity
+        initial_equity = vault.total_equity
+        positions = _get_live_positions()
+        active_positions = len(positions)
+
+    total_return_pct = (
+        ((total_equity - initial_equity) / initial_equity * 100)
+        if initial_equity > 0
+        else 0.0
+    )
+
+    total_exposure = sum(i.size_usd for i in instances if i.status == "running")
+
+    return schemas.PortfolioSummary(
+        trading_mode=trading_mode,
+        total_equity=round(total_equity, 2),
+        initial_equity=round(initial_equity, 2),
+        total_pnl=round(agg_pnl, 2),
+        total_return_pct=round(total_return_pct, 2),
+        max_drawdown_pct=round(max_dd_pct, 2),
+        total_strategies=len(instances),
+        running_strategies=running,
+        total_trades=total_trades,
+        win_rate=round(win_rate, 1),
+        active_positions=active_positions,
+        total_exposure_usd=round(total_exposure, 2),
+    )
+
+
+@app.get("/portfolio/allocation", response_model=schemas.PortfolioAllocationResponse)
+def portfolio_allocation(request: Request, db: Session = Depends(get_db)):
+    """Current strategy allocation showing size and percentage of total."""
+    instances = db.query(models.StrategyInstance).all()
+    orchestrator = getattr(request.app.state, "orchestrator", None)
+
+    total_allocated = sum(i.size_usd for i in instances)
+
+    items = []
+    for inst in instances:
+        current_pnl = inst.total_pnl
+        if orchestrator and inst.status == "running":
+            strategy = orchestrator.get_strategy(inst.name)
+            if strategy:
+                current_pnl = strategy.state.total_pnl
+
+        alloc_pct = (inst.size_usd / total_allocated * 100) if total_allocated > 0 else 0.0
+        items.append(schemas.AllocationItem(
+            strategy_name=inst.name,
+            strategy_type=inst.strategy_type,
+            symbol=inst.symbol,
+            status=inst.status,
+            size_usd=inst.size_usd,
+            allocation_pct=round(alloc_pct, 1),
+            current_pnl=round(current_pnl, 2),
+        ))
+
+    return schemas.PortfolioAllocationResponse(
+        total_allocated_usd=round(total_allocated, 2),
+        strategies=items,
+    )
+
+
 @app.get("/portfolio/{user_id}", response_model=schemas.Portfolio)
 def get_portfolio(user_id: int, db: Session = Depends(get_db)):
     user = db.query(models.User).filter(models.User.id == user_id).first()
@@ -834,6 +929,77 @@ def create_strategy_instance(
     db.commit()
     db.refresh(instance)
     return instance
+
+
+# ──────────────────────────────────────────────
+# Aggregate Strategy Performance
+# (must be registered BEFORE /strategies/{name} to avoid path collision)
+# ──────────────────────────────────────────────
+
+@app.get("/strategies/performance", response_model=schemas.AggregatePerformanceResponse)
+def get_strategies_performance(request: Request, db: Session = Depends(get_db)):
+    """Aggregate performance across all strategy instances."""
+    instances = db.query(models.StrategyInstance).all()
+    orchestrator = getattr(request.app.state, "orchestrator", None)
+
+    items = []
+    for inst in instances:
+        total_trades = inst.total_trades
+        winning_trades = inst.winning_trades
+        losing_trades = inst.losing_trades
+        total_pnl = inst.total_pnl
+        max_drawdown = inst.max_drawdown
+
+        if orchestrator and inst.status == "running":
+            strategy = orchestrator.get_strategy(inst.name)
+            if strategy:
+                stats = strategy.get_stats()
+                total_trades = stats.get("total_trades", total_trades)
+                winning_trades = stats.get("winning_trades", winning_trades)
+                losing_trades = stats.get("losing_trades", losing_trades)
+                total_pnl = stats.get("total_pnl", total_pnl)
+                max_drawdown = stats.get("max_drawdown", max_drawdown)
+
+        win_rate = (winning_trades / total_trades * 100) if total_trades > 0 else 0.0
+        avg_trade = total_pnl / total_trades if total_trades > 0 else 0.0
+
+        gross_profit = total_pnl if total_pnl > 0 else 0.0
+        gross_loss = abs(total_pnl) if total_pnl < 0 else 0.0
+        profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else 0.0
+
+        items.append(schemas.StrategyPerformanceItem(
+            name=inst.name,
+            strategy_type=inst.strategy_type,
+            symbol=inst.symbol,
+            status=inst.status,
+            total_pnl=round(total_pnl, 2),
+            total_trades=total_trades,
+            winning_trades=winning_trades,
+            losing_trades=losing_trades,
+            win_rate=round(win_rate, 1),
+            max_drawdown=round(max_drawdown, 2),
+            avg_trade_pnl=round(avg_trade, 2),
+            profit_factor=round(profit_factor, 3),
+        ))
+
+    agg_trades = sum(i.total_trades for i in items)
+    agg_winning = sum(i.winning_trades for i in items)
+    agg_pnl = sum(i.total_pnl for i in items)
+    overall_wr = (agg_winning / agg_trades * 100) if agg_trades > 0 else 0.0
+
+    best = max(items, key=lambda x: x.total_pnl).name if items else None
+    worst = min(items, key=lambda x: x.total_pnl).name if items else None
+
+    return schemas.AggregatePerformanceResponse(
+        total_strategies=len(instances),
+        running_strategies=sum(1 for i in instances if i.status == "running"),
+        total_pnl=round(agg_pnl, 2),
+        total_trades=agg_trades,
+        overall_win_rate=round(overall_wr, 1),
+        best_strategy=best,
+        worst_strategy=worst,
+        strategies=items,
+    )
 
 
 @app.get("/strategies/{name}", response_model=schemas.StrategyInstanceOut)
@@ -1439,76 +1605,6 @@ def get_deposits(user_id: int, db: Session = Depends(get_db)):
 
 
 # ──────────────────────────────────────────────
-# Aggregate Strategy Performance
-# ──────────────────────────────────────────────
-
-@app.get("/strategies/performance", response_model=schemas.AggregatePerformanceResponse)
-def get_strategies_performance(request: Request, db: Session = Depends(get_db)):
-    """Aggregate performance across all strategy instances."""
-    instances = db.query(models.StrategyInstance).all()
-    orchestrator = getattr(request.app.state, "orchestrator", None)
-
-    items = []
-    for inst in instances:
-        total_trades = inst.total_trades
-        winning_trades = inst.winning_trades
-        losing_trades = inst.losing_trades
-        total_pnl = inst.total_pnl
-        max_drawdown = inst.max_drawdown
-
-        if orchestrator and inst.status == "running":
-            strategy = orchestrator.get_strategy(inst.name)
-            if strategy:
-                stats = strategy.get_stats()
-                total_trades = stats.get("total_trades", total_trades)
-                winning_trades = stats.get("winning_trades", winning_trades)
-                losing_trades = stats.get("losing_trades", losing_trades)
-                total_pnl = stats.get("total_pnl", total_pnl)
-                max_drawdown = stats.get("max_drawdown", max_drawdown)
-
-        win_rate = (winning_trades / total_trades * 100) if total_trades > 0 else 0.0
-        avg_trade = total_pnl / total_trades if total_trades > 0 else 0.0
-
-        gross_profit = total_pnl if total_pnl > 0 else 0.0
-        gross_loss = abs(total_pnl) if total_pnl < 0 else 0.0
-        profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else 0.0
-
-        items.append(schemas.StrategyPerformanceItem(
-            name=inst.name,
-            strategy_type=inst.strategy_type,
-            symbol=inst.symbol,
-            status=inst.status,
-            total_pnl=round(total_pnl, 2),
-            total_trades=total_trades,
-            winning_trades=winning_trades,
-            losing_trades=losing_trades,
-            win_rate=round(win_rate, 1),
-            max_drawdown=round(max_drawdown, 2),
-            avg_trade_pnl=round(avg_trade, 2),
-            profit_factor=round(profit_factor, 3),
-        ))
-
-    agg_trades = sum(i.total_trades for i in items)
-    agg_winning = sum(i.winning_trades for i in items)
-    agg_pnl = sum(i.total_pnl for i in items)
-    overall_wr = (agg_winning / agg_trades * 100) if agg_trades > 0 else 0.0
-
-    best = max(items, key=lambda x: x.total_pnl).name if items else None
-    worst = min(items, key=lambda x: x.total_pnl).name if items else None
-
-    return schemas.AggregatePerformanceResponse(
-        total_strategies=len(instances),
-        running_strategies=sum(1 for i in instances if i.status == "running"),
-        total_pnl=round(agg_pnl, 2),
-        total_trades=agg_trades,
-        overall_win_rate=round(overall_wr, 1),
-        best_strategy=best,
-        worst_strategy=worst,
-        strategies=items,
-    )
-
-
-# ──────────────────────────────────────────────
 # Strategy Trades
 # ──────────────────────────────────────────────
 
@@ -1706,100 +1802,6 @@ async def optimize_strategy(name: str, data: schemas.OptimizeRequest, db: Sessio
         best_return_pct=round(best["total_return_pct"], 2),
         best_win_rate=round(best["win_rate"], 2),
         top_results=top_results,
-    )
-
-
-# ──────────────────────────────────────────────
-# Portfolio Summary & Allocation
-# ──────────────────────────────────────────────
-
-@app.get("/portfolio/summary", response_model=schemas.PortfolioSummary)
-def portfolio_summary(request: Request, db: Session = Depends(get_db)):
-    """Portfolio-level stats: total PnL, exposure, mode, strategy counts."""
-    trading_mode = getattr(request.app.state, "trading_mode", "unknown")
-    executor = getattr(request.app.state, "executor", None)
-    paper_mode = getattr(request.app.state, "paper_mode", False)
-
-    instances = db.query(models.StrategyInstance).all()
-    running = sum(1 for i in instances if i.status == "running")
-    total_trades = sum(i.total_trades for i in instances)
-    winning = sum(i.winning_trades for i in instances)
-    agg_pnl = sum(i.total_pnl for i in instances)
-    win_rate = (winning / total_trades * 100) if total_trades > 0 else 0.0
-
-    total_equity = 0.0
-    initial_equity = 0.0
-    max_dd_pct = 0.0
-    active_positions = 0
-
-    if paper_mode and executor and hasattr(executor, "get_execution_stats"):
-        stats = executor.get_execution_stats()
-        total_equity = stats.get("balance", 0)
-        initial_equity = stats.get("initial_balance", 0)
-        max_dd_pct = stats.get("max_drawdown_pct", 0)
-        active_positions = stats.get("active_positions", 0)
-        agg_pnl = stats.get("total_realized_pnl", agg_pnl)
-    else:
-        vault = _get_or_create_vault_state(db)
-        total_equity = vault.total_equity
-        initial_equity = vault.total_equity
-        positions = _get_live_positions()
-        active_positions = len(positions)
-
-    total_return_pct = (
-        ((total_equity - initial_equity) / initial_equity * 100)
-        if initial_equity > 0
-        else 0.0
-    )
-
-    total_exposure = sum(i.size_usd for i in instances if i.status == "running")
-
-    return schemas.PortfolioSummary(
-        trading_mode=trading_mode,
-        total_equity=round(total_equity, 2),
-        initial_equity=round(initial_equity, 2),
-        total_pnl=round(agg_pnl, 2),
-        total_return_pct=round(total_return_pct, 2),
-        max_drawdown_pct=round(max_dd_pct, 2),
-        total_strategies=len(instances),
-        running_strategies=running,
-        total_trades=total_trades,
-        win_rate=round(win_rate, 1),
-        active_positions=active_positions,
-        total_exposure_usd=round(total_exposure, 2),
-    )
-
-
-@app.get("/portfolio/allocation", response_model=schemas.PortfolioAllocationResponse)
-def portfolio_allocation(request: Request, db: Session = Depends(get_db)):
-    """Current strategy allocation showing size and percentage of total."""
-    instances = db.query(models.StrategyInstance).all()
-    orchestrator = getattr(request.app.state, "orchestrator", None)
-
-    total_allocated = sum(i.size_usd for i in instances)
-
-    items = []
-    for inst in instances:
-        current_pnl = inst.total_pnl
-        if orchestrator and inst.status == "running":
-            strategy = orchestrator.get_strategy(inst.name)
-            if strategy:
-                current_pnl = strategy.state.total_pnl
-
-        alloc_pct = (inst.size_usd / total_allocated * 100) if total_allocated > 0 else 0.0
-        items.append(schemas.AllocationItem(
-            strategy_name=inst.name,
-            strategy_type=inst.strategy_type,
-            symbol=inst.symbol,
-            status=inst.status,
-            size_usd=inst.size_usd,
-            allocation_pct=round(alloc_pct, 1),
-            current_pnl=round(current_pnl, 2),
-        ))
-
-    return schemas.PortfolioAllocationResponse(
-        total_allocated_usd=round(total_allocated, 2),
-        strategies=items,
     )
 
 
