@@ -329,11 +329,11 @@ class Backtester:
                 raise ValueError(f"No data returned for {symbol}")
 
             df = pd.DataFrame(all_candles, columns=["timestamp", "open", "high", "low", "close", "volume"])
-            df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+            df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
             df.set_index("timestamp", inplace=True)
 
             if end_date:
-                end_dt = pd.Timestamp(end_date)
+                end_dt = pd.Timestamp(end_date, tz="UTC")
                 df = df[df.index <= end_dt]
 
             return df
