@@ -879,9 +879,64 @@ def get_strategy_registry():
 
 
 @app.get("/strategies", response_model=List[schemas.StrategyInstanceOut])
-def list_strategy_instances(db: Session = Depends(get_db)):
-    """List all configured strategy instances."""
+def list_strategy_instances(request: Request, db: Session = Depends(get_db)):
+    """List all configured strategy instances, merged with live paper executor data."""
     instances = db.query(models.StrategyInstance).all()
+
+    # Merge paper executor stats into DB records
+    executor = getattr(request.app.state, "executor", None)
+    if executor and hasattr(executor, "get_execution_stats"):
+        try:
+            trades = executor.get_trade_history() if hasattr(executor, "get_trade_history") else []
+            active_pos = executor.get_active_positions() if hasattr(executor, "get_active_positions") else {}
+
+            # Build per-strategy breakdown from trade history
+            strat_trades: dict = {}
+            for t in trades:
+                sname = t.get("strategy", "unknown")
+                if sname not in strat_trades:
+                    strat_trades[sname] = {"total": 0, "wins": 0, "pnl": 0.0}
+                strat_trades[sname]["total"] += 1
+                pnl = t.get("pnl", 0.0)
+                strat_trades[sname]["pnl"] += pnl
+                if pnl > 0:
+                    strat_trades[sname]["wins"] += 1
+
+            # Match active positions to strategies
+            strat_positions: dict = {}
+            for key, pos_info in active_pos.items():
+                sname = pos_info.get("strategy", "")
+                if sname:
+                    strat_positions[sname] = pos_info
+
+            for inst in instances:
+                if inst.name in strat_trades:
+                    sd = strat_trades[inst.name]
+                    inst.total_trades = sd["total"]
+                    inst.winning_trades = sd["wins"]
+                    inst.losing_trades = sd["total"] - sd["wins"]
+                    inst.total_pnl = round(sd["pnl"], 4)
+                if inst.name in strat_positions:
+                    inst.last_signal = strat_positions[inst.name].get("side", inst.last_signal)
+        except Exception as e:
+            logger.warning("Failed to merge paper stats: %s", e)
+
+    # Also merge orchestrator iteration data
+    orchestrator = getattr(request.app.state, "orchestrator", None)
+    if orchestrator:
+        try:
+            for inst in instances:
+                strat = orchestrator.get_strategy(inst.name)
+                if strat and hasattr(strat, "state"):
+                    inst.iterations = getattr(strat.state, "iterations", inst.iterations)
+                    inst.errors = getattr(strat.state, "errors", inst.errors)
+                    if hasattr(strat.state, "last_signal") and strat.state.last_signal:
+                        inst.last_signal = str(strat.state.last_signal)
+                    if hasattr(strat.state, "last_signal_time") and strat.state.last_signal_time:
+                        inst.last_signal_time = strat.state.last_signal_time
+        except Exception as e:
+            logger.warning("Failed to merge orchestrator stats: %s", e)
+
     return instances
 
 
@@ -1446,18 +1501,47 @@ async def reset_paper_trading(request: Request):
 # ──────────────────────────────────────────────
 
 @app.get("/dashboard/stats", response_model=schemas.DashboardStats)
-def dashboard_stats(db: Session = Depends(get_db)):
-    """Get aggregated dashboard statistics."""
+def dashboard_stats(request: Request, db: Session = Depends(get_db)):
+    """Get aggregated dashboard statistics, with live paper executor data."""
     instances = db.query(models.StrategyInstance).all()
     total = len(instances)
     running = sum(1 for i in instances if i.status == "running")
-    total_pnl = sum(i.total_pnl for i in instances)
-    total_trades = sum(i.total_trades for i in instances)
-    winning = sum(i.winning_trades for i in instances)
+
+    # Try to get live stats from paper executor
+    executor = getattr(request.app.state, "executor", None)
+    total_pnl = 0.0
+    total_trades = 0
+    winning = 0
+    active_positions = 0
+    balance = None
+
+    if executor and hasattr(executor, "get_execution_stats"):
+        try:
+            stats = executor.get_execution_stats()
+            total_pnl = stats.get("total_realized_pnl", 0.0)
+            total_trades = stats.get("total_trades", 0)
+            active_positions = stats.get("active_positions", 0)
+            balance = stats.get("balance", None)
+            # Count wins from trade history
+            if hasattr(executor, "get_trade_history"):
+                for t in executor.get_trade_history():
+                    if t.get("pnl", 0) > 0:
+                        winning += 1
+        except Exception:
+            pass
+
+    if total_trades == 0:
+        # Fallback to DB records
+        total_pnl = sum(i.total_pnl for i in instances)
+        total_trades = sum(i.total_trades for i in instances)
+        winning = sum(i.winning_trades for i in instances)
+
     win_rate = (winning / total_trades * 100) if total_trades > 0 else 0.0
 
-    live_equity = _get_live_vault_equity()
-    positions = _get_live_positions()
+    live_equity = balance or _get_live_vault_equity()
+    if active_positions == 0:
+        positions = _get_live_positions()
+        active_positions = len(positions)
 
     return schemas.DashboardStats(
         total_strategies=total,
@@ -1466,7 +1550,7 @@ def dashboard_stats(db: Session = Depends(get_db)):
         total_trades=total_trades,
         win_rate=round(win_rate, 1),
         vault_equity=live_equity,
-        active_positions=len(positions),
+        active_positions=active_positions,
     )
 
 
