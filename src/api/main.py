@@ -72,15 +72,32 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning("Could not initialize %s executor: %s", trading_mode, e)
 
+    # ── 2. Regime Detector (moved before orchestrator so it can be injected) ──
+    try:
+        from src.services.regime_detector import RegimeDetector
+        regime_detector = RegimeDetector()
+        logger.info("RegimeDetector initialized")
+    except Exception as e:
+        logger.warning("Could not initialize RegimeDetector: %s", e)
+
+    # ── 3. Strategy Orchestrator (with MoonDev profitability controls) ──
     try:
         from src.engine.orchestrator import StrategyOrchestrator
         if client and executor:
-            orchestrator = StrategyOrchestrator(client=client, executor=executor)
-            logger.info("StrategyOrchestrator initialized | mode=%s", trading_mode.upper())
+            orchestrator = StrategyOrchestrator(
+                client=client,
+                executor=executor,
+                regime_detector=regime_detector,
+                # MoonDev profitability controls
+                max_global_trades_per_hour=6,      # Max 6 entries/hr across ALL strategies
+                daily_loss_limit_pct=2.0,           # Hard stop at -2% daily ($200 on $10k)
+                max_portfolio_exposure_pct=80.0,    # Max 80% of account in positions
+            )
+            logger.info("StrategyOrchestrator initialized | mode=%s | regime_gate=ON", trading_mode.upper())
     except Exception as e:
         logger.warning("Could not initialize StrategyOrchestrator: %s", e)
 
-    # ── 2. Risk Controller (Layer 0: The Seatbelt) ──
+    # ── 4. Risk Controller (Layer 0: The Seatbelt) ──
     try:
         from src.services.risk_controller import RiskController
         if executor:
@@ -91,17 +108,16 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("Could not initialize RiskController: %s", e)
 
-    # ── 3. Liquidation Tracker (Layer 1: The Eyes) ──
+    # ── 5. Liquidation Tracker (Layer 1: The Eyes) ──
     try:
         from src.services.liquidation_tracker import LiquidationTracker
-        # Always use mainnet API for liquidation data (public, most data)
         hl_base_url = client.base_url if client else "https://api.hyperliquid.xyz"
         liquidation_tracker = LiquidationTracker(base_url=hl_base_url)
         logger.info("LiquidationTracker initialized | url=%s", hl_base_url)
     except Exception as e:
         logger.warning("Could not initialize LiquidationTracker: %s", e)
 
-    # ── 4. Whale Tracker (Layer 1: The Eyes) ──
+    # ── 6. Whale Tracker (Layer 1: The Eyes) ──
     try:
         from src.services.whale_tracker import WhaleTracker
         hl_base_url = client.base_url if client else "https://api.hyperliquid.xyz"
@@ -110,7 +126,7 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("Could not initialize WhaleTracker: %s", e)
 
-    # ── 5. RBI Agent (Layer 2: The Brain) ──
+    # ── 7. RBI Agent (Layer 2: The Brain) ──
     try:
         from src.services.rbi_agent import RBIAgentManager
         rbi_agent = RBIAgentManager()
@@ -118,15 +134,7 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("Could not initialize RBIAgentManager: %s", e)
 
-    # ── 6. Regime Detector (Layer 2: The Brain) ──
-    try:
-        from src.services.regime_detector import RegimeDetector
-        regime_detector = RegimeDetector()
-        logger.info("RegimeDetector initialized")
-    except Exception as e:
-        logger.warning("Could not initialize RegimeDetector: %s", e)
-
-    # ── 7. Solana DEX Scanner ──
+    # ── 8. Solana DEX Scanner ──
     solana_scanner = None
     try:
         solana_enabled = os.getenv("SOLANA_SCANNER_ENABLED", "true").lower() == "true"
@@ -1661,6 +1669,31 @@ def dashboard_performance(db: Session = Depends(get_db)):
         equity_curve=equity_curve,
         strategy_breakdown=breakdown,
     )
+
+
+# ──────────────────────────────────────────────
+# Profitability Controls (MoonDev Intel)
+# ──────────────────────────────────────────────
+
+@app.get("/profitability/controls")
+def profitability_controls(request: Request):
+    """Get MoonDev profitability control stats: regime gate, rate limits, daily loss guard."""
+    orchestrator = getattr(request.app.state, "orchestrator", None)
+    regime_detector = getattr(request.app.state, "regime_detector", None)
+
+    result = {
+        "orchestrator_active": orchestrator is not None,
+        "regime_detector_active": regime_detector is not None,
+    }
+
+    if orchestrator and hasattr(orchestrator, "get_profitability_stats"):
+        result["profitability"] = orchestrator.get_profitability_stats()
+
+    if regime_detector:
+        result["regimes"] = regime_detector.get_all_regimes()
+        result["volatility"] = regime_detector.get_volatility_status()
+
+    return result
 
 
 # ──────────────────────────────────────────────

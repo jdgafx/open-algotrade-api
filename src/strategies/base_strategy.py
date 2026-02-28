@@ -53,7 +53,7 @@ class StrategyConfig:
     tier: StrategyTier = StrategyTier.A
     timeframe: str = "1h"
     leverage: int = 3
-    size_usd: float = 100.0
+    size_usd: float = 50.0  # Reduced from $100 (MoonDev: "tiny size, tiny size" for forward testing)
     max_positions: int = 1
     target_pct: float = 5.0
     max_loss_pct: float = -10.0

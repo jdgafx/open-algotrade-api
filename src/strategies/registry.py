@@ -102,16 +102,21 @@ def _register_all():
     # TIER A — Battle-tested HL native strategies
     # ═══════════════════════════════════════════════════════════════════
 
+    # ── MoonDev profitability tuning applied ──
+    # Key changes: longer cooldowns, fewer trades/hour, higher signal thresholds,
+    # trailing stops, and regime-appropriate parameters.
+    # Reference: MoonDev Videos 49, 53, 71, 74, 104, 115, 164, 191
+
     register_strategy(
         "turtle", TurtleHLStrategy, StrategyTier.A,
         "55-bar breakout with ATR trailing stops and take profit",
         "BTC", "1h",
         {
             "lookback_period": 55, "atr_period": 20, "atr_multiplier": 3.0,
-            "take_profit_pct": 0.05,  # 5% TP for trend-following breakout
-            # Anti-overtrading
-            "min_hold_bars": 5, "cooldown_seconds": 600, "max_trades_per_hour": 2,
-            "min_signal_strength": 0.5,
+            "take_profit_pct": 0.075,  # 7.5% TP (MoonDev Video 104)
+            # Anti-overtrading (MoonDev: min 20min between trades)
+            "min_hold_bars": 8, "cooldown_seconds": 1800, "max_trades_per_hour": 1,
+            "min_signal_strength": 0.65,
         },
         category="breakout", risk_level="medium",
     )
@@ -122,8 +127,8 @@ def _register_all():
         {
             "bb_period": 20, "bb_std": 2.0, "squeeze_threshold": 0.04,
             # Anti-overtrading
-            "min_hold_bars": 4, "cooldown_seconds": 600, "max_trades_per_hour": 2,
-            "min_signal_strength": 0.5,
+            "min_hold_bars": 6, "cooldown_seconds": 1800, "max_trades_per_hour": 1,
+            "min_signal_strength": 0.6,
         },
         category="breakout", risk_level="medium",
     )
@@ -134,8 +139,8 @@ def _register_all():
         {
             "zone_lookback_days": 30, "zone_threshold": 0.02,
             # Anti-overtrading
-            "min_hold_bars": 3, "cooldown_seconds": 900, "max_trades_per_hour": 2,
-            "min_signal_strength": 0.5,
+            "min_hold_bars": 4, "cooldown_seconds": 3600, "max_trades_per_hour": 1,
+            "min_signal_strength": 0.6,
         },
         category="reversal", risk_level="medium",
     )
@@ -146,8 +151,8 @@ def _register_all():
         {
             "vwap_bias_long": 0.7, "vwap_bias_short": 0.3,
             # Anti-overtrading
-            "min_hold_bars": 4, "cooldown_seconds": 600, "max_trades_per_hour": 3,
-            "min_signal_strength": 0.5,
+            "min_hold_bars": 6, "cooldown_seconds": 1200, "max_trades_per_hour": 1,
+            "min_signal_strength": 0.6,
         },
         category="trend", risk_level="low",
     )
@@ -157,12 +162,12 @@ def _register_all():
         "BTC", "1h",
         {
             "symbol_a": "BTC", "symbol_b": "ETH",
-            "funding_threshold": 0.001,  # Raised from 0.0005 to filter weak spreads
+            "funding_threshold": 0.001,
             "combined_target_pct": 3.0,
-            "momentum_threshold": 0.02,  # Raised from 0.01 for fallback mode
-            # Anti-overtrading
-            "min_hold_bars": 6, "cooldown_seconds": 1800, "max_trades_per_hour": 1,
-            "min_signal_strength": 0.6,
+            "momentum_threshold": 0.02,
+            # Anti-overtrading (arb needs very low frequency)
+            "min_hold_bars": 8, "cooldown_seconds": 3600, "max_trades_per_hour": 1,
+            "min_signal_strength": 0.7,
         },
         category="arbitrage", risk_level="low",
     )
@@ -177,13 +182,12 @@ def _register_all():
         "SOL", "15m",
         {
             "leader": "ETH", "correlation_window": 20,
-            "lag_threshold": 0.005,  # Raised from 0.002 to filter noise
-            "sl_pct": 0.015,   # Widened from 0.2% to 1.5% -- crypto needs room
-            "tp_pct": 0.025,   # Widened from 0.25% to 2.5% -- realistic target
-            "momentum_threshold": 0.015,  # Raised from 0.01 for fallback mode
-            # Anti-overtrading
-            "min_hold_bars": 5, "cooldown_seconds": 600, "max_trades_per_hour": 2,
-            "min_signal_strength": 0.6,
+            "lag_threshold": 0.005,
+            "sl_pct": 0.015, "tp_pct": 0.025,
+            "momentum_threshold": 0.015,
+            # Anti-overtrading (MoonDev: min 20min cooldown)
+            "min_hold_bars": 6, "cooldown_seconds": 1200, "max_trades_per_hour": 1,
+            "min_signal_strength": 0.65,
         },
         category="statistical", risk_level="medium",
     )
@@ -194,11 +198,10 @@ def _register_all():
         {
             "atr_period": 14, "deviance_threshold": 0.35,
             "range_position_buy": 0.25, "range_position_sell": 0.75,
-            "tp_pct": 0.02,   # Widened from 0.3% to 2% -- breakouts need room
-            "sl_pct": 0.015,  # Widened from 0.25% to 1.5%
+            "tp_pct": 0.02, "sl_pct": 0.015,
             # Anti-overtrading
-            "min_hold_bars": 4, "cooldown_seconds": 600, "max_trades_per_hour": 2,
-            "min_signal_strength": 0.5,
+            "min_hold_bars": 6, "cooldown_seconds": 1200, "max_trades_per_hour": 1,
+            "min_signal_strength": 0.6,
         },
         category="breakout", risk_level="medium",
     )
@@ -211,8 +214,8 @@ def _register_all():
             "stoch_period": 14, "stoch_k": 3, "stoch_d": 3,
             "overbought": 80, "oversold": 20,
             # Anti-overtrading
-            "min_hold_bars": 4, "cooldown_seconds": 600, "max_trades_per_hour": 2,
-            "min_signal_strength": 0.6,
+            "min_hold_bars": 6, "cooldown_seconds": 1200, "max_trades_per_hour": 1,
+            "min_signal_strength": 0.65,
         },
         category="statistical", risk_level="medium",
     )
@@ -221,13 +224,12 @@ def _register_all():
         "Spread-based market making with kill switch and ATR no-trade zones",
         "BTC", "1m",
         {
-            "spread": 0.003,  # Widened from 0.1% to 0.3% -- must cover slippage+commission
-            "max_position_usd": 500.0,  # Reduced from 1000
-            "kill_size_usd": 1000.0,  # Reduced from 2000
-            "atr_period": 14, "refresh_seconds": 10,
-            # Anti-overtrading
-            "min_hold_bars": 2, "cooldown_seconds": 120, "max_trades_per_hour": 6,
-            "min_signal_strength": 0.3,
+            "spread": 0.003,
+            "max_position_usd": 500.0, "kill_size_usd": 1000.0,
+            "atr_period": 14, "refresh_seconds": 30,  # MoonDev: 30s sleep between MM iterations
+            # Anti-overtrading (MoonDev Video 191: "traded in last 20 min? chill")
+            "min_hold_bars": 3, "cooldown_seconds": 1200, "max_trades_per_hour": 2,
+            "min_signal_strength": 0.5,
         },
         category="market_making", risk_level="high",
     )
@@ -238,14 +240,13 @@ def _register_all():
         {
             "sma_trend_period": 20, "sma_entry_period": 20,
             "trend_timeframe": "4h", "entry_timeframe": "15m",
-            "reversion_target_pct": 0.015,  # Raised from 0.3% to 1.5%
-            "zscore_entry": 2.0,  # Raised from 1.5 to require stronger deviation
-            "zscore_exit": 0.3,   # Tighter exit -- take profit closer to mean
+            "reversion_target_pct": 0.015,
+            "zscore_entry": 2.0, "zscore_exit": 0.3,
             "bb_period": 20, "bb_std": 2.0,
             "dynamic_sizing": True,
-            # Anti-overtrading
-            "min_hold_bars": 4, "cooldown_seconds": 600, "max_trades_per_hour": 2,
-            "min_signal_strength": 0.6,
+            # Anti-overtrading (mean reversion needs patience)
+            "min_hold_bars": 6, "cooldown_seconds": 1800, "max_trades_per_hour": 1,
+            "min_signal_strength": 0.65,
         },
         category="mean_reversion", risk_level="medium",
     )
@@ -261,8 +262,8 @@ def _register_all():
         {
             "sma_period": 20, "support_lookback": 20,
             # Anti-overtrading
-            "min_hold_bars": 5, "cooldown_seconds": 900, "max_trades_per_hour": 2,
-            "min_signal_strength": 0.5,
+            "min_hold_bars": 8, "cooldown_seconds": 1800, "max_trades_per_hour": 1,
+            "min_signal_strength": 0.6,
         },
         category="trend", risk_level="low",
     )
@@ -271,15 +272,15 @@ def _register_all():
         "RSI overbought/oversold reversal strategy",
         "BTC", "1h",
         {
-            "rsi_period": 14, "oversold": 25, "overbought": 75,  # Tighter thresholds
+            "rsi_period": 14, "oversold": 25, "overbought": 75,
             "trend_mode": True, "divergence_mode": True,
-            "trend_rsi_threshold_long": 58,   # Raised from 55
-            "trend_rsi_threshold_short": 42,  # Lowered from 45
+            "trend_rsi_threshold_long": 58,
+            "trend_rsi_threshold_short": 42,
             "divergence_lookback": 14,
             "rsi_momentum_period": 3,
             # Anti-overtrading
-            "min_hold_bars": 5, "cooldown_seconds": 600, "max_trades_per_hour": 2,
-            "min_signal_strength": 0.6,
+            "min_hold_bars": 8, "cooldown_seconds": 1800, "max_trades_per_hour": 1,
+            "min_signal_strength": 0.65,
         },
         category="reversal", risk_level="low",
     )
@@ -290,8 +291,8 @@ def _register_all():
         {
             "fast_period": 20, "mid_period": 41, "slow_period": 75,
             # Anti-overtrading
-            "min_hold_bars": 5, "cooldown_seconds": 900, "max_trades_per_hour": 2,
-            "min_signal_strength": 0.5,
+            "min_hold_bars": 8, "cooldown_seconds": 1800, "max_trades_per_hour": 1,
+            "min_signal_strength": 0.6,
         },
         category="trend", risk_level="low",
     )
@@ -306,10 +307,10 @@ def _register_all():
         "BTC", "1h",
         {
             "adx_period": 14, "di_period": 14,
-            "adx_threshold": 25, "exit_threshold": 18,  # Lowered exit from 20 to hold trends longer
-            # Anti-overtrading
-            "min_hold_bars": 5, "cooldown_seconds": 900, "max_trades_per_hour": 2,
-            "min_signal_strength": 0.5,
+            "adx_threshold": 25, "exit_threshold": 18,
+            # Anti-overtrading (MoonDev: ADX<20 = choppy, don't trade)
+            "min_hold_bars": 8, "cooldown_seconds": 1800, "max_trades_per_hour": 1,
+            "min_signal_strength": 0.6,
         },
         category="trend", risk_level="medium",
     )
@@ -320,13 +321,13 @@ def _register_all():
         {
             "fast_period": 12, "slow_period": 26, "signal_period": 9,
             "ma_filter_period": 50,
-            "confirmation_bars": 1,  # Reduced from 2 to catch moves earlier
+            "confirmation_bars": 2,  # Back to 2 for confirmation (reduce false signals)
             "use_ma_filter": True,
             "histogram_mode": True, "zero_cross_mode": True,
             "histogram_growth_bars": 3,
             # Anti-overtrading
-            "min_hold_bars": 5, "cooldown_seconds": 900, "max_trades_per_hour": 2,
-            "min_signal_strength": 0.6,
+            "min_hold_bars": 8, "cooldown_seconds": 1800, "max_trades_per_hour": 1,
+            "min_signal_strength": 0.65,
         },
         category="trend", risk_level="medium",
     )
@@ -336,9 +337,9 @@ def _register_all():
         "BTC", "4h",
         {
             "tenkan_period": 9, "kijun_period": 26, "senkou_b_period": 52,
-            # Anti-overtrading -- 4h timeframe needs longer holds
-            "min_hold_bars": 4, "cooldown_seconds": 3600, "max_trades_per_hour": 1,
-            "min_signal_strength": 0.5,
+            # Anti-overtrading (4h = very slow, 1 trade per day max)
+            "min_hold_bars": 6, "cooldown_seconds": 7200, "max_trades_per_hour": 1,
+            "min_signal_strength": 0.6,
         },
         category="trend", risk_level="medium",
     )
@@ -349,11 +350,10 @@ def _register_all():
         {
             "swing_lookback": 5,
             "fib_retracement_min": 0.382, "fib_retracement_max": 0.618,
-            "min_swing_pct": 1.0,  # Raised from 0.5% -- filter tiny waves
-            "reversal_exit_pct": 3.0,  # Raised from 1.5% -- give waves room
+            "min_swing_pct": 1.0, "reversal_exit_pct": 3.0,
             # Anti-overtrading
-            "min_hold_bars": 4, "cooldown_seconds": 3600, "max_trades_per_hour": 1,
-            "min_signal_strength": 0.5,
+            "min_hold_bars": 6, "cooldown_seconds": 7200, "max_trades_per_hour": 1,
+            "min_signal_strength": 0.6,
         },
         category="pattern", risk_level="high",
     )
@@ -364,8 +364,8 @@ def _register_all():
         {
             "pivot_lookback": 24,
             # Anti-overtrading
-            "min_hold_bars": 4, "cooldown_seconds": 600, "max_trades_per_hour": 2,
-            "min_signal_strength": 0.5,
+            "min_hold_bars": 6, "cooldown_seconds": 1800, "max_trades_per_hour": 1,
+            "min_signal_strength": 0.6,
         },
         category="reversal", risk_level="low",
     )
@@ -374,12 +374,11 @@ def _register_all():
         "Quarter-point price level breakout strategy",
         "BTC", "1h",
         {
-            "quarter_size": None, "breakout_pct": 0.15,  # Raised from 0.1
-            "take_profit_quarters": 2,  # Raised from 1 -- target 2 quarter moves
-            "stop_loss_quarters": 1,
+            "quarter_size": None, "breakout_pct": 0.15,
+            "take_profit_quarters": 2, "stop_loss_quarters": 1,
             # Anti-overtrading
-            "min_hold_bars": 5, "cooldown_seconds": 900, "max_trades_per_hour": 2,
-            "min_signal_strength": 0.5,
+            "min_hold_bars": 8, "cooldown_seconds": 1800, "max_trades_per_hour": 1,
+            "min_signal_strength": 0.6,
         },
         category="breakout", risk_level="medium",
     )
@@ -388,11 +387,11 @@ def _register_all():
         "Combined EMA crossover trend + Bollinger Band squeeze entries",
         "BTC", "1h",
         {
-            "short_ema_period": 20, "long_ema_period": 50,  # Shortened from 50/200 so cross happens
+            "short_ema_period": 20, "long_ema_period": 50,
             "bb_period": 20, "bb_std": 2.0,
             # Anti-overtrading
-            "min_hold_bars": 5, "cooldown_seconds": 900, "max_trades_per_hour": 2,
-            "min_signal_strength": 0.5,
+            "min_hold_bars": 8, "cooldown_seconds": 1800, "max_trades_per_hour": 1,
+            "min_signal_strength": 0.6,
         },
         category="trend", risk_level="medium",
     )
@@ -402,12 +401,12 @@ def _register_all():
         "BTC", "4h",
         {
             "fib_lookback": 50,
-            "proximity_pct": 0.5,  # Widened from 0.3 -- more tolerance for fib level hits
+            "proximity_pct": 0.5,
             "trend_period": 20,
             "take_profit_fib": 0.618, "stop_loss_fib": 1.0,
             # Anti-overtrading
-            "min_hold_bars": 3, "cooldown_seconds": 1800, "max_trades_per_hour": 1,
-            "min_signal_strength": 0.5,
+            "min_hold_bars": 4, "cooldown_seconds": 3600, "max_trades_per_hour": 1,
+            "min_signal_strength": 0.6,
         },
         category="grid", risk_level="medium",
     )
@@ -418,8 +417,8 @@ def _register_all():
         {
             "swing_lookback": 5, "pivot_lookback": 24,
             # Anti-overtrading
-            "min_hold_bars": 4, "cooldown_seconds": 3600, "max_trades_per_hour": 1,
-            "min_signal_strength": 0.5,
+            "min_hold_bars": 6, "cooldown_seconds": 7200, "max_trades_per_hour": 1,
+            "min_signal_strength": 0.6,
         },
         category="pattern", risk_level="medium",
     )
@@ -430,11 +429,10 @@ def _register_all():
         {
             "sma_period": 20, "adx_period": 14,
             "bb_period": 20, "bb_std": 2.0,
-            "min_adx": 25,  # Raised from 20 -- require stronger trends
-            "volume_multiplier": 1.3,  # Lowered from 1.5 -- less restrictive vol filter
+            "min_adx": 25, "volume_multiplier": 1.3,
             # Anti-overtrading
-            "min_hold_bars": 5, "cooldown_seconds": 900, "max_trades_per_hour": 2,
-            "min_signal_strength": 0.6,
+            "min_hold_bars": 8, "cooldown_seconds": 1800, "max_trades_per_hour": 1,
+            "min_signal_strength": 0.65,
         },
         category="trend", risk_level="medium",
     )
@@ -444,11 +442,10 @@ def _register_all():
         "BTC", "15m",
         {
             "rsi_period": 14,
-            "oversold": 35,   # Raised from 30 -- tighter RSI filter
-            "overbought": 65, # Lowered from 70 -- tighter RSI filter
+            "oversold": 35, "overbought": 65,
             # Anti-overtrading
-            "min_hold_bars": 4, "cooldown_seconds": 600, "max_trades_per_hour": 2,
-            "min_signal_strength": 0.6,
+            "min_hold_bars": 6, "cooldown_seconds": 1200, "max_trades_per_hour": 1,
+            "min_signal_strength": 0.65,
         },
         category="reversal", risk_level="low",
     )
@@ -458,13 +455,12 @@ def _register_all():
         "SOL", "5m",
         {
             "sma_fast": 20, "sma_slow": 40,
-            "sell_at_multiple": 5.0,  # Lowered from 9x -- take realistic profits
-            "stop_loss_pct": -0.3,    # Tightened from -60% to -30%
+            "sell_at_multiple": 5.0, "stop_loss_pct": -0.3,
             "max_top10_holder_pct": 0.7, "min_liquidity": 400,
             "require_price_above_avg": True,
-            # Anti-overtrading
-            "min_hold_bars": 6, "cooldown_seconds": 300, "max_trades_per_hour": 3,
-            "min_signal_strength": 0.6,
+            # Anti-overtrading (MoonDev: sniper needs patience)
+            "min_hold_bars": 8, "cooldown_seconds": 600, "max_trades_per_hour": 2,
+            "min_signal_strength": 0.65,
         },
         category="momentum", risk_level="high",
     )

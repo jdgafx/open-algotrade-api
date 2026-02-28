@@ -91,10 +91,10 @@ class PaperTradingExecutor:
     def __init__(
         self,
         base_url: str = "https://api.hyperliquid.xyz",
-        default_slippage: float = 0.001,
-        max_position_usd: float = 10000.0,
+        default_slippage: float = 0.0005,  # Reduced: assume maker orders (MoonDev: "maker only")
+        max_position_usd: float = 5000.0,  # Reduced: cap per-position exposure
         initial_balance: float = 10000.0,
-        commission_pct: float = 0.035,  # HL taker fee
+        commission_pct: float = 0.02,  # HL maker fee (was 0.035 taker - MoonDev: "no taker orders")
     ):
         self.base_url = base_url
         self.default_slippage = default_slippage
