@@ -28,24 +28,37 @@ class SupplyDemandZoneStrategy(BaseStrategy):
         current = data.iloc[-1]
         price = current["close"]
 
+        # Require price to be bouncing (showing reversal confirmation)
+        prev = data.iloc[-2]
+        prev_price = prev["close"]
+
         for zone_high, zone_low in zones["demand"]:
-            if zone_low <= price <= zone_high:
+            if zone_low <= price <= zone_high and price > prev_price:
+                # Strength based on how deep into zone and zone width
+                zone_width = zone_high - zone_low
+                position_in_zone = (price - zone_low) / zone_width if zone_width > 0 else 0.5
+                strength = min(0.6 + (1 - position_in_zone) * 0.3, 0.9)
                 return Signal(
                     signal_type=SignalType.LONG,
                     symbol=self.config.symbol,
                     price=price,
                     size_usd=self.config.size_usd,
+                    strength=strength,
                     reason=f"SDZ demand zone LONG: price {price:.2f} in zone [{zone_low:.2f}, {zone_high:.2f}]",
                     metadata={"zone_type": "demand", "zone_high": zone_high, "zone_low": zone_low},
                 )
 
         for zone_high, zone_low in zones["supply"]:
-            if zone_low <= price <= zone_high:
+            if zone_low <= price <= zone_high and price < prev_price:
+                zone_width = zone_high - zone_low
+                position_in_zone = (price - zone_low) / zone_width if zone_width > 0 else 0.5
+                strength = min(0.6 + position_in_zone * 0.3, 0.9)
                 return Signal(
                     signal_type=SignalType.SHORT,
                     symbol=self.config.symbol,
                     price=price,
                     size_usd=self.config.size_usd,
+                    strength=strength,
                     reason=f"SDZ supply zone SHORT: price {price:.2f} in zone [{zone_low:.2f}, {zone_high:.2f}]",
                     metadata={"zone_type": "supply", "zone_high": zone_high, "zone_low": zone_low},
                 )

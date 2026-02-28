@@ -44,16 +44,22 @@ class GridFibStrategy(BaseStrategy):
         sma = data["close"].iloc[-trend_period:].mean()
         threshold = fib_range * proximity_pct / 100
 
+        prev_price = data["close"].iloc[-2]
+
         # Uptrend: price above SMA, look for fib support bounces
         if price > sma:
             for fib in FIB_LEVELS:
                 level = swing_high - fib_range * fib
-                if abs(price - level) <= threshold and price > level:
+                if abs(price - level) <= threshold and price > level and price > prev_price:
+                    # Golden ratio levels (0.382, 0.618) get stronger signals
+                    fib_strength = 0.7 if fib in (0.382, 0.618) else 0.6
+                    strength = min(fib_strength + (1 - abs(price - level) / threshold) * 0.2, 0.9)
                     return Signal(
                         signal_type=SignalType.LONG,
                         symbol=self.config.symbol,
                         price=price,
                         size_usd=self.config.size_usd,
+                        strength=strength,
                         reason=f"Grid+Fib LONG: bounce at {fib:.1%} level ({level:.2f}), uptrend",
                         metadata={"fib_level": fib, "price_level": level, "swing_high": swing_high, "swing_low": swing_low},
                     )
@@ -62,12 +68,15 @@ class GridFibStrategy(BaseStrategy):
         if price < sma:
             for fib in FIB_LEVELS:
                 level = swing_low + fib_range * fib
-                if abs(price - level) <= threshold and price < level:
+                if abs(price - level) <= threshold and price < level and price < prev_price:
+                    fib_strength = 0.7 if fib in (0.382, 0.618) else 0.6
+                    strength = min(fib_strength + (1 - abs(price - level) / threshold) * 0.2, 0.9)
                     return Signal(
                         signal_type=SignalType.SHORT,
                         symbol=self.config.symbol,
                         price=price,
                         size_usd=self.config.size_usd,
+                        strength=strength,
                         reason=f"Grid+Fib SHORT: rejection at {fib:.1%} level ({level:.2f}), downtrend",
                         metadata={"fib_level": fib, "price_level": level, "swing_high": swing_high, "swing_low": swing_low},
                     )

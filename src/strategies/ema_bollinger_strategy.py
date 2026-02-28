@@ -46,25 +46,33 @@ class EMABollingerStrategy(BaseStrategy):
         if any(pd.isna(v) for v in [ema_s, ema_l, bb_upper, bb_lower, prev_ema_s, prev_ema_l]):
             return None
 
-        # Long: bullish EMA cross + price near lower band
-        if prev_ema_s <= prev_ema_l and ema_s > ema_l and price <= bb_lower:
+        # BB proximity: price within 20% of band distance from the band
+        bb_range = bb_upper - bb_lower
+        bb_proximity = bb_range * 0.2 if bb_range > 0 else 0
+
+        # Long: bullish EMA cross + price near lower band (within proximity)
+        if prev_ema_s <= prev_ema_l and ema_s > ema_l and price <= bb_lower + bb_proximity:
+            strength = min(0.6 + (bb_lower + bb_proximity - price) / max(bb_range, 1) * 2, 0.9)
             return Signal(
                 signal_type=SignalType.LONG,
                 symbol=self.config.symbol,
                 price=price,
                 size_usd=self.config.size_usd,
-                reason=f"EMA+BB LONG: EMA cross bullish, price {price:.2f} at lower BB {bb_lower:.2f}",
+                strength=strength,
+                reason=f"EMA+BB LONG: EMA cross bullish, price {price:.2f} near lower BB {bb_lower:.2f}",
                 metadata={"ema_short": ema_s, "ema_long": ema_l, "bb_lower": bb_lower},
             )
 
-        # Short: bearish EMA cross + price near upper band
-        if prev_ema_l <= prev_ema_s and ema_l > ema_s and price >= bb_upper:
+        # Short: bearish EMA cross + price near upper band (within proximity)
+        if prev_ema_l <= prev_ema_s and ema_l > ema_s and price >= bb_upper - bb_proximity:
+            strength = min(0.6 + (price - bb_upper + bb_proximity) / max(bb_range, 1) * 2, 0.9)
             return Signal(
                 signal_type=SignalType.SHORT,
                 symbol=self.config.symbol,
                 price=price,
                 size_usd=self.config.size_usd,
-                reason=f"EMA+BB SHORT: EMA cross bearish, price {price:.2f} at upper BB {bb_upper:.2f}",
+                strength=strength,
+                reason=f"EMA+BB SHORT: EMA cross bearish, price {price:.2f} near upper BB {bb_upper:.2f}",
                 metadata={"ema_short": ema_s, "ema_long": ema_l, "bb_upper": bb_upper},
             )
 

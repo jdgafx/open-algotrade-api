@@ -41,24 +41,31 @@ class ElliottWaveStrategy(BaseStrategy):
         # Check for bullish Wave 2 retracement (buy opportunity for Wave 3)
         wave_signal = self._check_wave_pattern(swings, price, fib_min, fib_max, min_swing_pct, bullish=True)
         if wave_signal:
+            # Strength based on retracement depth (closer to 0.618 = golden ratio = stronger)
+            ret = wave_signal['retracement']
+            strength = min(0.5 + abs(ret - 0.5) * 2, 0.9)  # Peaks at 0.382 and 0.618
             return Signal(
                 signal_type=SignalType.LONG,
                 symbol=self.config.symbol,
                 price=price,
                 size_usd=self.config.size_usd,
-                reason=f"Elliott LONG: Wave retracement at {wave_signal['retracement']:.1%}, expecting impulse wave",
+                strength=strength,
+                reason=f"Elliott LONG: Wave retracement at {ret:.1%}, expecting impulse wave",
                 metadata=wave_signal,
             )
 
         # Check for bearish Wave 2 retracement (sell opportunity for Wave 3)
         wave_signal = self._check_wave_pattern(swings, price, fib_min, fib_max, min_swing_pct, bullish=False)
         if wave_signal:
+            ret = wave_signal['retracement']
+            strength = min(0.5 + abs(ret - 0.5) * 2, 0.9)
             return Signal(
                 signal_type=SignalType.SHORT,
                 symbol=self.config.symbol,
                 price=price,
                 size_usd=self.config.size_usd,
-                reason=f"Elliott SHORT: Wave retracement at {wave_signal['retracement']:.1%}, expecting impulse wave",
+                strength=strength,
+                reason=f"Elliott SHORT: Wave retracement at {ret:.1%}, expecting impulse wave",
                 metadata=wave_signal,
             )
 

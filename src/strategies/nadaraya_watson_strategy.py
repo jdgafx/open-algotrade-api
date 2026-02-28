@@ -44,22 +44,31 @@ class NadarayaWatsonStrategy(BaseStrategy):
 
         # Long: price near lower envelope and StochRSI oversold
         if price <= nw_lower and stoch_k < oversold:
+            # Strength: how deep below envelope + how oversold
+            envelope_depth = (nw_lower - price) / max(nw_upper - nw_lower, 0.01) if nw_upper > nw_lower else 0.1
+            stoch_depth = (oversold - stoch_k) / oversold
+            strength = min(0.6 + envelope_depth * 0.2 + stoch_depth * 0.2, 0.95)
             return Signal(
                 signal_type=SignalType.LONG,
                 symbol=self.config.symbol,
                 price=price,
                 size_usd=self.config.size_usd,
+                strength=strength,
                 reason=f"NW LONG: price {price:.2f} <= lower envelope {nw_lower:.2f}, StochRSI {stoch_k:.1f} < {oversold}",
                 metadata={"nw_lower": nw_lower, "stoch_k": stoch_k},
             )
 
         # Short: price near upper envelope and StochRSI overbought
         if price >= nw_upper and stoch_k > overbought:
+            envelope_depth = (price - nw_upper) / max(nw_upper - nw_lower, 0.01) if nw_upper > nw_lower else 0.1
+            stoch_depth = (stoch_k - overbought) / (100 - overbought)
+            strength = min(0.6 + envelope_depth * 0.2 + stoch_depth * 0.2, 0.95)
             return Signal(
                 signal_type=SignalType.SHORT,
                 symbol=self.config.symbol,
                 price=price,
                 size_usd=self.config.size_usd,
+                strength=strength,
                 reason=f"NW SHORT: price {price:.2f} >= upper envelope {nw_upper:.2f}, StochRSI {stoch_k:.1f} > {overbought}",
                 metadata={"nw_upper": nw_upper, "stoch_k": stoch_k},
             )

@@ -1,21 +1,39 @@
-hyperliquid-python-sdk
-python-dotenv
-eth-account
-web3
+# ── Core Framework ──
 fastapi
 uvicorn[standard]
-sqlalchemy
 pydantic
-passlib[bcrypt]
-python-jose[cryptography]
+python-dotenv
 python-multipart
+
+# ── Database ──
+sqlalchemy
+
+# ── Auth ──
+python-jose[cryptography]
+passlib[bcrypt]
+bcrypt
+
+# ── Hyperliquid SDK & Web3 ──
+hyperliquid-python-sdk
+eth-account
+web3
+
+# ── Data / Analytics ──
 pandas
 numpy
 requests
-bcrypt
-ccxt
 httpx
+
+# ── Strategies & Backtesting ──
 hmmlearn
 backtesting
+ccxt
+
+# ── Billing ──
 stripe
+
+# ── WebSocket support ──
 websockets
+
+# ── Solana integration (Jupiter/Birdeye API calls via httpx, already above) ──
+# solana and solders not needed yet - using REST APIs via httpx

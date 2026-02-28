@@ -44,22 +44,31 @@ class ElliottPivotStrategy(BaseStrategy):
 
         # Long: bullish wave + price above pivot
         if wave_bias == "bullish" and price > pp:
+            # Strength: distance above pivot relative to PP-S1 range
+            pivot_range = r1 - s1 if r1 > s1 else price * 0.01
+            dist = (price - pp) / pivot_range if pivot_range > 0 else 0.5
+            strength = min(0.6 + dist * 0.2, 0.9)
             return Signal(
                 signal_type=SignalType.LONG,
                 symbol=self.config.symbol,
                 price=price,
                 size_usd=self.config.size_usd,
+                strength=strength,
                 reason=f"Elliott+Pivot LONG: bullish wave, price {price:.2f} above PP {pp:.2f}",
                 metadata={"pivot": pp, "r1": r1, "s1": s1, "wave_bias": wave_bias},
             )
 
         # Short: bearish wave + price below pivot
         if wave_bias == "bearish" and price < pp:
+            pivot_range = r1 - s1 if r1 > s1 else price * 0.01
+            dist = (pp - price) / pivot_range if pivot_range > 0 else 0.5
+            strength = min(0.6 + dist * 0.2, 0.9)
             return Signal(
                 signal_type=SignalType.SHORT,
                 symbol=self.config.symbol,
                 price=price,
                 size_usd=self.config.size_usd,
+                strength=strength,
                 reason=f"Elliott+Pivot SHORT: bearish wave, price {price:.2f} below PP {pp:.2f}",
                 metadata={"pivot": pp, "r1": r1, "s1": s1, "wave_bias": wave_bias},
             )

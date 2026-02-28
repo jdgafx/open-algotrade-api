@@ -96,176 +96,377 @@ def _register_all():
     from .elliott_pivot_strategy import ElliottPivotStrategy
     from .sma_adx_bb_vol_strategy import SMAAdxBBVolStrategy
     from .rsi_vwap_strategy import RSIVWAPStrategy
+    from .solana_sniper_strategy import SolanaSniperStrategy
+
+    # ═══════════════════════════════════════════════════════════════════
+    # TIER A — Battle-tested HL native strategies
+    # ═══════════════════════════════════════════════════════════════════
 
     register_strategy(
         "turtle", TurtleHLStrategy, StrategyTier.A,
         "55-bar breakout with ATR trailing stops and take profit",
         "BTC", "1h",
-        {"lookback_period": 55, "atr_period": 20, "atr_multiplier": 2.0, "take_profit_pct": 0.002},
+        {
+            "lookback_period": 55, "atr_period": 20, "atr_multiplier": 3.0,
+            "take_profit_pct": 0.05,  # 5% TP for trend-following breakout
+            # Anti-overtrading
+            "min_hold_bars": 5, "cooldown_seconds": 600, "max_trades_per_hour": 2,
+            "min_signal_strength": 0.5,
+        },
         category="breakout", risk_level="medium",
     )
     register_strategy(
         "bollinger", BollingerStrategy, StrategyTier.A,
         "Bollinger Band squeeze breakout with band-width triggers",
         "BTC", "1h",
-        {"bb_period": 20, "bb_std": 2.0, "squeeze_threshold": 0.03},
+        {
+            "bb_period": 20, "bb_std": 2.0, "squeeze_threshold": 0.04,
+            # Anti-overtrading
+            "min_hold_bars": 4, "cooldown_seconds": 600, "max_trades_per_hour": 2,
+            "min_signal_strength": 0.5,
+        },
         category="breakout", risk_level="medium",
     )
     register_strategy(
         "supply_demand_zone", SupplyDemandZoneStrategy, StrategyTier.A,
         "Supply/Demand zone detection with reversal entries",
         "BTC", "4h",
-        {"zone_lookback_days": 30, "zone_threshold": 0.02},
+        {
+            "zone_lookback_days": 30, "zone_threshold": 0.02,
+            # Anti-overtrading
+            "min_hold_bars": 3, "cooldown_seconds": 900, "max_trades_per_hour": 2,
+            "min_signal_strength": 0.5,
+        },
         category="reversal", risk_level="medium",
     )
     register_strategy(
         "vwap_bot", VWAPBotStrategy, StrategyTier.A,
         "VWAP-based probability bias trading (70/30 above/below)",
         "BTC", "15m",
-        {"vwap_bias_long": 0.7, "vwap_bias_short": 0.3},
+        {
+            "vwap_bias_long": 0.7, "vwap_bias_short": 0.3,
+            # Anti-overtrading
+            "min_hold_bars": 4, "cooldown_seconds": 600, "max_trades_per_hour": 3,
+            "min_signal_strength": 0.5,
+        },
         category="trend", risk_level="low",
     )
     register_strategy(
         "funding_arb", FundingArbStrategy, StrategyTier.A,
         "Funding rate arbitrage between correlated assets (BTC/ETH)",
         "BTC", "1h",
-        {"symbol_a": "BTC", "symbol_b": "ETH", "funding_threshold": 0.0005, "combined_target_pct": 3.0},
+        {
+            "symbol_a": "BTC", "symbol_b": "ETH",
+            "funding_threshold": 0.001,  # Raised from 0.0005 to filter weak spreads
+            "combined_target_pct": 3.0,
+            "momentum_threshold": 0.02,  # Raised from 0.01 for fallback mode
+            # Anti-overtrading
+            "min_hold_bars": 6, "cooldown_seconds": 1800, "max_trades_per_hour": 1,
+            "min_signal_strength": 0.6,
+        },
         category="arbitrage", risk_level="low",
     )
+
+    # ═══════════════════════════════════════════════════════════════════
+    # TIER B — Bonus algo strategies
+    # ═══════════════════════════════════════════════════════════════════
+
     register_strategy(
         "correlation", CorrelationStrategy, StrategyTier.B,
         "Leader/follower correlation trading (ETH leads altcoins)",
         "SOL", "15m",
-        {"leader": "ETH", "correlation_window": 20, "lag_threshold": 0.002, "sl_pct": 0.002, "tp_pct": 0.0025},
+        {
+            "leader": "ETH", "correlation_window": 20,
+            "lag_threshold": 0.005,  # Raised from 0.002 to filter noise
+            "sl_pct": 0.015,   # Widened from 0.2% to 1.5% -- crypto needs room
+            "tp_pct": 0.025,   # Widened from 0.25% to 2.5% -- realistic target
+            "momentum_threshold": 0.015,  # Raised from 0.01 for fallback mode
+            # Anti-overtrading
+            "min_hold_bars": 5, "cooldown_seconds": 600, "max_trades_per_hour": 2,
+            "min_signal_strength": 0.6,
+        },
         category="statistical", risk_level="medium",
     )
     register_strategy(
         "consolidation_pop", ConsolidationPopStrategy, StrategyTier.B,
         "Consolidation detection via ATR deviance, range breakout",
         "BTC", "15m",
-        {"atr_period": 14, "deviance_threshold": 0.4, "range_position_buy": 0.33, "range_position_sell": 0.67, "tp_pct": 0.003, "sl_pct": 0.0025},
+        {
+            "atr_period": 14, "deviance_threshold": 0.35,
+            "range_position_buy": 0.25, "range_position_sell": 0.75,
+            "tp_pct": 0.02,   # Widened from 0.3% to 2% -- breakouts need room
+            "sl_pct": 0.015,  # Widened from 0.25% to 1.5%
+            # Anti-overtrading
+            "min_hold_bars": 4, "cooldown_seconds": 600, "max_trades_per_hour": 2,
+            "min_signal_strength": 0.5,
+        },
         category="breakout", risk_level="medium",
     )
     register_strategy(
         "nadaraya_watson", NadarayaWatsonStrategy, StrategyTier.B,
         "Kernel regression envelope + Stochastic RSI signals",
         "BTC", "15m",
-        {"kernel_bandwidth": 8.0, "kernel_lookback": 60, "stoch_period": 14, "stoch_k": 3, "stoch_d": 3, "overbought": 80, "oversold": 20},
+        {
+            "kernel_bandwidth": 8.0, "kernel_lookback": 60,
+            "stoch_period": 14, "stoch_k": 3, "stoch_d": 3,
+            "overbought": 80, "oversold": 20,
+            # Anti-overtrading
+            "min_hold_bars": 4, "cooldown_seconds": 600, "max_trades_per_hour": 2,
+            "min_signal_strength": 0.6,
+        },
         category="statistical", risk_level="medium",
     )
     register_strategy(
         "market_maker", MarketMakerStrategy, StrategyTier.B,
         "Spread-based market making with kill switch and ATR no-trade zones",
         "BTC", "1m",
-        {"spread": 0.001, "max_position_usd": 1000.0, "kill_size_usd": 2000.0, "atr_period": 14, "refresh_seconds": 10},
+        {
+            "spread": 0.003,  # Widened from 0.1% to 0.3% -- must cover slippage+commission
+            "max_position_usd": 500.0,  # Reduced from 1000
+            "kill_size_usd": 1000.0,  # Reduced from 2000
+            "atr_period": 14, "refresh_seconds": 10,
+            # Anti-overtrading
+            "min_hold_bars": 2, "cooldown_seconds": 120, "max_trades_per_hour": 6,
+            "min_signal_strength": 0.3,
+        },
         category="market_making", risk_level="high",
     )
     register_strategy(
         "mean_reversion", MeanReversionStrategy, StrategyTier.B,
         "Multi-timeframe SMA mean reversion with trend filter",
         "ETH", "15m",
-        {"sma_trend_period": 20, "sma_entry_period": 20, "trend_timeframe": "4h", "entry_timeframe": "15m", "reversion_target_pct": 0.003},
+        {
+            "sma_trend_period": 20, "sma_entry_period": 20,
+            "trend_timeframe": "4h", "entry_timeframe": "15m",
+            "reversion_target_pct": 0.015,  # Raised from 0.3% to 1.5%
+            "zscore_entry": 2.0,  # Raised from 1.5 to require stronger deviation
+            "zscore_exit": 0.3,   # Tighter exit -- take profit closer to mean
+            "bb_period": 20, "bb_std": 2.0,
+            "dynamic_sizing": True,
+            # Anti-overtrading
+            "min_hold_bars": 4, "cooldown_seconds": 600, "max_trades_per_hour": 2,
+            "min_signal_strength": 0.6,
+        },
         category="mean_reversion", risk_level="medium",
     )
+
+    # ═══════════════════════════════════════════════════════════════════
+    # TIER C — Bootcamp bot strategies
+    # ═══════════════════════════════════════════════════════════════════
+
     register_strategy(
         "sma_crossover", SMAStrategy, StrategyTier.C,
         "SMA crossover with support/resistance levels",
         "BTC", "1h",
-        {"sma_period": 20, "support_lookback": 20},
+        {
+            "sma_period": 20, "support_lookback": 20,
+            # Anti-overtrading
+            "min_hold_bars": 5, "cooldown_seconds": 900, "max_trades_per_hour": 2,
+            "min_signal_strength": 0.5,
+        },
         category="trend", risk_level="low",
     )
     register_strategy(
         "rsi", RSIStrategy, StrategyTier.C,
         "RSI overbought/oversold reversal strategy",
         "BTC", "1h",
-        {"rsi_period": 14, "oversold": 30, "overbought": 70},
+        {
+            "rsi_period": 14, "oversold": 25, "overbought": 75,  # Tighter thresholds
+            "trend_mode": True, "divergence_mode": True,
+            "trend_rsi_threshold_long": 58,   # Raised from 55
+            "trend_rsi_threshold_short": 42,  # Lowered from 45
+            "divergence_lookback": 14,
+            "rsi_momentum_period": 3,
+            # Anti-overtrading
+            "min_hold_bars": 5, "cooldown_seconds": 600, "max_trades_per_hour": 2,
+            "min_signal_strength": 0.6,
+        },
         category="reversal", risk_level="low",
     )
     register_strategy(
         "vwma", VWMAStrategy, StrategyTier.C,
         "Volume-weighted moving average with multi-period alignment",
         "BTC", "15m",
-        {"fast_period": 20, "mid_period": 41, "slow_period": 75},
+        {
+            "fast_period": 20, "mid_period": 41, "slow_period": 75,
+            # Anti-overtrading
+            "min_hold_bars": 5, "cooldown_seconds": 900, "max_trades_per_hour": 2,
+            "min_signal_strength": 0.5,
+        },
         category="trend", risk_level="low",
     )
 
-    # Tier D — Backtested strategies (ported from bt_code)
+    # ═══════════════════════════════════════════════════════════════════
+    # TIER D — Backtested strategies (ported from bt_code)
+    # ═══════════════════════════════════════════════════════════════════
+
     register_strategy(
         "adx", ADXStrategy, StrategyTier.D,
         "ADX trend strength with +DI/-DI directional crossover",
         "BTC", "1h",
-        {"adx_period": 14, "di_period": 14, "adx_threshold": 25, "exit_threshold": 20},
+        {
+            "adx_period": 14, "di_period": 14,
+            "adx_threshold": 25, "exit_threshold": 18,  # Lowered exit from 20 to hold trends longer
+            # Anti-overtrading
+            "min_hold_bars": 5, "cooldown_seconds": 900, "max_trades_per_hour": 2,
+            "min_signal_strength": 0.5,
+        },
         category="trend", risk_level="medium",
     )
     register_strategy(
         "macd", MACDStrategy, StrategyTier.D,
         "MACD/Signal crossover with histogram confirmation and MA filter",
         "BTC", "1h",
-        {"fast_period": 12, "slow_period": 26, "signal_period": 9, "ma_filter_period": 50, "confirmation_bars": 2},
+        {
+            "fast_period": 12, "slow_period": 26, "signal_period": 9,
+            "ma_filter_period": 50,
+            "confirmation_bars": 1,  # Reduced from 2 to catch moves earlier
+            "use_ma_filter": True,
+            "histogram_mode": True, "zero_cross_mode": True,
+            "histogram_growth_bars": 3,
+            # Anti-overtrading
+            "min_hold_bars": 5, "cooldown_seconds": 900, "max_trades_per_hour": 2,
+            "min_signal_strength": 0.6,
+        },
         category="trend", risk_level="medium",
     )
     register_strategy(
         "ichimoku", IchimokuStrategy, StrategyTier.D,
         "Full Ichimoku cloud system with TK cross and cloud positioning",
         "BTC", "4h",
-        {"tenkan_period": 9, "kijun_period": 26, "senkou_b_period": 52},
+        {
+            "tenkan_period": 9, "kijun_period": 26, "senkou_b_period": 52,
+            # Anti-overtrading -- 4h timeframe needs longer holds
+            "min_hold_bars": 4, "cooldown_seconds": 3600, "max_trades_per_hour": 1,
+            "min_signal_strength": 0.5,
+        },
         category="trend", risk_level="medium",
     )
     register_strategy(
         "elliott_wave", ElliottWaveStrategy, StrategyTier.D,
         "Elliott Wave swing pattern detection with Fibonacci retracement validation",
         "BTC", "4h",
-        {"swing_lookback": 5, "fib_retracement_min": 0.382, "fib_retracement_max": 0.618, "min_swing_pct": 0.5, "reversal_exit_pct": 1.5},
+        {
+            "swing_lookback": 5,
+            "fib_retracement_min": 0.382, "fib_retracement_max": 0.618,
+            "min_swing_pct": 1.0,  # Raised from 0.5% -- filter tiny waves
+            "reversal_exit_pct": 3.0,  # Raised from 1.5% -- give waves room
+            # Anti-overtrading
+            "min_hold_bars": 4, "cooldown_seconds": 3600, "max_trades_per_hour": 1,
+            "min_signal_strength": 0.5,
+        },
         category="pattern", risk_level="high",
     )
     register_strategy(
         "pivot_lines", PivotLinesStrategy, StrategyTier.D,
         "Classic pivot point support/resistance level trading",
         "BTC", "1h",
-        {"pivot_lookback": 24},
+        {
+            "pivot_lookback": 24,
+            # Anti-overtrading
+            "min_hold_bars": 4, "cooldown_seconds": 600, "max_trades_per_hour": 2,
+            "min_signal_strength": 0.5,
+        },
         category="reversal", risk_level="low",
     )
     register_strategy(
         "quarter_theory", QuarterTheoryStrategy, StrategyTier.D,
         "Quarter-point price level breakout strategy",
         "BTC", "1h",
-        {"quarter_size": None, "breakout_pct": 0.1, "take_profit_quarters": 1, "stop_loss_quarters": 1},
+        {
+            "quarter_size": None, "breakout_pct": 0.15,  # Raised from 0.1
+            "take_profit_quarters": 2,  # Raised from 1 -- target 2 quarter moves
+            "stop_loss_quarters": 1,
+            # Anti-overtrading
+            "min_hold_bars": 5, "cooldown_seconds": 900, "max_trades_per_hour": 2,
+            "min_signal_strength": 0.5,
+        },
         category="breakout", risk_level="medium",
     )
     register_strategy(
         "ema_bollinger", EMABollingerStrategy, StrategyTier.D,
         "Combined EMA crossover trend + Bollinger Band squeeze entries",
         "BTC", "1h",
-        {"short_ema_period": 50, "long_ema_period": 200, "bb_period": 20, "bb_std": 2.0},
+        {
+            "short_ema_period": 20, "long_ema_period": 50,  # Shortened from 50/200 so cross happens
+            "bb_period": 20, "bb_std": 2.0,
+            # Anti-overtrading
+            "min_hold_bars": 5, "cooldown_seconds": 900, "max_trades_per_hour": 2,
+            "min_signal_strength": 0.5,
+        },
         category="trend", risk_level="medium",
     )
     register_strategy(
         "grid_fibonacci", GridFibStrategy, StrategyTier.D,
         "Grid trading at Fibonacci retracement levels with dynamic recalibration",
         "BTC", "4h",
-        {"fib_lookback": 50, "proximity_pct": 0.3, "trend_period": 20, "take_profit_fib": 0.618, "stop_loss_fib": 1.0},
+        {
+            "fib_lookback": 50,
+            "proximity_pct": 0.5,  # Widened from 0.3 -- more tolerance for fib level hits
+            "trend_period": 20,
+            "take_profit_fib": 0.618, "stop_loss_fib": 1.0,
+            # Anti-overtrading
+            "min_hold_bars": 3, "cooldown_seconds": 1800, "max_trades_per_hour": 1,
+            "min_signal_strength": 0.5,
+        },
         category="grid", risk_level="medium",
     )
     register_strategy(
         "elliott_pivot", ElliottPivotStrategy, StrategyTier.D,
         "Combined Elliott Wave patterns with pivot point levels for confluence",
         "BTC", "4h",
-        {"swing_lookback": 5, "pivot_lookback": 24},
+        {
+            "swing_lookback": 5, "pivot_lookback": 24,
+            # Anti-overtrading
+            "min_hold_bars": 4, "cooldown_seconds": 3600, "max_trades_per_hour": 1,
+            "min_signal_strength": 0.5,
+        },
         category="pattern", risk_level="medium",
     )
     register_strategy(
         "sma_adx_bb_vol", SMAAdxBBVolStrategy, StrategyTier.D,
         "Multi-indicator combo: SMA crossover + ADX strength + BB squeeze + volume confirmation",
         "BTC", "1h",
-        {"sma_period": 20, "adx_period": 14, "bb_period": 20, "bb_std": 2.0, "min_adx": 20, "volume_multiplier": 1.5},
+        {
+            "sma_period": 20, "adx_period": 14,
+            "bb_period": 20, "bb_std": 2.0,
+            "min_adx": 25,  # Raised from 20 -- require stronger trends
+            "volume_multiplier": 1.3,  # Lowered from 1.5 -- less restrictive vol filter
+            # Anti-overtrading
+            "min_hold_bars": 5, "cooldown_seconds": 900, "max_trades_per_hour": 2,
+            "min_signal_strength": 0.6,
+        },
         category="trend", risk_level="medium",
     )
     register_strategy(
         "rsi_vwap", RSIVWAPStrategy, StrategyTier.D,
         "Combined RSI and VWAP confluence signals for trend entries",
         "BTC", "15m",
-        {"rsi_period": 14, "oversold": 30, "overbought": 70},
+        {
+            "rsi_period": 14,
+            "oversold": 35,   # Raised from 30 -- tighter RSI filter
+            "overbought": 65, # Lowered from 70 -- tighter RSI filter
+            # Anti-overtrading
+            "min_hold_bars": 4, "cooldown_seconds": 600, "max_trades_per_hour": 2,
+            "min_signal_strength": 0.6,
+        },
         category="reversal", risk_level="low",
+    )
+    register_strategy(
+        "solana_sniper", SolanaSniperStrategy, StrategyTier.A,
+        "Solana token sniper - scans new launches, multi-filter quality entry, MA trend following",
+        "SOL", "5m",
+        {
+            "sma_fast": 20, "sma_slow": 40,
+            "sell_at_multiple": 5.0,  # Lowered from 9x -- take realistic profits
+            "stop_loss_pct": -0.3,    # Tightened from -60% to -30%
+            "max_top10_holder_pct": 0.7, "min_liquidity": 400,
+            "require_price_above_avg": True,
+            # Anti-overtrading
+            "min_hold_bars": 6, "cooldown_seconds": 300, "max_trades_per_hour": 3,
+            "min_signal_strength": 0.6,
+        },
+        category="momentum", risk_level="high",
     )
 
 

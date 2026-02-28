@@ -405,3 +405,162 @@ class PaperPositionsResponse(BaseModel):
 class PaperTradesResponse(BaseModel):
     total: int
     trades: List[PaperTrade]
+
+
+# ──────────────────────────────────────────────
+# Aggregate Strategy Performance
+# ──────────────────────────────────────────────
+
+class StrategyPerformanceItem(BaseModel):
+    name: str
+    strategy_type: str
+    symbol: str
+    status: str
+    total_pnl: float
+    total_trades: int
+    winning_trades: int
+    losing_trades: int
+    win_rate: float
+    max_drawdown: float
+    avg_trade_pnl: float
+    profit_factor: float
+
+
+class AggregatePerformanceResponse(BaseModel):
+    total_strategies: int
+    running_strategies: int
+    total_pnl: float
+    total_trades: int
+    overall_win_rate: float
+    best_strategy: Optional[str] = None
+    worst_strategy: Optional[str] = None
+    strategies: List[StrategyPerformanceItem]
+
+
+# ──────────────────────────────────────────────
+# Strategy Trades & Signals
+# ──────────────────────────────────────────────
+
+class StrategyTradeItem(BaseModel):
+    id: int
+    symbol: str
+    side: str
+    action: str
+    price: float
+    size: float
+    size_usd: float
+    pnl: float = 0.0
+    pnl_pct: float = 0.0
+    reason: str = ""
+    timestamp: str
+
+
+class StrategyTradesResponse(BaseModel):
+    strategy_name: str
+    total: int
+    trades: List[StrategyTradeItem]
+
+
+class SignalLogItem(BaseModel):
+    signal_type: str
+    symbol: str
+    strength: float
+    price: Optional[float] = None
+    reason: str = ""
+    timestamp: str
+
+
+class StrategySignalsResponse(BaseModel):
+    strategy_name: str
+    total: int
+    signals: List[SignalLogItem]
+
+
+# ──────────────────────────────────────────────
+# Strategy Optimization
+# ──────────────────────────────────────────────
+
+class OptimizeRequest(BaseModel):
+    param_ranges: Dict[str, List[Any]]
+    lookback_days: int = 90
+    initial_capital: float = 10000.0
+    max_combinations: int = 50
+
+
+class OptimizeResponse(BaseModel):
+    strategy_name: str
+    total_combinations: int
+    tested: int
+    best_params: Dict[str, Any]
+    best_sharpe: float
+    best_return_pct: float
+    best_win_rate: float
+    top_results: List[Dict[str, Any]]
+
+
+# ──────────────────────────────────────────────
+# Portfolio Summary & Allocation
+# ──────────────────────────────────────────────
+
+class PortfolioSummary(BaseModel):
+    trading_mode: str
+    total_equity: float
+    initial_equity: float
+    total_pnl: float
+    total_return_pct: float
+    max_drawdown_pct: float
+    total_strategies: int
+    running_strategies: int
+    total_trades: int
+    win_rate: float
+    active_positions: int
+    total_exposure_usd: float
+
+
+class AllocationItem(BaseModel):
+    strategy_name: str
+    strategy_type: str
+    symbol: str
+    status: str
+    size_usd: float
+    allocation_pct: float
+    current_pnl: float
+
+
+class PortfolioAllocationResponse(BaseModel):
+    total_allocated_usd: float
+    strategies: List[AllocationItem]
+
+
+# ──────────────────────────────────────────────
+# Market Overview
+# ──────────────────────────────────────────────
+
+class MarketSymbolOverview(BaseModel):
+    symbol: str
+    price: Optional[float] = None
+    regime: str = "unknown"
+    regime_confidence: float = 0.0
+    volatility_regime: str = "unknown"
+    is_volatile: bool = False
+    recommended_strategies: List[str] = []
+
+
+class MarketOverviewResponse(BaseModel):
+    timestamp: str
+    symbols: List[MarketSymbolOverview]
+
+
+# ──────────────────────────────────────────────
+# Enhanced Health Check
+# ──────────────────────────────────────────────
+
+class HealthResponse(BaseModel):
+    status: str
+    service: str
+    version: str
+    trading_mode: str
+    registry_strategies: int
+    registry_ok: bool
+    orchestrator_ok: bool
+    execution_stats: Optional[Dict[str, Any]] = None

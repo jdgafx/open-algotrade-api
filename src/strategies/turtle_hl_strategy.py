@@ -39,18 +39,27 @@ class TurtleHLStrategy(BaseStrategy):
         prev = data.iloc[-2]
         price = current["close"]
 
+        # Calculate breakout strength: how far price exceeded the level relative to ATR
+        atr = current.get("atr", 0)
+        if pd.isna(atr) or atr <= 0:
+            atr = (highest_high - lowest_low) / lookback  # fallback
+
         if (
             price >= highest_high
             and current["open"] < highest_high
             and current["close"] > prev["close"]
         ):
+            # Signal strength based on breakout magnitude vs ATR
+            breakout_size = (price - highest_high) / atr if atr > 0 else 0.5
+            strength = min(0.5 + breakout_size * 0.3, 0.95)
             return Signal(
                 signal_type=SignalType.LONG,
                 symbol=self.config.symbol,
                 price=price,
                 size_usd=self.config.size_usd,
+                strength=strength,
                 reason=f"Turtle breakout LONG: price {price:.2f} > {lookback}-bar high {highest_high:.2f}",
-                metadata={"atr": float(current.get("atr", 0)), "highest_high": highest_high},
+                metadata={"atr": float(atr), "highest_high": highest_high},
             )
 
         if (
@@ -58,13 +67,16 @@ class TurtleHLStrategy(BaseStrategy):
             and current["open"] > lowest_low
             and current["close"] < prev["close"]
         ):
+            breakout_size = (lowest_low - price) / atr if atr > 0 else 0.5
+            strength = min(0.5 + breakout_size * 0.3, 0.95)
             return Signal(
                 signal_type=SignalType.SHORT,
                 symbol=self.config.symbol,
                 price=price,
                 size_usd=self.config.size_usd,
+                strength=strength,
                 reason=f"Turtle breakout SHORT: price {price:.2f} < {lookback}-bar low {lowest_low:.2f}",
-                metadata={"atr": float(current.get("atr", 0)), "lowest_low": lowest_low},
+                metadata={"atr": float(atr), "lowest_low": lowest_low},
             )
 
         return None

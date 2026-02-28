@@ -43,25 +43,36 @@ class RSIVWAPStrategy(BaseStrategy):
         if any(pd.isna(v) for v in [rsi, vwap, prev_vwap]):
             return None
 
-        # Long: RSI above oversold (recovering) + price crosses above VWAP
-        if rsi > oversold and prev_price < prev_vwap and price > vwap:
+        prev_rsi = prev.get("rsi", 50)
+        if pd.isna(prev_rsi):
+            return None
+
+        # Long: RSI was below oversold and recovering (crossing up) + price crosses above VWAP
+        # Much tighter than before: require RSI to actually be in oversold territory recently
+        rsi_recovering = prev_rsi <= oversold + 5 and rsi > prev_rsi
+        if rsi_recovering and prev_price < prev_vwap and price > vwap:
+            strength = min(0.5 + (oversold + 10 - rsi) / 30, 0.9)  # Stronger when RSI is lower
             return Signal(
                 signal_type=SignalType.LONG,
                 symbol=self.config.symbol,
                 price=price,
                 size_usd=self.config.size_usd,
-                reason=f"RSI+VWAP LONG: RSI={rsi:.1f} recovering, price crossed above VWAP {vwap:.2f}",
+                strength=max(strength, 0.5),
+                reason=f"RSI+VWAP LONG: RSI={rsi:.1f} recovering from {prev_rsi:.1f}, price crossed above VWAP {vwap:.2f}",
                 metadata={"rsi": rsi, "vwap": vwap},
             )
 
-        # Short: RSI below overbought (declining) + price crosses below VWAP
-        if rsi < overbought and prev_price > prev_vwap and price < vwap:
+        # Short: RSI was above overbought and declining (crossing down) + price crosses below VWAP
+        rsi_declining = prev_rsi >= overbought - 5 and rsi < prev_rsi
+        if rsi_declining and prev_price > prev_vwap and price < vwap:
+            strength = min(0.5 + (rsi - overbought + 10) / 30, 0.9)
             return Signal(
                 signal_type=SignalType.SHORT,
                 symbol=self.config.symbol,
                 price=price,
                 size_usd=self.config.size_usd,
-                reason=f"RSI+VWAP SHORT: RSI={rsi:.1f} declining, price crossed below VWAP {vwap:.2f}",
+                strength=max(strength, 0.5),
+                reason=f"RSI+VWAP SHORT: RSI={rsi:.1f} declining from {prev_rsi:.1f}, price crossed below VWAP {vwap:.2f}",
                 metadata={"rsi": rsi, "vwap": vwap},
             )
 

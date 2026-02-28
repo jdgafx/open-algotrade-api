@@ -114,6 +114,7 @@ class CorrelationStrategy(BaseStrategy):
         """Fallback without leader data: use momentum mean reversion."""
         p = self.config.params
         window = p.get("correlation_window", 20)
+        threshold = p.get("momentum_threshold", 0.015)
 
         if len(data) < window:
             return None
@@ -121,24 +122,29 @@ class CorrelationStrategy(BaseStrategy):
         recent = data.tail(window)
         sma = recent["close"].mean()
         price = data.iloc[-1]["close"]
+        prev_price = data.iloc[-2]["close"]
         deviation = (price - sma) / sma
 
-        # Mean reversion: buy when below SMA, sell when above
-        if deviation < -0.01:
+        # Require meaningful deviation AND early reversal confirmation
+        if deviation < -threshold and price > prev_price:
+            strength = min(0.5 + abs(deviation) * 20, 0.9)
             return Signal(
                 signal_type=SignalType.LONG,
                 symbol=self.config.symbol,
                 price=price,
                 size_usd=self.config.size_usd,
-                reason=f"Correlation momentum LONG: {deviation:.4f} below SMA",
+                strength=strength,
+                reason=f"Correlation momentum LONG: {deviation:.4f} below SMA, reversing",
             )
-        if deviation > 0.01:
+        if deviation > threshold and price < prev_price:
+            strength = min(0.5 + abs(deviation) * 20, 0.9)
             return Signal(
                 signal_type=SignalType.SHORT,
                 symbol=self.config.symbol,
                 price=price,
                 size_usd=self.config.size_usd,
-                reason=f"Correlation momentum SHORT: {deviation:.4f} above SMA",
+                strength=strength,
+                reason=f"Correlation momentum SHORT: {deviation:.4f} above SMA, reversing",
             )
 
         return None

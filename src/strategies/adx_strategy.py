@@ -49,22 +49,27 @@ class ADXStrategy(BaseStrategy):
 
         # Long: +DI crosses above -DI with strong trend
         if prev_plus_di <= prev_minus_di and plus_di > minus_di and adx > adx_threshold:
+            # Strength: higher ADX = stronger trend signal
+            strength = min(0.5 + (adx - adx_threshold) / 50, 0.95)
             return Signal(
                 signal_type=SignalType.LONG,
                 symbol=self.config.symbol,
                 price=price,
                 size_usd=self.config.size_usd,
+                strength=strength,
                 reason=f"ADX LONG: +DI {plus_di:.1f} crossed above -DI {minus_di:.1f}, ADX={adx:.1f}",
                 metadata={"adx": adx, "plus_di": plus_di, "minus_di": minus_di},
             )
 
         # Short: -DI crosses above +DI with strong trend
         if prev_minus_di <= prev_plus_di and minus_di > plus_di and adx > adx_threshold:
+            strength = min(0.5 + (adx - adx_threshold) / 50, 0.95)
             return Signal(
                 signal_type=SignalType.SHORT,
                 symbol=self.config.symbol,
                 price=price,
                 size_usd=self.config.size_usd,
+                strength=strength,
                 reason=f"ADX SHORT: -DI {minus_di:.1f} crossed above +DI {plus_di:.1f}, ADX={adx:.1f}",
                 metadata={"adx": adx, "plus_di": plus_di, "minus_di": minus_di},
             )

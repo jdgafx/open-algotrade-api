@@ -124,6 +124,22 @@ class PaperTradingExecutor:
             commission_pct,
         )
 
+    def reset(self) -> None:
+        """Reset paper trading to initial state: restore balance, clear positions and trades."""
+        logger.info(
+            "[PAPER] Resetting | balance=$%.2f -> $%.2f | closing %d positions | clearing %d trades",
+            self.balance,
+            self.initial_balance,
+            len(self._positions),
+            len(self._trades),
+        )
+        self.balance = self.initial_balance
+        self.peak_balance = self.initial_balance
+        self._positions.clear()
+        self._trades.clear()
+        self._trade_counter = 0
+        self._execution_history.clear()
+
     def _fetch_mid_price(self, symbol: str) -> float:
         """Fetch current mid price from HL public API."""
         now = time.time()

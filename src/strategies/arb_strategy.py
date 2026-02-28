@@ -92,26 +92,42 @@ class FundingArbStrategy(BaseStrategy):
 
     def _price_divergence_entry(self, data: pd.DataFrame) -> Optional[Signal]:
         """Fallback: use price momentum divergence as arb proxy."""
-        if len(data) < 10:
+        if len(data) < 20:
             return None
 
-        # Simple momentum-based entry
-        recent = data.tail(5)
+        p = self.config.params
+        threshold = p.get("momentum_threshold", 0.02)  # Configurable, default 2%
+
+        # Use 10-bar momentum with confirmation (last 3 bars reversing)
+        recent = data.tail(10)
         momentum = (recent["close"].iloc[-1] - recent["close"].iloc[0]) / recent["close"].iloc[0]
 
-        if momentum < -0.01:  # Price dropped 1%+ — potential mean reversion long
+        # Require momentum to be strong enough
+        if abs(momentum) < threshold:
+            return None
+
+        # Require early reversal confirmation (last bar started moving back)
+        last_bar_change = (data["close"].iloc[-1] - data["close"].iloc[-2]) / data["close"].iloc[-2]
+
+        if momentum < -threshold and last_bar_change > 0:
+            # Price dropped significantly but last bar is green -- mean reversion long
+            strength = min(0.5 + abs(momentum) * 10, 0.9)
             return Signal(
                 signal_type=SignalType.LONG,
                 symbol=self.config.symbol,
                 size_usd=self.config.size_usd,
+                strength=strength,
                 reason=f"Arb momentum divergence LONG: {momentum:.4f}",
                 metadata={"momentum": momentum},
             )
-        if momentum > 0.01:
+        if momentum > threshold and last_bar_change < 0:
+            # Price surged but last bar is red -- mean reversion short
+            strength = min(0.5 + abs(momentum) * 10, 0.9)
             return Signal(
                 signal_type=SignalType.SHORT,
                 symbol=self.config.symbol,
                 size_usd=self.config.size_usd,
+                strength=strength,
                 reason=f"Arb momentum divergence SHORT: {momentum:.4f}",
                 metadata={"momentum": momentum},
             )

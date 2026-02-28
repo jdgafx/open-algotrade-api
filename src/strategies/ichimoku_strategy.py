@@ -48,17 +48,23 @@ class IchimokuStrategy(BaseStrategy):
         cloud_top = max(span_a, span_b)
         cloud_bottom = min(span_a, span_b)
 
+        cloud_thickness = abs(span_a - span_b)
+
         # Long: price above cloud + Tenkan crosses above Kijun
         if (
             price > cloud_top
             and prev_tenkan <= prev_kijun
             and tenkan > kijun
         ):
+            # Strength: how far above cloud + cloud thickness (thick cloud = strong support)
+            dist_above = (price - cloud_top) / price if price > 0 else 0
+            strength = min(0.6 + dist_above * 10 + cloud_thickness / price * 5, 0.95)
             return Signal(
                 signal_type=SignalType.LONG,
                 symbol=self.config.symbol,
                 price=price,
                 size_usd=self.config.size_usd,
+                strength=strength,
                 reason=f"Ichimoku LONG: TK cross bullish, price {price:.2f} above cloud [{cloud_bottom:.2f}-{cloud_top:.2f}]",
                 metadata={"tenkan": tenkan, "kijun": kijun, "cloud_top": cloud_top},
             )
@@ -69,11 +75,14 @@ class IchimokuStrategy(BaseStrategy):
             and prev_kijun <= prev_tenkan
             and kijun > tenkan
         ):
+            dist_below = (cloud_bottom - price) / price if price > 0 else 0
+            strength = min(0.6 + dist_below * 10 + cloud_thickness / price * 5, 0.95)
             return Signal(
                 signal_type=SignalType.SHORT,
                 symbol=self.config.symbol,
                 price=price,
                 size_usd=self.config.size_usd,
+                strength=strength,
                 reason=f"Ichimoku SHORT: TK cross bearish, price {price:.2f} below cloud [{cloud_bottom:.2f}-{cloud_top:.2f}]",
                 metadata={"tenkan": tenkan, "kijun": kijun, "cloud_bottom": cloud_bottom},
             )

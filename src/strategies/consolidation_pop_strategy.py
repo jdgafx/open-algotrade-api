@@ -43,22 +43,28 @@ class ConsolidationPopStrategy(BaseStrategy):
         is_consolidating = deviance < deviance_threshold
 
         if is_consolidating:
+            # Lower deviance = tighter consolidation = stronger breakout signal
+            deviance_strength = max(0.5, 1.0 - deviance / deviance_threshold)
             if range_pos <= buy_zone:
+                strength = min(deviance_strength + (buy_zone - range_pos) * 0.5, 0.9)
                 return Signal(
                     signal_type=SignalType.LONG,
                     symbol=self.config.symbol,
                     price=price,
                     size_usd=self.config.size_usd,
+                    strength=strength,
                     reason=f"Consolidation LONG: deviance {deviance:.3f} < {deviance_threshold}, price at {range_pos:.2f} of range (lower {buy_zone})",
                     metadata={"deviance": deviance, "range_position": range_pos},
                 )
 
             if range_pos >= sell_zone:
+                strength = min(deviance_strength + (range_pos - sell_zone) * 0.5, 0.9)
                 return Signal(
                     signal_type=SignalType.SHORT,
                     symbol=self.config.symbol,
                     price=price,
                     size_usd=self.config.size_usd,
+                    strength=strength,
                     reason=f"Consolidation SHORT: deviance {deviance:.3f} < {deviance_threshold}, price at {range_pos:.2f} of range (upper {sell_zone})",
                     metadata={"deviance": deviance, "range_position": range_pos},
                 )

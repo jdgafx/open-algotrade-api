@@ -78,6 +78,11 @@ class StrategyState:
     errors: int = 0
     consecutive_errors: int = 0
     start_time: Optional[datetime] = None
+    # Anti-overtrading state
+    last_trade_close_time: Optional[datetime] = None
+    trades_this_hour: int = 0
+    hour_start: Optional[datetime] = None
+    entry_bar_count: int = 0
 
 
 class BaseStrategy(ABC):
@@ -133,14 +138,86 @@ class BaseStrategy(ABC):
     ) -> Optional[Signal]:
         self.state.iterations += 1
         self.state.last_iteration = datetime.now(timezone.utc)
+        now = datetime.now(timezone.utc)
+
+        # ── Anti-overtrading parameters (configurable per strategy) ──
+        min_hold_bars = self.config.params.get("min_hold_bars", 3)
+        cooldown_seconds = self.config.params.get("cooldown_seconds", 300)
+        max_trades_per_hour = self.config.params.get("max_trades_per_hour", 4)
+        min_signal_strength = self.config.params.get("min_signal_strength", 0.5)
+
+        # ── Rolling hourly trade counter ──
+        if self.state.hour_start is None:
+            self.state.hour_start = now
+        elif (now - self.state.hour_start).total_seconds() >= 3600:
+            self.state.trades_this_hour = 0
+            self.state.hour_start = now
 
         try:
             has_position = position and position.get("size", 0) != 0
 
             if has_position:
+                # Track how many bars we've been in this position
+                self.state.entry_bar_count += 1
+
+                # Check if min hold period has elapsed (unless stop-loss)
+                pnl_pct = position.get("pnl_perc", 0)
+                is_stop_loss = pnl_pct <= self.config.max_loss_pct
+
+                if self.state.entry_bar_count < min_hold_bars and not is_stop_loss:
+                    self._logger.debug(
+                        "Hold | %s | bar %d/%d (min hold not met)",
+                        self.config.name,
+                        self.state.entry_bar_count,
+                        min_hold_bars,
+                    )
+                    return None
+
                 signal = await self.should_exit(data, position)
+
+                # If we got an exit signal, record the close timestamp
+                if signal and signal.signal_type != SignalType.NONE:
+                    self.state.last_trade_close_time = now
+                    self.state.trades_this_hour += 1
+                    self.state.entry_bar_count = 0
             else:
+                # Reset bar count when flat
+                self.state.entry_bar_count = 0
+
+                # ── Cooldown check: must wait after closing a trade ──
+                if self.state.last_trade_close_time is not None:
+                    elapsed = (now - self.state.last_trade_close_time).total_seconds()
+                    if elapsed < cooldown_seconds:
+                        self._logger.debug(
+                            "Cooldown | %s | %.0fs / %ds remaining",
+                            self.config.name,
+                            cooldown_seconds - elapsed,
+                            cooldown_seconds,
+                        )
+                        return None
+
+                # ── Max trades per hour check ──
+                if self.state.trades_this_hour >= max_trades_per_hour:
+                    self._logger.debug(
+                        "Rate limit | %s | %d/%d trades this hour",
+                        self.config.name,
+                        self.state.trades_this_hour,
+                        max_trades_per_hour,
+                    )
+                    return None
+
                 signal = await self.should_enter(data)
+
+                # ── Minimum signal strength filter ──
+                if signal and signal.signal_type != SignalType.NONE:
+                    if signal.strength < min_signal_strength:
+                        self._logger.debug(
+                            "Weak signal filtered | %s | strength=%.2f < %.2f",
+                            self.config.name,
+                            signal.strength,
+                            min_signal_strength,
+                        )
+                        signal = None
 
             if signal and signal.signal_type != SignalType.NONE:
                 self.state.last_signal = signal
@@ -160,6 +237,7 @@ class BaseStrategy(ABC):
             return None
 
     def record_trade(self, pnl: float) -> None:
+        now = datetime.now(timezone.utc)
         self.state.total_trades += 1
         self.state.total_pnl += pnl
 
@@ -174,6 +252,16 @@ class BaseStrategy(ABC):
         drawdown = self.state.peak_pnl - self.state.total_pnl
         if drawdown > self.state.max_drawdown:
             self.state.max_drawdown = drawdown
+
+        # Anti-overtrading: update close time and hourly counter
+        self.state.last_trade_close_time = now
+        if self.state.hour_start is None:
+            self.state.hour_start = now
+        elif (now - self.state.hour_start).total_seconds() >= 3600:
+            self.state.trades_this_hour = 1
+            self.state.hour_start = now
+        else:
+            self.state.trades_this_hour += 1
 
     @property
     def win_rate(self) -> float:
@@ -208,6 +296,13 @@ class BaseStrategy(ABC):
             "max_drawdown": round(self.state.max_drawdown, 2),
             "errors": self.state.errors,
             "uptime": uptime,
+            "trades_this_hour": self.state.trades_this_hour,
+            "entry_bar_count": self.state.entry_bar_count,
+            "cooldown_active": (
+                self.state.last_trade_close_time is not None
+                and (datetime.now(timezone.utc) - self.state.last_trade_close_time).total_seconds()
+                < self.config.params.get("cooldown_seconds", 300)
+            ),
             "last_signal": (
                 {
                     "type": self.state.last_signal.signal_type.value,

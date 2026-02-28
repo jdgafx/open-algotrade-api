@@ -61,22 +61,27 @@ class SMAAdxBBVolStrategy(BaseStrategy):
 
         # Long: price crosses above SMA + all confirmations
         if prev_price <= prev_sma and price > sma and trend_strong and squeeze and vol_ok:
+            # Multi-confirmation = strong signal. Scale by ADX strength.
+            strength = min(0.6 + (adx - min_adx) / 40, 0.95)
             return Signal(
                 signal_type=SignalType.LONG,
                 symbol=self.config.symbol,
                 price=price,
                 size_usd=self.config.size_usd,
+                strength=strength,
                 reason=f"Multi LONG: SMA cross + ADX={adx:.1f} + BB squeeze + vol confirmed",
                 metadata={"sma": sma, "adx": adx, "bb_width": bb_width},
             )
 
         # Short: price crosses below SMA + all confirmations
         if prev_price >= prev_sma and price < sma and trend_strong and squeeze and vol_ok:
+            strength = min(0.6 + (adx - min_adx) / 40, 0.95)
             return Signal(
                 signal_type=SignalType.SHORT,
                 symbol=self.config.symbol,
                 price=price,
                 size_usd=self.config.size_usd,
+                strength=strength,
                 reason=f"Multi SHORT: SMA cross + ADX={adx:.1f} + BB squeeze + vol confirmed",
                 metadata={"sma": sma, "adx": adx, "bb_width": bb_width},
             )
@@ -108,28 +113,28 @@ class SMAAdxBBVolStrategy(BaseStrategy):
         is_long = position.get("is_long", position.get("size", 0) > 0)
         pnl_pct = position.get("pnl_perc", 0)
 
-        # Exit long: SMA cross down, ADX weakens, or BB expansion
+        # Exit long: SMA cross down or ADX weakens significantly
+        # NOTE: Removed BB expansion exit -- it triggers immediately after squeeze
+        # breakout entries, causing instant exits. Squeeze -> expansion IS the trade.
         if is_long and (
             (prev_price >= prev_sma and price < sma)
-            or adx < min_adx
-            or bb_width > avg_bb_width
+            or adx < min_adx * 0.7  # ADX must drop well below threshold, not just touch it
         ):
             return Signal(
                 signal_type=SignalType.CLOSE_LONG,
                 symbol=self.config.symbol,
-                reason=f"Multi exit long: SMA/ADX/BB signal",
+                reason=f"Multi exit long: SMA cross or ADX weak ({adx:.1f})",
             )
 
-        # Exit short: SMA cross up, ADX weakens, or BB expansion
+        # Exit short: SMA cross up or ADX weakens significantly
         if not is_long and (
             (prev_price <= prev_sma and price > sma)
-            or adx < min_adx
-            or bb_width > avg_bb_width
+            or adx < min_adx * 0.7
         ):
             return Signal(
                 signal_type=SignalType.CLOSE_SHORT,
                 symbol=self.config.symbol,
-                reason=f"Multi exit short: SMA/ADX/BB signal",
+                reason=f"Multi exit short: SMA cross or ADX weak ({adx:.1f})",
             )
 
         if pnl_pct >= self.config.target_pct:

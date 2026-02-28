@@ -49,11 +49,15 @@ class VWMAStrategy(BaseStrategy):
         was_not_aligned = not (prev_fast > prev_mid)
 
         if bullish_aligned and was_not_aligned and price > vwma_fast:
+            # Strength: spread between fast and slow (wider = stronger trend)
+            spread_pct = (vwma_fast - vwma_slow) / vwma_slow if vwma_slow > 0 else 0
+            strength = min(0.5 + spread_pct * 20, 0.9)
             return Signal(
                 signal_type=SignalType.LONG,
                 symbol=self.config.symbol,
                 price=price,
                 size_usd=self.config.size_usd,
+                strength=strength,
                 reason=f"VWMA alignment LONG: fast {vwma_fast:.2f} > mid {vwma_mid:.2f} > slow {vwma_slow:.2f}",
                 metadata={"vwma_fast": vwma_fast, "vwma_mid": vwma_mid, "vwma_slow": vwma_slow},
             )
@@ -63,11 +67,14 @@ class VWMAStrategy(BaseStrategy):
         was_not_bearish = not (prev_fast < prev_mid)
 
         if bearish_aligned and was_not_bearish and price < vwma_fast:
+            spread_pct = (vwma_slow - vwma_fast) / vwma_slow if vwma_slow > 0 else 0
+            strength = min(0.5 + spread_pct * 20, 0.9)
             return Signal(
                 signal_type=SignalType.SHORT,
                 symbol=self.config.symbol,
                 price=price,
                 size_usd=self.config.size_usd,
+                strength=strength,
                 reason=f"VWMA alignment SHORT: fast {vwma_fast:.2f} < mid {vwma_mid:.2f} < slow {vwma_slow:.2f}",
                 metadata={"vwma_fast": vwma_fast, "vwma_mid": vwma_mid, "vwma_slow": vwma_slow},
             )

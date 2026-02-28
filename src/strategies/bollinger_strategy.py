@@ -42,21 +42,28 @@ class BollingerStrategy(BaseStrategy):
         expanding = bb_width > prev_width
 
         if is_squeeze and expanding and price > current["bb_upper"]:
+            # Strength: tighter the prior squeeze, stronger the breakout signal
+            expansion_ratio = bb_width / max(prev_width, 0.001)
+            strength = min(0.5 + expansion_ratio * 0.1, 0.95)
             return Signal(
                 signal_type=SignalType.LONG,
                 symbol=self.config.symbol,
                 price=price,
                 size_usd=self.config.size_usd,
+                strength=strength,
                 reason=f"BB squeeze breakout LONG: width {prev_width:.4f} -> {bb_width:.4f}, price {price:.2f} > upper {current['bb_upper']:.2f}",
                 metadata={"bb_width": bb_width, "squeeze": True},
             )
 
         if is_squeeze and expanding and price < current["bb_lower"]:
+            expansion_ratio = bb_width / max(prev_width, 0.001)
+            strength = min(0.5 + expansion_ratio * 0.1, 0.95)
             return Signal(
                 signal_type=SignalType.SHORT,
                 symbol=self.config.symbol,
                 price=price,
                 size_usd=self.config.size_usd,
+                strength=strength,
                 reason=f"BB squeeze breakout SHORT: width {prev_width:.4f} -> {bb_width:.4f}, price {price:.2f} < lower {current['bb_lower']:.2f}",
                 metadata={"bb_width": bb_width, "squeeze": True},
             )

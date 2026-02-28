@@ -1,3 +1,5 @@
+import asyncio
+import json
 import os
 import logging
 import random
@@ -8,7 +10,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from fastapi import FastAPI, Depends, HTTPException, Request
+from fastapi import FastAPI, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 
@@ -124,6 +126,22 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("Could not initialize RegimeDetector: %s", e)
 
+    # ── 7. Solana DEX Scanner ──
+    solana_scanner = None
+    try:
+        solana_enabled = os.getenv("SOLANA_SCANNER_ENABLED", "true").lower() == "true"
+        if solana_enabled:
+            from src.services.solana_scanner import SolanaScanner, ScannerConfig
+            solana_config = ScannerConfig()
+            solana_scanner = SolanaScanner(config=solana_config)
+            logger.info(
+                "SolanaScanner initialized | birdeye_key=%s | balance=$%.0f",
+                "SET" if solana_config.birdeye_api_key else "NOT SET",
+                solana_config.paper_balance,
+            )
+    except Exception as e:
+        logger.warning("Could not initialize SolanaScanner: %s", e)
+
     # Attach all to app.state
     app.state.orchestrator = orchestrator
     app.state.risk_controller = risk_controller
@@ -134,6 +152,7 @@ async def lifespan(app: FastAPI):
     app.state.trading_mode = trading_mode
     app.state.paper_mode = paper_mode
     app.state.executor = executor
+    app.state.solana_scanner = solana_scanner
 
     # ── Auto-start strategies that were running before shutdown ──
     if orchestrator is not None:
@@ -222,12 +241,32 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.error("Error shutting down whale tracker: %s", e)
 
+    if solana_scanner is not None:
+        try:
+            await solana_scanner.close()
+            logger.info("SolanaScanner shut down cleanly")
+        except Exception as e:
+            logger.error("Error shutting down Solana scanner: %s", e)
+
 
 app = FastAPI(title="Open Algotrade API", version="2.0.0", lifespan=lifespan)
 
+# CORS: use CORS_ORIGINS env var in production, fallback to permissive for dev
+_cors_env = os.getenv("CORS_ORIGINS", "")
+_cors_origins = (
+    [o.strip() for o in _cors_env.split(",") if o.strip()]
+    if _cors_env
+    else [
+        "https://open-algotrade-v3.netlify.app",
+        "http://localhost:3000",
+        "http://localhost:5173",
+        "http://localhost:5174",
+    ]
+)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -241,6 +280,7 @@ from .routes import (
     rbi_router,
     backtest_router,
     regime_router,
+    solana_router,
 )
 from .billing import router as billing_router
 
@@ -251,6 +291,7 @@ app.include_router(rbi_router)
 app.include_router(backtest_router)
 app.include_router(regime_router)
 app.include_router(billing_router)
+app.include_router(solana_router)
 
 
 def _get_or_create_vault_state(db: Session) -> models.VaultState:
@@ -364,18 +405,37 @@ def _get_market_price(symbol: str) -> Optional[schemas.MarketPrice]:
 # Health
 # ──────────────────────────────────────────────
 
-@app.get("/health")
+@app.get("/health", response_model=schemas.HealthResponse)
 def health(request: Request):
     trading_mode = getattr(request.app.state, "trading_mode", "unknown")
     executor = getattr(request.app.state, "executor", None)
-    result = {
-        "status": "ok",
-        "service": "open-algotrade-api",
-        "version": "2.0.0",
-        "trading_mode": trading_mode,
-    }
-    if executor and hasattr(executor, "get_execution_stats"):
-        result["execution_stats"] = executor.get_execution_stats()
+    orchestrator = getattr(request.app.state, "orchestrator", None)
+
+    # Verify strategy registry
+    registry_ok = False
+    registry_count = 0
+    try:
+        from src.strategies.registry import list_strategies
+        strategies = list_strategies()
+        registry_count = len(strategies)
+        registry_ok = registry_count > 0
+    except Exception:
+        pass
+
+    result = schemas.HealthResponse(
+        status="ok" if registry_ok else "degraded",
+        service="open-algotrade-api",
+        version="2.0.0",
+        trading_mode=trading_mode,
+        registry_strategies=registry_count,
+        registry_ok=registry_ok,
+        orchestrator_ok=orchestrator is not None,
+        execution_stats=(
+            executor.get_execution_stats()
+            if executor and hasattr(executor, "get_execution_stats")
+            else None
+        ),
+    )
     return result
 
 
@@ -1183,6 +1243,38 @@ def paper_trades(request: Request, limit: int = 100):
     return schemas.PaperTradesResponse(total=len(trades_out), trades=trades_out)
 
 
+@app.post("/paper/reset")
+async def reset_paper_trading(request: Request):
+    """Reset paper trading balance to initial value and close all positions."""
+    executor = getattr(request.app.state, "executor", None)
+    paper_mode = getattr(request.app.state, "paper_mode", False)
+
+    if not paper_mode or executor is None or not hasattr(executor, "reset"):
+        raise HTTPException(status_code=400, detail="Paper trading is not active")
+
+    # Also reset strategy-level anti-overtrading state
+    orchestrator = getattr(request.app.state, "orchestrator", None)
+    if orchestrator and hasattr(orchestrator, "strategies"):
+        for strategy in orchestrator.strategies.values():
+            strategy.state.total_trades = 0
+            strategy.state.winning_trades = 0
+            strategy.state.losing_trades = 0
+            strategy.state.total_pnl = 0.0
+            strategy.state.max_drawdown = 0.0
+            strategy.state.peak_pnl = 0.0
+            strategy.state.last_trade_close_time = None
+            strategy.state.trades_this_hour = 0
+            strategy.state.hour_start = None
+            strategy.state.entry_bar_count = 0
+
+    executor.reset()
+    return {
+        "status": "reset",
+        "balance": executor.balance,
+        "initial_balance": executor.initial_balance,
+    }
+
+
 # ──────────────────────────────────────────────
 # Dashboard
 # ──────────────────────────────────────────────
@@ -1344,3 +1436,534 @@ def get_deposits(user_id: int, db: Session = Depends(get_db)):
     return db.query(models.Deposit).filter(
         models.Deposit.user_id == user_id
     ).order_by(models.Deposit.timestamp.desc()).all()
+
+
+# ──────────────────────────────────────────────
+# Aggregate Strategy Performance
+# ──────────────────────────────────────────────
+
+@app.get("/strategies/performance", response_model=schemas.AggregatePerformanceResponse)
+def get_strategies_performance(request: Request, db: Session = Depends(get_db)):
+    """Aggregate performance across all strategy instances."""
+    instances = db.query(models.StrategyInstance).all()
+    orchestrator = getattr(request.app.state, "orchestrator", None)
+
+    items = []
+    for inst in instances:
+        total_trades = inst.total_trades
+        winning_trades = inst.winning_trades
+        losing_trades = inst.losing_trades
+        total_pnl = inst.total_pnl
+        max_drawdown = inst.max_drawdown
+
+        if orchestrator and inst.status == "running":
+            strategy = orchestrator.get_strategy(inst.name)
+            if strategy:
+                stats = strategy.get_stats()
+                total_trades = stats.get("total_trades", total_trades)
+                winning_trades = stats.get("winning_trades", winning_trades)
+                losing_trades = stats.get("losing_trades", losing_trades)
+                total_pnl = stats.get("total_pnl", total_pnl)
+                max_drawdown = stats.get("max_drawdown", max_drawdown)
+
+        win_rate = (winning_trades / total_trades * 100) if total_trades > 0 else 0.0
+        avg_trade = total_pnl / total_trades if total_trades > 0 else 0.0
+
+        gross_profit = total_pnl if total_pnl > 0 else 0.0
+        gross_loss = abs(total_pnl) if total_pnl < 0 else 0.0
+        profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else 0.0
+
+        items.append(schemas.StrategyPerformanceItem(
+            name=inst.name,
+            strategy_type=inst.strategy_type,
+            symbol=inst.symbol,
+            status=inst.status,
+            total_pnl=round(total_pnl, 2),
+            total_trades=total_trades,
+            winning_trades=winning_trades,
+            losing_trades=losing_trades,
+            win_rate=round(win_rate, 1),
+            max_drawdown=round(max_drawdown, 2),
+            avg_trade_pnl=round(avg_trade, 2),
+            profit_factor=round(profit_factor, 3),
+        ))
+
+    agg_trades = sum(i.total_trades for i in items)
+    agg_winning = sum(i.winning_trades for i in items)
+    agg_pnl = sum(i.total_pnl for i in items)
+    overall_wr = (agg_winning / agg_trades * 100) if agg_trades > 0 else 0.0
+
+    best = max(items, key=lambda x: x.total_pnl).name if items else None
+    worst = min(items, key=lambda x: x.total_pnl).name if items else None
+
+    return schemas.AggregatePerformanceResponse(
+        total_strategies=len(instances),
+        running_strategies=sum(1 for i in instances if i.status == "running"),
+        total_pnl=round(agg_pnl, 2),
+        total_trades=agg_trades,
+        overall_win_rate=round(overall_wr, 1),
+        best_strategy=best,
+        worst_strategy=worst,
+        strategies=items,
+    )
+
+
+# ──────────────────────────────────────────────
+# Strategy Trades
+# ──────────────────────────────────────────────
+
+@app.get("/strategies/{name}/trades", response_model=schemas.StrategyTradesResponse)
+def get_strategy_trades(
+    name: str, request: Request, limit: int = 100, db: Session = Depends(get_db)
+):
+    """Get trade history for a specific strategy."""
+    instance = db.query(models.StrategyInstance).filter(
+        models.StrategyInstance.name == name
+    ).first()
+    if not instance:
+        raise HTTPException(status_code=404, detail=f"Strategy '{name}' not found")
+
+    paper_mode = getattr(request.app.state, "paper_mode", False)
+    executor = getattr(request.app.state, "executor", None)
+
+    trades_out = []
+    if paper_mode and executor and hasattr(executor, "get_trade_history"):
+        all_trades = executor.get_trade_history()
+        strat_trades = [t for t in all_trades if t.get("strategy") == name]
+        strat_trades = list(reversed(strat_trades))[:limit]
+        for t in strat_trades:
+            trades_out.append(schemas.StrategyTradeItem(
+                id=t["id"],
+                symbol=t["symbol"],
+                side=t["side"],
+                action=t["action"],
+                price=t["price"],
+                size=t["size"],
+                size_usd=t["size_usd"],
+                pnl=t.get("pnl", 0),
+                pnl_pct=t.get("pnl_pct", 0),
+                reason=t.get("reason", ""),
+                timestamp=t["timestamp"],
+            ))
+    else:
+        db_trades = db.query(models.Trade).filter(
+            models.Trade.strategy == name
+        ).order_by(models.Trade.opened_at.desc()).limit(limit).all()
+        for t in db_trades:
+            trades_out.append(schemas.StrategyTradeItem(
+                id=t.id,
+                symbol=t.symbol,
+                side=t.side,
+                action="exit" if t.closed_at else "entry",
+                price=t.exit_price if t.exit_price else t.entry_price,
+                size=t.size,
+                size_usd=t.size * t.entry_price,
+                pnl=t.pnl or 0.0,
+                pnl_pct=0.0,
+                reason=t.exit_reason or "",
+                timestamp=(t.closed_at or t.opened_at).isoformat(),
+            ))
+
+    return schemas.StrategyTradesResponse(
+        strategy_name=name,
+        total=len(trades_out),
+        trades=trades_out,
+    )
+
+
+# ──────────────────────────────────────────────
+# Strategy Signals
+# ──────────────────────────────────────────────
+
+@app.get("/strategies/{name}/signals", response_model=schemas.StrategySignalsResponse)
+def get_strategy_signals(name: str, request: Request, db: Session = Depends(get_db)):
+    """Get recent signal log for a strategy from the orchestrator."""
+    instance = db.query(models.StrategyInstance).filter(
+        models.StrategyInstance.name == name
+    ).first()
+    if not instance:
+        raise HTTPException(status_code=404, detail=f"Strategy '{name}' not found")
+
+    orchestrator = getattr(request.app.state, "orchestrator", None)
+    signals_out = []
+
+    if orchestrator:
+        strategy = orchestrator.get_strategy(name)
+        if strategy and strategy.state.last_signal:
+            sig = strategy.state.last_signal
+            signals_out.append(schemas.SignalLogItem(
+                signal_type=sig.signal_type.value,
+                symbol=sig.symbol,
+                strength=sig.strength,
+                price=sig.price,
+                reason=sig.reason,
+                timestamp=sig.timestamp.isoformat(),
+            ))
+
+    if instance.last_signal and instance.last_signal_time:
+        if not signals_out or signals_out[0].timestamp != instance.last_signal_time.isoformat():
+            signals_out.append(schemas.SignalLogItem(
+                signal_type=instance.last_signal,
+                symbol=instance.symbol,
+                strength=1.0,
+                price=None,
+                reason="",
+                timestamp=instance.last_signal_time.isoformat() if instance.last_signal_time else "",
+            ))
+
+    return schemas.StrategySignalsResponse(
+        strategy_name=name,
+        total=len(signals_out),
+        signals=signals_out,
+    )
+
+
+# ──────────────────────────────────────────────
+# Strategy Optimization
+# ──────────────────────────────────────────────
+
+@app.post("/strategies/{name}/optimize", response_model=schemas.OptimizeResponse)
+async def optimize_strategy(name: str, data: schemas.OptimizeRequest, db: Session = Depends(get_db)):
+    """Run parameter optimization for a specific strategy instance."""
+    instance = db.query(models.StrategyInstance).filter(
+        models.StrategyInstance.name == name
+    ).first()
+    if not instance:
+        raise HTTPException(status_code=404, detail=f"Strategy '{name}' not found")
+
+    if not data.param_ranges:
+        raise HTTPException(status_code=400, detail="param_ranges must not be empty")
+
+    import itertools
+    from src.strategies.registry import get_strategy_class
+    from src.engine.backtester import Backtester
+
+    try:
+        get_strategy_class(instance.strategy_type)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    param_names = list(data.param_ranges.keys())
+    param_values = list(data.param_ranges.values())
+    all_combos = list(itertools.product(*param_values))
+    total_combos = len(all_combos)
+
+    if total_combos > data.max_combinations:
+        step = total_combos / data.max_combinations
+        indices = [int(i * step) for i in range(data.max_combinations)]
+        combos_to_test = [all_combos[i] for i in indices]
+    else:
+        combos_to_test = all_combos
+
+    end_dt = datetime.now(timezone.utc)
+    start_dt = end_dt - timedelta(days=data.lookback_days)
+    start_date = start_dt.isoformat()
+    end_date = end_dt.isoformat()
+
+    results = []
+    for combo in combos_to_test:
+        params = {**instance.params, **dict(zip(param_names, combo))}
+        try:
+            bt = Backtester(initial_capital=data.initial_capital, commission_pct=0.07)
+            engine_result = await bt.run(
+                strategy_type=instance.strategy_type,
+                symbol=instance.symbol,
+                timeframe=instance.timeframe,
+                start_date=start_date,
+                end_date=end_date,
+                params=params,
+            )
+            results.append({
+                "params": dict(zip(param_names, combo)),
+                "sharpe_ratio": engine_result.sharpe_ratio,
+                "total_return_pct": engine_result.total_pnl_pct,
+                "win_rate": engine_result.win_rate,
+                "profit_factor": (
+                    engine_result.profit_factor
+                    if engine_result.profit_factor != float("inf")
+                    else 999.0
+                ),
+                "total_trades": engine_result.total_trades,
+                "max_drawdown_pct": engine_result.max_drawdown_pct,
+            })
+        except Exception as e:
+            logger.warning("Optimize combo %s failed: %s", combo, e)
+            continue
+
+    if not results:
+        raise HTTPException(status_code=500, detail="All parameter combinations failed")
+
+    results.sort(key=lambda r: r["sharpe_ratio"], reverse=True)
+    top_results = results[:10]
+    best = top_results[0]
+
+    return schemas.OptimizeResponse(
+        strategy_name=name,
+        total_combinations=total_combos,
+        tested=len(results),
+        best_params=best["params"],
+        best_sharpe=round(best["sharpe_ratio"], 3),
+        best_return_pct=round(best["total_return_pct"], 2),
+        best_win_rate=round(best["win_rate"], 2),
+        top_results=top_results,
+    )
+
+
+# ──────────────────────────────────────────────
+# Portfolio Summary & Allocation
+# ──────────────────────────────────────────────
+
+@app.get("/portfolio/summary", response_model=schemas.PortfolioSummary)
+def portfolio_summary(request: Request, db: Session = Depends(get_db)):
+    """Portfolio-level stats: total PnL, exposure, mode, strategy counts."""
+    trading_mode = getattr(request.app.state, "trading_mode", "unknown")
+    executor = getattr(request.app.state, "executor", None)
+    paper_mode = getattr(request.app.state, "paper_mode", False)
+
+    instances = db.query(models.StrategyInstance).all()
+    running = sum(1 for i in instances if i.status == "running")
+    total_trades = sum(i.total_trades for i in instances)
+    winning = sum(i.winning_trades for i in instances)
+    agg_pnl = sum(i.total_pnl for i in instances)
+    win_rate = (winning / total_trades * 100) if total_trades > 0 else 0.0
+
+    total_equity = 0.0
+    initial_equity = 0.0
+    max_dd_pct = 0.0
+    active_positions = 0
+
+    if paper_mode and executor and hasattr(executor, "get_execution_stats"):
+        stats = executor.get_execution_stats()
+        total_equity = stats.get("balance", 0)
+        initial_equity = stats.get("initial_balance", 0)
+        max_dd_pct = stats.get("max_drawdown_pct", 0)
+        active_positions = stats.get("active_positions", 0)
+        agg_pnl = stats.get("total_realized_pnl", agg_pnl)
+    else:
+        vault = _get_or_create_vault_state(db)
+        total_equity = vault.total_equity
+        initial_equity = vault.total_equity
+        positions = _get_live_positions()
+        active_positions = len(positions)
+
+    total_return_pct = (
+        ((total_equity - initial_equity) / initial_equity * 100)
+        if initial_equity > 0
+        else 0.0
+    )
+
+    total_exposure = sum(i.size_usd for i in instances if i.status == "running")
+
+    return schemas.PortfolioSummary(
+        trading_mode=trading_mode,
+        total_equity=round(total_equity, 2),
+        initial_equity=round(initial_equity, 2),
+        total_pnl=round(agg_pnl, 2),
+        total_return_pct=round(total_return_pct, 2),
+        max_drawdown_pct=round(max_dd_pct, 2),
+        total_strategies=len(instances),
+        running_strategies=running,
+        total_trades=total_trades,
+        win_rate=round(win_rate, 1),
+        active_positions=active_positions,
+        total_exposure_usd=round(total_exposure, 2),
+    )
+
+
+@app.get("/portfolio/allocation", response_model=schemas.PortfolioAllocationResponse)
+def portfolio_allocation(request: Request, db: Session = Depends(get_db)):
+    """Current strategy allocation showing size and percentage of total."""
+    instances = db.query(models.StrategyInstance).all()
+    orchestrator = getattr(request.app.state, "orchestrator", None)
+
+    total_allocated = sum(i.size_usd for i in instances)
+
+    items = []
+    for inst in instances:
+        current_pnl = inst.total_pnl
+        if orchestrator and inst.status == "running":
+            strategy = orchestrator.get_strategy(inst.name)
+            if strategy:
+                current_pnl = strategy.state.total_pnl
+
+        alloc_pct = (inst.size_usd / total_allocated * 100) if total_allocated > 0 else 0.0
+        items.append(schemas.AllocationItem(
+            strategy_name=inst.name,
+            strategy_type=inst.strategy_type,
+            symbol=inst.symbol,
+            status=inst.status,
+            size_usd=inst.size_usd,
+            allocation_pct=round(alloc_pct, 1),
+            current_pnl=round(current_pnl, 2),
+        ))
+
+    return schemas.PortfolioAllocationResponse(
+        total_allocated_usd=round(total_allocated, 2),
+        strategies=items,
+    )
+
+
+# ──────────────────────────────────────────────
+# Market Overview
+# ──────────────────────────────────────────────
+
+@app.get("/market/overview", response_model=schemas.MarketOverviewResponse)
+def market_overview(
+    request: Request,
+    symbols: str = "BTC,ETH,SOL",
+):
+    """Market conditions summary: regime, volatility, recommended strategies per symbol."""
+    symbol_list = [s.strip().upper() for s in symbols.split(",")]
+    regime_detector = getattr(request.app.state, "regime_detector", None)
+
+    results = []
+    for symbol in symbol_list:
+        item = schemas.MarketSymbolOverview(symbol=symbol)
+
+        price_data = _get_market_price(symbol)
+        if price_data:
+            item.price = price_data.price
+
+        if regime_detector:
+            try:
+                regime = regime_detector.get_current_regime(symbol)
+                if regime:
+                    item.regime = regime.get("regime", "unknown")
+                    item.regime_confidence = regime.get("confidence", 0.0)
+                    try:
+                        from src.services.regime_detector import REGIME_STRATEGY_MAP, MarketRegime
+                        current = MarketRegime(item.regime)
+                        item.recommended_strategies = REGIME_STRATEGY_MAP.get(current, [])
+                    except (ValueError, ImportError):
+                        pass
+
+                vol_status = regime_detector.get_volatility_status()
+                vol = vol_status.get(symbol)
+                if vol:
+                    item.is_volatile = vol.get("is_volatile", False)
+                    atr_pct = vol.get("atr_pct", 0)
+                    if atr_pct < 1.5:
+                        item.volatility_regime = "low"
+                    elif atr_pct < 3.0:
+                        item.volatility_regime = "medium"
+                    elif atr_pct < 5.0:
+                        item.volatility_regime = "high"
+                    else:
+                        item.volatility_regime = "extreme"
+            except Exception as e:
+                logger.warning("Could not get regime for %s: %s", symbol, e)
+
+        results.append(item)
+
+    return schemas.MarketOverviewResponse(
+        timestamp=datetime.now(timezone.utc).isoformat(),
+        symbols=results,
+    )
+
+
+# ──────────────────────────────────────────────
+# WebSocket: Real-time Signals
+# ──────────────────────────────────────────────
+
+_signal_subscribers: List[WebSocket] = []
+
+
+@app.websocket("/ws/signals")
+async def ws_signals(websocket: WebSocket):
+    """WebSocket endpoint for real-time strategy signal streaming."""
+    await websocket.accept()
+    _signal_subscribers.append(websocket)
+    logger.info("Signal WebSocket client connected (%d total)", len(_signal_subscribers))
+
+    try:
+        orchestrator = getattr(websocket.app.state, "orchestrator", None)
+        while True:
+            if orchestrator:
+                all_stats = orchestrator.get_all_stats()
+                signals_data = []
+                for s in all_stats:
+                    last_sig = s.get("last_signal")
+                    if last_sig:
+                        signals_data.append({
+                            "strategy": s["name"],
+                            "symbol": s["symbol"],
+                            "signal": last_sig,
+                            "is_running": s["is_running"],
+                            "iterations": s["iterations"],
+                            "total_pnl": s["total_pnl"],
+                        })
+                if signals_data:
+                    await websocket.send_json({
+                        "type": "signals",
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "data": signals_data,
+                    })
+            else:
+                await websocket.send_json({
+                    "type": "heartbeat",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                })
+
+            try:
+                msg = await asyncio.wait_for(websocket.receive_text(), timeout=5.0)
+                if msg == "ping":
+                    await websocket.send_json({"type": "pong"})
+            except asyncio.TimeoutError:
+                pass
+
+    except WebSocketDisconnect:
+        logger.info("Signal WebSocket client disconnected")
+    except Exception as e:
+        logger.error("Signal WebSocket error: %s", e)
+    finally:
+        if websocket in _signal_subscribers:
+            _signal_subscribers.remove(websocket)
+
+
+# ──────────────────────────────────────────────
+# WebSocket: Real-time Portfolio Updates
+# ──────────────────────────────────────────────
+
+@app.websocket("/ws/portfolio")
+async def ws_portfolio(websocket: WebSocket):
+    """WebSocket endpoint for real-time portfolio updates."""
+    await websocket.accept()
+    logger.info("Portfolio WebSocket client connected")
+
+    try:
+        while True:
+            executor = getattr(websocket.app.state, "executor", None)
+            paper_mode = getattr(websocket.app.state, "paper_mode", False)
+            orchestrator = getattr(websocket.app.state, "orchestrator", None)
+
+            portfolio_data = {
+                "type": "portfolio_update",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "trading_mode": getattr(websocket.app.state, "trading_mode", "unknown"),
+            }
+
+            if paper_mode and executor and hasattr(executor, "get_execution_stats"):
+                stats = executor.get_execution_stats()
+                portfolio_data["balance"] = stats.get("balance", 0)
+                portfolio_data["total_pnl"] = stats.get("total_realized_pnl", 0)
+                portfolio_data["total_return_pct"] = stats.get("total_return_pct", 0)
+                portfolio_data["active_positions"] = stats.get("active_positions", 0)
+                portfolio_data["max_drawdown_pct"] = stats.get("max_drawdown_pct", 0)
+
+            if orchestrator:
+                portfolio_data["running_strategies"] = orchestrator.get_running_count()
+                portfolio_data["orchestrator_pnl"] = round(orchestrator.get_total_pnl(), 2)
+
+            await websocket.send_json(portfolio_data)
+
+            try:
+                msg = await asyncio.wait_for(websocket.receive_text(), timeout=3.0)
+                if msg == "ping":
+                    await websocket.send_json({"type": "pong"})
+            except asyncio.TimeoutError:
+                pass
+
+    except WebSocketDisconnect:
+        logger.info("Portfolio WebSocket client disconnected")
+    except Exception as e:
+        logger.error("Portfolio WebSocket error: %s", e)

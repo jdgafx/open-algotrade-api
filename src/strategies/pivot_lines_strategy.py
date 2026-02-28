@@ -43,22 +43,33 @@ class PivotLinesStrategy(BaseStrategy):
 
         # Long: price crosses above pivot point
         if prev_price <= prev_pp and price > pp:
+            # Strength based on distance to target vs distance to stop
+            reward = r1 - price if r1 > price else 0
+            risk = price - s1 if price > s1 else price * 0.01
+            rr_ratio = reward / risk if risk > 0 else 1.0
+            strength = min(0.5 + rr_ratio * 0.15, 0.9)
             return Signal(
                 signal_type=SignalType.LONG,
                 symbol=self.config.symbol,
                 price=price,
                 size_usd=self.config.size_usd,
+                strength=strength,
                 reason=f"Pivot LONG: price {price:.2f} crossed above PP {pp:.2f}, target R1={r1:.2f}",
                 metadata={"pivot": pp, "r1": r1, "s1": s1},
             )
 
         # Short: price crosses below pivot point
         if prev_price >= prev_pp and price < pp:
+            reward = price - s1 if price > s1 else 0
+            risk = r1 - price if r1 > price else price * 0.01
+            rr_ratio = reward / risk if risk > 0 else 1.0
+            strength = min(0.5 + rr_ratio * 0.15, 0.9)
             return Signal(
                 signal_type=SignalType.SHORT,
                 symbol=self.config.symbol,
                 price=price,
                 size_usd=self.config.size_usd,
+                strength=strength,
                 reason=f"Pivot SHORT: price {price:.2f} crossed below PP {pp:.2f}, target S1={s1:.2f}",
                 metadata={"pivot": pp, "r1": r1, "s1": s1},
             )

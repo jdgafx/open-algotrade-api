@@ -47,30 +47,39 @@ class MarketMakerStrategy(BaseStrategy):
             logger.debug("MM no-trade zone: ATR %.4f%% > threshold", atr_pct * 100)
             return None
 
-        # Alternate buy/sell for market making
+        # For market making, prefer buying when price is below short-term average
+        # and selling when above -- this gives the MM an edge vs blind alternating
+        sma_short = data["close"].iloc[-5:].mean()
         bid_price = price * (1 - spread / 2)
         ask_price = price * (1 + spread / 2)
 
-        if self._last_side != "buy":
+        # Low volatility = better for MM, higher signal strength
+        vol_quality = max(0.3, 1.0 - atr_pct / (spread * 3))
+
+        if price < sma_short and self._last_side != "buy":
             self._last_side = "buy"
             return Signal(
                 signal_type=SignalType.LONG,
                 symbol=self.config.symbol,
                 price=bid_price,
                 size_usd=min(self.config.size_usd, max_position_usd),
+                strength=vol_quality,
                 reason=f"MM bid: {bid_price:.2f} (spread={spread:.4f}, ATR%={atr_pct:.4f})",
                 metadata={"spread": spread, "atr_pct": atr_pct, "order_type": "limit"},
             )
-        else:
+        elif price > sma_short and self._last_side != "sell":
             self._last_side = "sell"
             return Signal(
                 signal_type=SignalType.SHORT,
                 symbol=self.config.symbol,
                 price=ask_price,
                 size_usd=min(self.config.size_usd, max_position_usd),
+                strength=vol_quality,
                 reason=f"MM ask: {ask_price:.2f} (spread={spread:.4f}, ATR%={atr_pct:.4f})",
                 metadata={"spread": spread, "atr_pct": atr_pct, "order_type": "limit"},
             )
+
+        return None
 
     async def should_exit(
         self, data: pd.DataFrame, position: Dict[str, Any]

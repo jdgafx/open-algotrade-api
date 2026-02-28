@@ -159,6 +159,7 @@ class Backtester:
                     "size": current_trade.size_usd / current_trade.entry_price,
                     "is_long": current_trade.side == "long",
                     "entry_price": current_trade.entry_price,
+                    "entry_px": current_trade.entry_price,  # Alias for strategies using entry_px
                     "pnl_perc": pnl_pct,
                 }
 

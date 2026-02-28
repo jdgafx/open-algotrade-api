@@ -46,22 +46,28 @@ class QuarterTheoryStrategy(BaseStrategy):
 
         # Long: price breaks above upper quarter level
         if prev_price <= prev_upper + threshold and price > upper_quarter + threshold:
+            breakout_dist = (price - upper_quarter) / quarter_size
+            strength = min(0.5 + breakout_dist * 0.3, 0.9)
             return Signal(
                 signal_type=SignalType.LONG,
                 symbol=self.config.symbol,
                 price=price,
                 size_usd=self.config.size_usd,
+                strength=strength,
                 reason=f"Quarter LONG: price {price:.2f} broke above {upper_quarter:.2f}",
                 metadata={"quarter_level": upper_quarter, "quarter_size": quarter_size},
             )
 
         # Short: price breaks below lower quarter level
         if prev_price >= prev_lower - threshold and price < lower_quarter - threshold:
+            breakout_dist = (lower_quarter - price) / quarter_size
+            strength = min(0.5 + breakout_dist * 0.3, 0.9)
             return Signal(
                 signal_type=SignalType.SHORT,
                 symbol=self.config.symbol,
                 price=price,
                 size_usd=self.config.size_usd,
+                strength=strength,
                 reason=f"Quarter SHORT: price {price:.2f} broke below {lower_quarter:.2f}",
                 metadata={"quarter_level": lower_quarter, "quarter_size": quarter_size},
             )

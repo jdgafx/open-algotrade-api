@@ -42,11 +42,15 @@ class VWAPBotStrategy(BaseStrategy):
             and price > vwap
             and current["close"] > current["open"]
         ):
+            # Strength based on candle body size relative to price
+            body_pct = abs(current["close"] - current["open"]) / price
+            strength = min(0.5 + body_pct * 50 + abs(price_vs_vwap) * 20, 0.9)
             return Signal(
                 signal_type=SignalType.LONG,
                 symbol=self.config.symbol,
                 price=price,
                 size_usd=self.config.size_usd,
+                strength=strength,
                 reason=f"VWAP crossover LONG: price {price:.2f} > VWAP {vwap:.2f} ({price_vs_vwap:+.4f})",
                 metadata={"vwap": vwap, "price_vs_vwap": price_vs_vwap},
             )
@@ -57,11 +61,14 @@ class VWAPBotStrategy(BaseStrategy):
             and price < vwap
             and current["close"] < current["open"]
         ):
+            body_pct = abs(current["close"] - current["open"]) / price
+            strength = min(0.5 + body_pct * 50 + abs(price_vs_vwap) * 20, 0.9)
             return Signal(
                 signal_type=SignalType.SHORT,
                 symbol=self.config.symbol,
                 price=price,
                 size_usd=self.config.size_usd,
+                strength=strength,
                 reason=f"VWAP crossover SHORT: price {price:.2f} < VWAP {vwap:.2f} ({price_vs_vwap:+.4f})",
                 metadata={"vwap": vwap, "price_vs_vwap": price_vs_vwap},
             )

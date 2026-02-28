@@ -5,6 +5,7 @@ Uses the backtesting engine with 2x commission (slippage buffer),
 multi-symbol/multi-timeframe testing, and full metrics suite.
 """
 
+import itertools
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
@@ -393,3 +394,332 @@ async def run_multi_backtest(config: MultiBacktestConfig, background_tasks: Back
                 ))
 
     return results
+
+
+# -- Optimization Schemas ------------------------------------------
+
+class OptimizeConfig(BaseModel):
+    strategy_type: str
+    symbol: str = "BTC"
+    timeframe: str = "1h"
+    lookback_days: int = Field(default=90, ge=7, le=365)
+    initial_capital: float = 10000.0
+    commission_pct: float = Field(default=0.07, description="Commission % (default 0.07 = 2x HL taker fee)")
+    param_ranges: Dict[str, List[Any]] = {}
+    max_combinations: int = Field(default=50, ge=1, le=200)
+
+
+class OptimizeResult(BaseModel):
+    total_combinations: int
+    tested: int
+    best_params: Dict[str, Any]
+    best_sharpe: float
+    best_return_pct: float
+    best_win_rate: float
+    best_profit_factor: float
+    top_results: List[Dict[str, Any]]
+
+
+# -- Optimization Endpoint -----------------------------------------
+
+@router.post("/optimize", response_model=OptimizeResult)
+async def optimize_strategy(config: OptimizeConfig):
+    """
+    Grid search over parameter ranges to find optimal strategy settings.
+
+    Generates all combinations from param_ranges, runs a backtest for each
+    (up to max_combinations), and returns the top 10 ranked by Sharpe ratio.
+
+    Example param_ranges:
+        {"rsi_period": [10, 14, 20], "oversold": [25, 30, 35], "overbought": [65, 70, 75]}
+    """
+    from src.strategies.registry import get_strategy_class
+    if not get_strategy_class(config.strategy_type):
+        raise HTTPException(status_code=400, detail=f"Unknown strategy type: {config.strategy_type}")
+
+    if not config.param_ranges:
+        raise HTTPException(status_code=400, detail="param_ranges must not be empty")
+
+    # Generate all parameter combinations
+    param_names = list(config.param_ranges.keys())
+    param_values = list(config.param_ranges.values())
+    all_combos = list(itertools.product(*param_values))
+    total_combinations = len(all_combos)
+
+    # Cap at max_combinations (take evenly spaced samples if too many)
+    if total_combinations > config.max_combinations:
+        step = total_combinations / config.max_combinations
+        indices = [int(i * step) for i in range(config.max_combinations)]
+        combos_to_test = [all_combos[i] for i in indices]
+    else:
+        combos_to_test = all_combos
+
+    from src.engine.backtester import Backtester
+
+    start_date, end_date = _lookback_to_dates(config.lookback_days)
+    results = []
+
+    for combo in combos_to_test:
+        params = dict(zip(param_names, combo))
+        try:
+            bt = Backtester(
+                initial_capital=config.initial_capital,
+                commission_pct=config.commission_pct,
+            )
+            engine_result = await bt.run(
+                strategy_type=config.strategy_type,
+                symbol=config.symbol,
+                timeframe=config.timeframe,
+                start_date=start_date,
+                end_date=end_date,
+                params=params,
+            )
+            results.append({
+                "params": params,
+                "sharpe_ratio": engine_result.sharpe_ratio,
+                "total_return_pct": engine_result.total_pnl_pct,
+                "win_rate": engine_result.win_rate,
+                "profit_factor": engine_result.profit_factor if engine_result.profit_factor != float('inf') else 999.0,
+                "total_trades": engine_result.total_trades,
+                "max_drawdown_pct": engine_result.max_drawdown_pct,
+                "avg_trade_pnl": engine_result.avg_trade_pnl,
+            })
+        except Exception as e:
+            logger.warning("Optimize combo %s failed: %s", params, e)
+            continue
+
+    if not results:
+        raise HTTPException(status_code=500, detail="All parameter combinations failed during backtesting")
+
+    # Rank by Sharpe ratio (descending), take top 10
+    results.sort(key=lambda r: r["sharpe_ratio"], reverse=True)
+    top_results = results[:10]
+    best = top_results[0]
+
+    return OptimizeResult(
+        total_combinations=total_combinations,
+        tested=len(results),
+        best_params=best["params"],
+        best_sharpe=round(best["sharpe_ratio"], 3),
+        best_return_pct=round(best["total_return_pct"], 2),
+        best_win_rate=round(best["win_rate"], 2),
+        best_profit_factor=round(best["profit_factor"], 3),
+        top_results=top_results,
+    )
+
+
+# -- Bulk Optimize All Strategies Endpoint --------------------------------
+
+class BulkOptimizeConfig(BaseModel):
+    symbol: str = "BTC"
+    timeframe: str = "1h"
+    lookback_days: int = Field(default=90, ge=7, le=365)
+    initial_capital: float = 10000.0
+    commission_pct: float = 0.07
+
+class StrategyScore(BaseModel):
+    strategy_type: str
+    category: str
+    total_return_pct: float
+    sharpe_ratio: float
+    max_drawdown_pct: float
+    win_rate: float
+    profit_factor: float
+    total_trades: int
+    avg_trade_pnl: float
+    grade: str  # A/B/C/D/F based on composite score
+
+class BulkOptimizeResult(BaseModel):
+    symbol: str
+    timeframe: str
+    lookback_days: int
+    total_strategies: int
+    profitable_count: int
+    results: List[StrategyScore]
+
+
+@router.post("/optimize/all", response_model=BulkOptimizeResult)
+async def optimize_all_strategies(config: BulkOptimizeConfig):
+    """
+    Run every registered strategy with its default (optimized) params against
+    the specified symbol/timeframe. Returns a ranked scorecard showing which
+    strategies are profitable and which need more work.
+
+    Grades:
+    - A: Sharpe > 1.5, Profit Factor > 2.0, Win Rate > 55%
+    - B: Sharpe > 0.8, Profit Factor > 1.5, Win Rate > 50%
+    - C: Sharpe > 0.3, Profit Factor > 1.0
+    - D: Profitable but weak metrics
+    - F: Unprofitable
+    """
+    from src.strategies.registry import list_strategies
+    from src.engine.backtester import Backtester
+
+    strategies = list_strategies()
+    start_date, end_date = _lookback_to_dates(config.lookback_days)
+    results = []
+
+    for strat_info in strategies:
+        stype = strat_info["strategy_type"]
+        category = strat_info.get("category", "unknown")
+        default_params = strat_info.get("default_params", {})
+
+        try:
+            bt = Backtester(
+                initial_capital=config.initial_capital,
+                commission_pct=config.commission_pct,
+            )
+            engine_result = await bt.run(
+                strategy_type=stype,
+                symbol=config.symbol,
+                timeframe=config.timeframe,
+                start_date=start_date,
+                end_date=end_date,
+                params=default_params,
+            )
+
+            # Calculate grade
+            sharpe = engine_result.sharpe_ratio
+            pf = engine_result.profit_factor if engine_result.profit_factor != float('inf') else 999.0
+            wr = engine_result.win_rate
+            ret = engine_result.total_pnl_pct
+
+            if sharpe > 1.5 and pf > 2.0 and wr > 55:
+                grade = "A"
+            elif sharpe > 0.8 and pf > 1.5 and wr > 50:
+                grade = "B"
+            elif sharpe > 0.3 and pf > 1.0:
+                grade = "C"
+            elif ret > 0:
+                grade = "D"
+            else:
+                grade = "F"
+
+            results.append(StrategyScore(
+                strategy_type=stype,
+                category=category,
+                total_return_pct=round(engine_result.total_pnl_pct, 2),
+                sharpe_ratio=round(sharpe, 3),
+                max_drawdown_pct=round(engine_result.max_drawdown_pct, 2),
+                win_rate=round(wr, 2),
+                profit_factor=round(pf, 3),
+                total_trades=engine_result.total_trades,
+                avg_trade_pnl=round(engine_result.avg_trade_pnl, 2),
+                grade=grade,
+            ))
+        except Exception as e:
+            logger.warning("Bulk optimize failed for %s: %s", stype, e)
+            results.append(StrategyScore(
+                strategy_type=stype,
+                category=category,
+                total_return_pct=0, sharpe_ratio=0, max_drawdown_pct=0,
+                win_rate=0, profit_factor=0, total_trades=0, avg_trade_pnl=0,
+                grade="F",
+            ))
+
+    # Sort by Sharpe ratio descending
+    results.sort(key=lambda r: r.sharpe_ratio, reverse=True)
+    profitable_count = sum(1 for r in results if r.total_return_pct > 0)
+
+    return BulkOptimizeResult(
+        symbol=config.symbol,
+        timeframe=config.timeframe,
+        lookback_days=config.lookback_days,
+        total_strategies=len(results),
+        profitable_count=profitable_count,
+        results=results,
+    )
+
+
+# -- Recommended Param Ranges for Optimization --------------------------------
+
+# Pre-built param ranges for each strategy category, optimized for crypto
+_PARAM_RANGES: Dict[str, Dict[str, List[Any]]] = {
+    "turtle": {
+        "lookback_period": [20, 35, 55],
+        "atr_multiplier": [2.0, 3.0, 4.0],
+        "take_profit_pct": [0.03, 0.05, 0.08],
+        "min_hold_bars": [3, 5, 8],
+    },
+    "bollinger": {
+        "bb_period": [15, 20, 25],
+        "bb_std": [1.8, 2.0, 2.5],
+        "squeeze_threshold": [0.03, 0.04, 0.05],
+        "min_hold_bars": [3, 5, 7],
+    },
+    "rsi": {
+        "rsi_period": [10, 14, 21],
+        "oversold": [20, 25, 30],
+        "overbought": [70, 75, 80],
+        "min_hold_bars": [3, 5, 8],
+    },
+    "macd": {
+        "fast_period": [8, 12, 16],
+        "slow_period": [21, 26, 30],
+        "signal_period": [7, 9, 12],
+        "confirmation_bars": [1, 2],
+    },
+    "adx": {
+        "adx_period": [10, 14, 20],
+        "adx_threshold": [20, 25, 30],
+        "exit_threshold": [15, 18, 20],
+        "min_hold_bars": [3, 5, 8],
+    },
+    "mean_reversion": {
+        "sma_entry_period": [15, 20, 30],
+        "zscore_entry": [1.5, 2.0, 2.5],
+        "reversion_target_pct": [0.01, 0.015, 0.02],
+        "min_hold_bars": [3, 5, 7],
+    },
+    "sma_crossover": {
+        "sma_period": [15, 20, 30, 50],
+        "support_lookback": [15, 20, 30],
+        "min_hold_bars": [3, 5, 8],
+    },
+    "ichimoku": {
+        "tenkan_period": [7, 9, 12],
+        "kijun_period": [22, 26, 30],
+        "senkou_b_period": [44, 52, 60],
+    },
+    "correlation": {
+        "lag_threshold": [0.003, 0.005, 0.008],
+        "sl_pct": [0.01, 0.015, 0.02],
+        "tp_pct": [0.02, 0.025, 0.03],
+    },
+    "rsi_vwap": {
+        "rsi_period": [10, 14, 21],
+        "oversold": [30, 35, 40],
+        "overbought": [60, 65, 70],
+    },
+    "sma_adx_bb_vol": {
+        "sma_period": [15, 20, 30],
+        "min_adx": [20, 25, 30],
+        "volume_multiplier": [1.0, 1.3, 1.5],
+    },
+    "ema_bollinger": {
+        "short_ema_period": [12, 20, 30],
+        "long_ema_period": [40, 50, 80],
+        "bb_std": [1.8, 2.0, 2.5],
+    },
+}
+
+
+@router.get("/optimize/param-ranges/{strategy_type}")
+def get_param_ranges(strategy_type: str):
+    """
+    Get recommended parameter ranges for optimization of a specific strategy.
+    Use these with the /backtest/optimize endpoint.
+    """
+    ranges = _PARAM_RANGES.get(strategy_type)
+    if not ranges:
+        # Return empty dict -- user can still specify their own ranges
+        return {
+            "strategy_type": strategy_type,
+            "param_ranges": {},
+            "message": f"No pre-built ranges for '{strategy_type}'. Provide custom param_ranges in the optimize request.",
+        }
+    return {
+        "strategy_type": strategy_type,
+        "param_ranges": ranges,
+        "message": f"Use these ranges with POST /backtest/optimize",
+    }
