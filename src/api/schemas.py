@@ -294,3 +294,114 @@ class StrategyTypeInfoFull(BaseModel):
     default_params: Dict[str, Any]
     category: str
     risk_level: str
+
+
+# ──────────────────────────────────────────────
+# Batch Deploy
+# ──────────────────────────────────────────────
+
+class BatchStrategyItem(BaseModel):
+    """Single strategy config within a batch deploy request."""
+    name: str
+    strategy_type: str
+    symbol: str = "BTC"
+    timeframe: str = "1h"
+    leverage: int = 3
+    size_usd: float = 100.0
+    target_pct: float = 5.0
+    max_loss_pct: float = -10.0
+    lookback_days: int = 7
+    interval_seconds: int = 30
+    enabled: bool = True
+    params: Dict[str, Any] = {}
+
+
+class BatchDeployRequest(BaseModel):
+    strategies: List[BatchStrategyItem]
+
+
+class BatchDeployResultItem(BaseModel):
+    name: str
+    strategy_type: str
+    symbol: str
+    status: str  # "started", "created", "error"
+    error: Optional[str] = None
+
+
+class BatchDeployResponse(BaseModel):
+    total: int
+    started: int
+    failed: int
+    results: List[BatchDeployResultItem]
+
+
+# ──────────────────────────────────────────────
+# Paper Trading Stats / Positions / Trades
+# ──────────────────────────────────────────────
+
+class PaperPosition(BaseModel):
+    symbol: str
+    side: str
+    size: float
+    entry_price: float
+    mark_price: Optional[float] = None
+    unrealized_pnl: float = 0.0
+    pnl_pct: float = 0.0
+    leverage: int = 1
+    size_usd: float = 0.0
+    strategy_name: str = ""
+    entry_time: Optional[str] = None
+
+
+class PaperTrade(BaseModel):
+    id: int
+    symbol: str
+    side: str
+    action: str
+    price: float
+    size: float
+    size_usd: float
+    pnl: float = 0.0
+    pnl_pct: float = 0.0
+    reason: str = ""
+    strategy: str = ""
+    timestamp: str
+
+
+class PaperEquityCurvePoint(BaseModel):
+    timestamp: str
+    equity: float
+
+
+class PaperStrategyBreakdown(BaseModel):
+    strategy_name: str
+    total_trades: int
+    realized_pnl: float
+    active_position: Optional[PaperPosition] = None
+
+
+class PaperStatsResponse(BaseModel):
+    mode: str
+    balance: float
+    initial_balance: float
+    total_return_pct: float
+    total_realized_pnl: float
+    peak_balance: float
+    max_drawdown_pct: float
+    total_executions: int
+    total_trades: int
+    success_rate: float
+    active_positions: int
+    positions: List[PaperPosition]
+    equity_curve: List[PaperEquityCurvePoint]
+    strategy_breakdown: List[PaperStrategyBreakdown]
+
+
+class PaperPositionsResponse(BaseModel):
+    total: int
+    positions: List[PaperPosition]
+
+
+class PaperTradesResponse(BaseModel):
+    total: int
+    trades: List[PaperTrade]

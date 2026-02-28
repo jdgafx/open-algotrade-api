@@ -135,6 +135,62 @@ async def lifespan(app: FastAPI):
     app.state.paper_mode = paper_mode
     app.state.executor = executor
 
+    # ── Auto-start strategies that were running before shutdown ──
+    if orchestrator is not None:
+        try:
+            from .database import SessionLocal
+            from src.strategies.base_strategy import StrategyConfig, StrategyTier
+            from src.strategies.registry import list_strategies
+
+            db = SessionLocal()
+            try:
+                running_instances = db.query(models.StrategyInstance).filter(
+                    models.StrategyInstance.status == "running"
+                ).all()
+
+                if running_instances:
+                    logger.info("Auto-start: found %d strategies with status=running", len(running_instances))
+                    tier_map = {"A": StrategyTier.A, "B": StrategyTier.B, "C": StrategyTier.C, "D": StrategyTier.D}
+                    available = [s["strategy_type"] for s in list_strategies()]
+
+                    for inst in running_instances:
+                        try:
+                            if inst.strategy_type not in available:
+                                logger.warning(
+                                    "Auto-start: skipping %s — unknown strategy_type %s",
+                                    inst.name, inst.strategy_type,
+                                )
+                                continue
+
+                            config = StrategyConfig(
+                                name=inst.name,
+                                symbol=inst.symbol,
+                                tier=tier_map.get(inst.tier, StrategyTier.A),
+                                timeframe=inst.timeframe,
+                                leverage=inst.leverage,
+                                size_usd=inst.size_usd,
+                                target_pct=inst.target_pct,
+                                max_loss_pct=inst.max_loss_pct,
+                                lookback_days=inst.lookback_days,
+                                interval_seconds=inst.interval_seconds,
+                                enabled=True,
+                                params=inst.params or {},
+                            )
+                            orchestrator.add_strategy(inst.name, inst.strategy_type, config)
+                            await orchestrator.start_strategy(inst.name)
+                            logger.info("Auto-start: started %s (%s on %s)", inst.name, inst.strategy_type, inst.symbol)
+                        except Exception as e:
+                            logger.warning("Auto-start: failed to start %s — %s", inst.name, e)
+                            inst.status = "error"
+                            inst.error_message = f"Auto-start failed: {e}"
+                            db.commit()
+                else:
+                    logger.info("Auto-start: no strategies with status=running")
+            finally:
+                db.close()
+        except Exception as e:
+            logger.warning("Auto-start: could not restore strategies — %s", e)
+
     yield
 
     # Shutdown: stop all services
@@ -856,6 +912,275 @@ async def stop_strategy_instance(request: Request, name: str, db: Session = Depe
     instance.status = "stopped"
     db.commit()
     return {"status": "stopped", "name": name}
+
+
+# ──────────────────────────────────────────────
+# Batch Deploy
+# ──────────────────────────────────────────────
+
+@app.post("/strategies/deploy-batch", response_model=schemas.BatchDeployResponse)
+async def deploy_batch(
+    request: Request,
+    data: schemas.BatchDeployRequest,
+    db: Session = Depends(get_db),
+):
+    """Create and start multiple strategies in one call."""
+    from src.strategies.registry import list_strategies
+    from src.strategies.base_strategy import StrategyConfig, StrategyTier
+
+    available = {s["strategy_type"]: s for s in list_strategies()}
+    tier_map = {"A": StrategyTier.A, "B": StrategyTier.B, "C": StrategyTier.C, "D": StrategyTier.D}
+    orchestrator = getattr(request.app.state, "orchestrator", None)
+
+    results: List[schemas.BatchDeployResultItem] = []
+    started = 0
+    failed = 0
+
+    for item in data.strategies:
+        # Validate strategy type
+        if item.strategy_type not in available:
+            results.append(schemas.BatchDeployResultItem(
+                name=item.name, strategy_type=item.strategy_type, symbol=item.symbol,
+                status="error", error=f"Unknown strategy type: {item.strategy_type}",
+            ))
+            failed += 1
+            continue
+
+        # Check name uniqueness
+        existing = db.query(models.StrategyInstance).filter(
+            models.StrategyInstance.name == item.name
+        ).first()
+        if existing:
+            results.append(schemas.BatchDeployResultItem(
+                name=item.name, strategy_type=item.strategy_type, symbol=item.symbol,
+                status="error", error=f"Name '{item.name}' already exists",
+            ))
+            failed += 1
+            continue
+
+        registry_info = available[item.strategy_type]
+
+        # Create DB instance
+        instance = models.StrategyInstance(
+            name=item.name,
+            strategy_type=item.strategy_type,
+            tier=registry_info["tier"],
+            symbol=item.symbol,
+            timeframe=item.timeframe,
+            leverage=item.leverage,
+            size_usd=item.size_usd,
+            target_pct=item.target_pct,
+            max_loss_pct=item.max_loss_pct,
+            lookback_days=item.lookback_days,
+            interval_seconds=item.interval_seconds,
+            enabled=item.enabled,
+            params={**registry_info["default_params"], **item.params},
+        )
+        db.add(instance)
+        db.flush()  # get the ID without committing yet
+
+        # Start via orchestrator
+        if orchestrator is not None and item.enabled:
+            try:
+                config = StrategyConfig(
+                    name=item.name,
+                    symbol=item.symbol,
+                    tier=tier_map.get(registry_info["tier"], StrategyTier.A),
+                    timeframe=item.timeframe,
+                    leverage=item.leverage,
+                    size_usd=item.size_usd,
+                    target_pct=item.target_pct,
+                    max_loss_pct=item.max_loss_pct,
+                    lookback_days=item.lookback_days,
+                    interval_seconds=item.interval_seconds,
+                    enabled=True,
+                    params={**registry_info["default_params"], **item.params},
+                )
+                orchestrator.add_strategy(item.name, item.strategy_type, config)
+                await orchestrator.start_strategy(item.name)
+                instance.status = "running"
+                instance.started_at = datetime.utcnow()
+                started += 1
+                results.append(schemas.BatchDeployResultItem(
+                    name=item.name, strategy_type=item.strategy_type, symbol=item.symbol,
+                    status="started",
+                ))
+            except Exception as e:
+                logger.error("Batch deploy: failed to start %s — %s", item.name, e)
+                instance.status = "error"
+                instance.error_message = str(e)
+                failed += 1
+                results.append(schemas.BatchDeployResultItem(
+                    name=item.name, strategy_type=item.strategy_type, symbol=item.symbol,
+                    status="error", error=str(e),
+                ))
+        else:
+            # No orchestrator or disabled — just create
+            results.append(schemas.BatchDeployResultItem(
+                name=item.name, strategy_type=item.strategy_type, symbol=item.symbol,
+                status="created",
+            ))
+
+    db.commit()
+
+    return schemas.BatchDeployResponse(
+        total=len(data.strategies),
+        started=started,
+        failed=failed,
+        results=results,
+    )
+
+
+# ──────────────────────────────────────────────
+# Paper Trading Monitoring
+# ──────────────────────────────────────────────
+
+@app.get("/paper/stats", response_model=schemas.PaperStatsResponse)
+async def paper_stats(request: Request):
+    """Detailed paper trading stats: balance, PnL, equity curve, per-strategy breakdown."""
+    executor = getattr(request.app.state, "executor", None)
+    paper_mode = getattr(request.app.state, "paper_mode", False)
+
+    if not paper_mode or executor is None or not hasattr(executor, "get_execution_stats"):
+        raise HTTPException(status_code=400, detail="Paper trading is not active")
+
+    stats = executor.get_execution_stats()
+    trades = executor.get_trade_history()
+    equity_curve = executor.get_equity_curve()
+    positions_raw = await executor.get_all_positions()
+    active_pos = executor.get_active_positions()
+
+    # Build per-strategy breakdown from trade history
+    strat_map: dict = {}
+    for t in trades:
+        sname = t.get("strategy", "unknown")
+        if sname not in strat_map:
+            strat_map[sname] = {"total_trades": 0, "realized_pnl": 0.0}
+        strat_map[sname]["total_trades"] += 1
+        strat_map[sname]["realized_pnl"] += t.get("pnl", 0.0)
+
+    # Enrich positions with mark prices
+    positions_out = []
+    for p in positions_raw:
+        positions_out.append(schemas.PaperPosition(
+            symbol=p["symbol"],
+            side=p["side"],
+            size=abs(p["size"]),
+            entry_price=p["entry_px"],
+            mark_price=p.get("entry_px", 0) + (p.get("unrealized_pnl", 0) / abs(p["size"])) if abs(p["size"]) > 0 else 0,
+            unrealized_pnl=p.get("unrealized_pnl", 0),
+            pnl_pct=p.get("pnl_perc", 0),
+        ))
+
+    # Build breakdown with active positions per strategy
+    breakdown = []
+    for sname, sdata in strat_map.items():
+        # Find active position for this strategy
+        active_position = None
+        for key, pos_info in active_pos.items():
+            if pos_info.get("strategy") == sname:
+                active_position = schemas.PaperPosition(
+                    symbol=pos_info["symbol"],
+                    side=pos_info["side"],
+                    size=abs(pos_info["size"]),
+                    entry_price=pos_info["entry_price"],
+                    strategy_name=sname,
+                    entry_time=pos_info.get("entry_time"),
+                )
+                break
+
+        breakdown.append(schemas.PaperStrategyBreakdown(
+            strategy_name=sname,
+            total_trades=sdata["total_trades"],
+            realized_pnl=round(sdata["realized_pnl"], 2),
+            active_position=active_position,
+        ))
+
+    return schemas.PaperStatsResponse(
+        mode="paper",
+        balance=stats.get("balance", 0),
+        initial_balance=stats.get("initial_balance", 0),
+        total_return_pct=stats.get("total_return_pct", 0),
+        total_realized_pnl=stats.get("total_realized_pnl", 0),
+        peak_balance=stats.get("peak_balance", 0),
+        max_drawdown_pct=stats.get("max_drawdown_pct", 0),
+        total_executions=stats.get("total_executions", 0),
+        total_trades=stats.get("total_trades", 0),
+        success_rate=stats.get("success_rate", 0),
+        active_positions=stats.get("active_positions", 0),
+        positions=positions_out,
+        equity_curve=[
+            schemas.PaperEquityCurvePoint(timestamp=pt["timestamp"], equity=pt["equity"])
+            for pt in equity_curve
+        ],
+        strategy_breakdown=breakdown,
+    )
+
+
+@app.get("/paper/positions", response_model=schemas.PaperPositionsResponse)
+async def paper_positions(request: Request):
+    """All current paper positions with live unrealized PnL."""
+    executor = getattr(request.app.state, "executor", None)
+    paper_mode = getattr(request.app.state, "paper_mode", False)
+
+    if not paper_mode or executor is None or not hasattr(executor, "get_all_positions"):
+        raise HTTPException(status_code=400, detail="Paper trading is not active")
+
+    positions_raw = await executor.get_all_positions()
+    active_pos = executor.get_active_positions()
+
+    positions_out = []
+    for p in positions_raw:
+        symbol = p["symbol"]
+        pos_detail = active_pos.get(symbol, {})
+        positions_out.append(schemas.PaperPosition(
+            symbol=symbol,
+            side=p["side"],
+            size=abs(p["size"]),
+            entry_price=p["entry_px"],
+            mark_price=p.get("entry_px", 0) + (p.get("unrealized_pnl", 0) / abs(p["size"])) if abs(p["size"]) > 0 else 0,
+            unrealized_pnl=p.get("unrealized_pnl", 0),
+            pnl_pct=p.get("pnl_perc", 0),
+            strategy_name=pos_detail.get("strategy", ""),
+            entry_time=pos_detail.get("entry_time"),
+        ))
+
+    return schemas.PaperPositionsResponse(total=len(positions_out), positions=positions_out)
+
+
+@app.get("/paper/trades", response_model=schemas.PaperTradesResponse)
+def paper_trades(request: Request, limit: int = 100):
+    """Paper trade history with timestamps and PnL."""
+    executor = getattr(request.app.state, "executor", None)
+    paper_mode = getattr(request.app.state, "paper_mode", False)
+
+    if not paper_mode or executor is None or not hasattr(executor, "get_trade_history"):
+        raise HTTPException(status_code=400, detail="Paper trading is not active")
+
+    trades = executor.get_trade_history()
+
+    # Most recent first, limited
+    trades_reversed = list(reversed(trades))[:limit]
+
+    trades_out = [
+        schemas.PaperTrade(
+            id=t["id"],
+            symbol=t["symbol"],
+            side=t["side"],
+            action=t["action"],
+            price=t["price"],
+            size=t["size"],
+            size_usd=t["size_usd"],
+            pnl=t.get("pnl", 0),
+            pnl_pct=t.get("pnl_pct", 0),
+            reason=t.get("reason", ""),
+            strategy=t.get("strategy", ""),
+            timestamp=t["timestamp"],
+        )
+        for t in trades_reversed
+    ]
+
+    return schemas.PaperTradesResponse(total=len(trades_out), trades=trades_out)
 
 
 # ──────────────────────────────────────────────
