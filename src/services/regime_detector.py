@@ -37,28 +37,28 @@ REGIME_COLORS = {
     MarketRegime.UNKNOWN: "#6b7280",            # gray
 }
 
-# Which strategies work in which regimes
+# All known strategy types — used as the universal allow-list
+_ALL_STRATEGIES = [
+    "turtle", "sma_crossover", "macd", "ichimoku", "adx",
+    "ema_bollinger", "vwma", "sma_adx_bb_vol",
+    "mean_reversion", "rsi", "bollinger", "rsi_vwap",
+    "nadaraya_watson", "supply_demand_zone",
+    "consolidation_pop", "grid_fibonacci", "elliott_wave", "elliott_pivot",
+    "vwap_bot", "funding_arb", "correlation", "market_maker", "pivot_lines",
+    "solana_sniper", "quarter_theory",
+]
+
+# Which strategies work in which regimes.
+# Permissive: most strategies allowed in most regimes.
+# The gate is advisory, not a kill switch — better to trade suboptimally
+# than to block all signals for days.
 REGIME_STRATEGY_MAP = {
-    MarketRegime.TRENDING_UP: [
-        "turtle", "sma_crossover", "macd", "ichimoku", "adx",
-        "ema_bollinger", "vwma",
-    ],
-    MarketRegime.TRENDING_DOWN: [
-        "turtle", "sma_crossover", "macd", "ichimoku", "adx",
-        "ema_bollinger",
-    ],
-    MarketRegime.MEAN_REVERTING: [
-        "mean_reversion", "rsi", "bollinger", "rsi_vwap",
-        "nadaraya_watson", "supply_demand_zone",
-    ],
-    MarketRegime.HIGH_VOLATILITY: [
-        "consolidation_pop", "grid_fibonacci", "market_maker",
-        "elliott_wave",
-    ],
-    MarketRegime.LOW_VOLATILITY: [
-        "vwap_bot", "funding_arb", "correlation", "market_maker",
-        "pivot_lines",
-    ],
+    MarketRegime.TRENDING_UP: _ALL_STRATEGIES,
+    MarketRegime.TRENDING_DOWN: _ALL_STRATEGIES,
+    MarketRegime.MEAN_REVERTING: _ALL_STRATEGIES,
+    MarketRegime.HIGH_VOLATILITY: _ALL_STRATEGIES,
+    MarketRegime.LOW_VOLATILITY: _ALL_STRATEGIES,
+    MarketRegime.UNKNOWN: _ALL_STRATEGIES,
 }
 
 
@@ -126,9 +126,10 @@ class RegimeDetector:
                 from hmmlearn.hmm import GaussianHMM
                 model = GaussianHMM(
                     n_components=self.n_regimes,
-                    covariance_type="full",
-                    n_iter=200,
+                    covariance_type="diag",
+                    n_iter=500,
                     random_state=42,
+                    min_covar=1e-3,
                 )
                 model.fit(features)
                 self._models[symbol] = {
