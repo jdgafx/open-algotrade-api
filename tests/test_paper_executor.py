@@ -88,8 +88,8 @@ class TestPaperExecutorEntry:
         result = await executor.execute_signal(signal, strategy)
 
         assert result.success is True
-        assert "BTC" in executor._positions
-        pos = executor._positions["BTC"]
+        assert "test-paper:BTC" in executor._positions
+        pos = executor._positions["test-paper:BTC"]
         assert pos.side == "long"
         assert pos.size > 0
         assert pos.strategy_name == "test-paper"
@@ -109,7 +109,7 @@ class TestPaperExecutorEntry:
         result = await executor.execute_signal(signal, strategy)
 
         assert result.success is True
-        pos = executor._positions["BTC"]
+        pos = executor._positions["test-paper:BTC"]
         assert pos.side == "short"
         assert pos.size < 0
 
@@ -162,7 +162,7 @@ class TestPaperExecutorExit:
         assert result.success is True
         assert result.realized_pnl > 0
         assert executor.balance > balance_after_entry
-        assert "BTC" not in executor._positions
+        assert "test-paper:BTC" not in executor._positions
         assert len(executor._trades) == 2  # entry + exit
 
     @pytest.mark.asyncio
@@ -206,7 +206,7 @@ class TestPaperExecutorExit:
 class TestPaperExecutorPosition:
     @pytest.mark.asyncio
     async def test_get_position_empty(self, executor):
-        pos = await executor.get_position("BTC")
+        pos = await executor.get_position("BTC", strategy_name="test-paper")
         assert pos is None
 
     @pytest.mark.asyncio
@@ -215,7 +215,7 @@ class TestPaperExecutorPosition:
         await executor.execute_signal(signal, strategy)
 
         # Price unchanged
-        pos = await executor.get_position("BTC")
+        pos = await executor.get_position("BTC", strategy_name="test-paper")
         assert pos is not None
         assert pos["symbol"] == "BTC"
         assert pos["side"] == "long"

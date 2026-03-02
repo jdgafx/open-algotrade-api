@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 class VWAPBotStrategy(BaseStrategy):
 
     async def should_enter(self, data: pd.DataFrame) -> Optional[Signal]:
+        p = self.config.params
         if len(data) < 5:
             return None
 
@@ -35,16 +36,17 @@ class VWAPBotStrategy(BaseStrategy):
             return None
 
         price_vs_vwap = (price - vwap) / vwap
+        min_distance = p.get("min_vwap_distance", 0.0015)  # 0.15% minimum distance from VWAP
 
-        # Long: price crosses above VWAP with momentum
+        # Long: price crosses above VWAP with momentum + minimum distance
         if (
             prev["close"] <= prev.get("vwap", vwap)
             and price > vwap
+            and price_vs_vwap >= min_distance
             and current["close"] > current["open"]
         ):
-            # Strength based on candle body size relative to price
             body_pct = abs(current["close"] - current["open"]) / price
-            strength = min(0.5 + body_pct * 50 + abs(price_vs_vwap) * 20, 0.9)
+            strength = min(0.5 + body_pct * 40 + abs(price_vs_vwap) * 30, 0.95)
             return Signal(
                 signal_type=SignalType.LONG,
                 symbol=self.config.symbol,
@@ -55,14 +57,15 @@ class VWAPBotStrategy(BaseStrategy):
                 metadata={"vwap": vwap, "price_vs_vwap": price_vs_vwap},
             )
 
-        # Short: price crosses below VWAP with momentum
+        # Short: price crosses below VWAP with momentum + minimum distance
         if (
             prev["close"] >= prev.get("vwap", vwap)
             and price < vwap
+            and abs(price_vs_vwap) >= min_distance
             and current["close"] < current["open"]
         ):
             body_pct = abs(current["close"] - current["open"]) / price
-            strength = min(0.5 + body_pct * 50 + abs(price_vs_vwap) * 20, 0.9)
+            strength = min(0.5 + body_pct * 40 + abs(price_vs_vwap) * 30, 0.95)
             return Signal(
                 signal_type=SignalType.SHORT,
                 symbol=self.config.symbol,
@@ -94,18 +97,18 @@ class VWAPBotStrategy(BaseStrategy):
             close_type = SignalType.CLOSE_LONG if is_long else SignalType.CLOSE_SHORT
             return Signal(signal_type=close_type, symbol=self.config.symbol, reason=f"VWAP stop: {pnl_pct:.1f}%")
 
-        # Exit on VWAP cross against position
-        if is_long and price < vwap * 0.998:
+        # Exit on VWAP cross against position (0.5% buffer to avoid noise exits)
+        if is_long and price < vwap * 0.995:
             return Signal(
                 signal_type=SignalType.CLOSE_LONG,
                 symbol=self.config.symbol,
-                reason=f"VWAP exit: price {price:.2f} fell below VWAP {vwap:.2f}",
+                reason=f"VWAP exit: price {price:.2f} fell 0.5%+ below VWAP {vwap:.2f}",
             )
-        if not is_long and price > vwap * 1.002:
+        if not is_long and price > vwap * 1.005:
             return Signal(
                 signal_type=SignalType.CLOSE_SHORT,
                 symbol=self.config.symbol,
-                reason=f"VWAP exit: price {price:.2f} rose above VWAP {vwap:.2f}",
+                reason=f"VWAP exit: price {price:.2f} rose 0.5%+ above VWAP {vwap:.2f}",
             )
 
         return None

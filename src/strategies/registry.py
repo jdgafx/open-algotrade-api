@@ -125,10 +125,10 @@ def _register_all():
         "Bollinger Band squeeze breakout with band-width triggers",
         "BTC", "1h",
         {
-            "bb_period": 20, "bb_std": 2.0, "squeeze_threshold": 0.04,
-            # Anti-overtrading
-            "min_hold_bars": 6, "cooldown_seconds": 1800, "max_trades_per_hour": 1,
-            "min_signal_strength": 0.6,
+            "bb_period": 20, "bb_std": 2.0, "squeeze_threshold": 0.035,
+            # Anti-overtrading (tightened for crypto)
+            "min_hold_bars": 8, "cooldown_seconds": 3600, "max_trades_per_hour": 1,
+            "min_signal_strength": 0.65,
         },
         category="breakout", risk_level="medium",
     )
@@ -150,9 +150,10 @@ def _register_all():
         "BTC", "15m",
         {
             "vwap_bias_long": 0.7, "vwap_bias_short": 0.3,
-            # Anti-overtrading
-            "min_hold_bars": 6, "cooldown_seconds": 1200, "max_trades_per_hour": 1,
-            "min_signal_strength": 0.6,
+            "min_vwap_distance": 0.0015,  # 0.15% min distance from VWAP
+            # Anti-overtrading (tightened for crypto)
+            "min_hold_bars": 12, "cooldown_seconds": 3600, "max_trades_per_hour": 1,
+            "min_signal_strength": 0.75,
         },
         category="trend", risk_level="low",
     )
@@ -442,10 +443,10 @@ def _register_all():
         "BTC", "15m",
         {
             "rsi_period": 14,
-            "oversold": 35, "overbought": 65,
-            # Anti-overtrading
-            "min_hold_bars": 6, "cooldown_seconds": 1200, "max_trades_per_hour": 1,
-            "min_signal_strength": 0.65,
+            "oversold": 25, "overbought": 75,
+            # Anti-overtrading (tightened for crypto)
+            "min_hold_bars": 12, "cooldown_seconds": 3600, "max_trades_per_hour": 1,
+            "min_signal_strength": 0.75,
         },
         category="reversal", risk_level="low",
     )

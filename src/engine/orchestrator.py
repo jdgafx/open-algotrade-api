@@ -325,8 +325,8 @@ class StrategyOrchestrator:
                 # ── Gate 2: Regime Detection ──
                 regime_allows = self._check_regime_gate(name, symbol, data)
 
-                # Get current position
-                position = await self.executor.get_position(symbol)
+                # Get current position (keyed per strategy for isolation)
+                position = await self.executor.get_position(symbol, strategy_name=name)
 
                 # Run strategy iteration (includes per-strategy anti-overtrading)
                 signal = await strategy.run_iteration(data, position)

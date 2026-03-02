@@ -175,10 +175,9 @@ class BaseStrategy(ABC):
 
                 signal = await self.should_exit(data, position)
 
-                # If we got an exit signal, record the close timestamp
+                # If we got an exit signal, reset bar count
+                # (trade counting is handled by record_trade() called from executor)
                 if signal and signal.signal_type != SignalType.NONE:
-                    self.state.last_trade_close_time = now
-                    self.state.trades_this_hour += 1
                     self.state.entry_bar_count = 0
             else:
                 # Reset bar count when flat

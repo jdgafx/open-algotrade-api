@@ -85,19 +85,21 @@ class BollingerStrategy(BaseStrategy):
         is_long = position.get("is_long", position.get("size", 0) > 0)
         pnl_pct = position.get("pnl_perc", 0)
 
+        # Exit with 1% buffer below/above SMA to let breakouts develop
+        # (pullbacks to SMA are normal after squeeze breakouts)
         if is_long:
-            if price <= sma:
+            if price <= sma * 0.99:
                 return Signal(
                     signal_type=SignalType.CLOSE_LONG,
                     symbol=self.config.symbol,
-                    reason=f"BB exit: price {price:.2f} crossed below SMA {sma:.2f}",
+                    reason=f"BB exit: price {price:.2f} fell 1%+ below SMA {sma:.2f}",
                 )
         else:
-            if price >= sma:
+            if price >= sma * 1.01:
                 return Signal(
                     signal_type=SignalType.CLOSE_SHORT,
                     symbol=self.config.symbol,
-                    reason=f"BB exit: price {price:.2f} crossed above SMA {sma:.2f}",
+                    reason=f"BB exit: price {price:.2f} rose 1%+ above SMA {sma:.2f}",
                 )
 
         if pnl_pct >= self.config.target_pct:

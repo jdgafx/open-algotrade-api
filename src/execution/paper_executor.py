@@ -219,13 +219,12 @@ class PaperTradingExecutor:
             commission = size_usd * self.commission_pct
             signed_size = asset_size if is_buy else -asset_size
 
-            # Record position
-            pos_key = symbol
+            # Record position — keyed by strategy:symbol for isolation
+            pos_key = f"{config.name}:{symbol}"
             if pos_key in self._positions:
-                # Already in a position — could average in, but for simplicity skip
                 return ExecutionResult(
                     success=False,
-                    error=f"Already in position for {symbol}",
+                    error=f"Already in position for {config.name}:{symbol}",
                 )
 
             self._positions[pos_key] = PaperPosition(
@@ -290,7 +289,8 @@ class PaperTradingExecutor:
         symbol = signal.symbol or config.symbol
 
         try:
-            pos = self._positions.get(symbol)
+            pos_key = f"{config.name}:{symbol}"
+            pos = self._positions.get(pos_key)
             if not pos:
                 return ExecutionResult(success=True, error="No position to close")
 
@@ -339,7 +339,7 @@ class PaperTradingExecutor:
             self._trades.append(trade)
 
             # Remove position
-            del self._positions[symbol]
+            del self._positions[pos_key]
 
             order_result = PaperOrderResult(
                 success=True,
@@ -372,9 +372,10 @@ class PaperTradingExecutor:
             self._execution_history.append(result)
             return result
 
-    async def get_position(self, symbol: str) -> Optional[Dict[str, Any]]:
-        """Get current paper position for a symbol."""
-        pos = self._positions.get(symbol)
+    async def get_position(self, symbol: str, strategy_name: str = "") -> Optional[Dict[str, Any]]:
+        """Get current paper position for a strategy:symbol pair."""
+        pos_key = f"{strategy_name}:{symbol}" if strategy_name else symbol
+        pos = self._positions.get(pos_key)
         if not pos:
             return None
 
@@ -412,18 +413,42 @@ class PaperTradingExecutor:
     async def get_all_positions(self) -> List[Dict[str, Any]]:
         """Get all open paper positions."""
         positions = []
-        for symbol in self._positions:
-            pos = await self.get_position(symbol)
-            if pos:
-                positions.append(pos)
+        for pos_key, pos in self._positions.items():
+            try:
+                mid = await asyncio.to_thread(self._fetch_mid_price, pos.symbol)
+                abs_size = abs(pos.size)
+                if pos.side == "long":
+                    unrealized_pnl = (mid - pos.entry_price) * abs_size
+                else:
+                    unrealized_pnl = (pos.entry_price - mid) * abs_size
+                pnl_pct = (unrealized_pnl / (pos.entry_price * abs_size)) * 100 if abs_size > 0 else 0
+                positions.append({
+                    "symbol": pos.symbol,
+                    "size": pos.size,
+                    "entry_px": pos.entry_price,
+                    "pnl_perc": pnl_pct,
+                    "unrealized_pnl": unrealized_pnl,
+                    "is_long": pos.side == "long",
+                    "side": pos.side,
+                })
+            except Exception:
+                positions.append({
+                    "symbol": pos.symbol,
+                    "size": pos.size,
+                    "entry_px": pos.entry_price,
+                    "pnl_perc": 0,
+                    "unrealized_pnl": 0,
+                    "is_long": pos.side == "long",
+                    "side": pos.side,
+                })
         return positions
 
     async def get_account_value(self) -> float:
         """Get total paper account value (balance + unrealized PnL)."""
         total_unrealized = 0
-        for symbol, pos in self._positions.items():
+        for pos_key, pos in self._positions.items():
             try:
-                mid = self._fetch_mid_price(symbol)
+                mid = self._fetch_mid_price(pos.symbol)
                 abs_size = abs(pos.size)
                 if pos.side == "long":
                     total_unrealized += (mid - pos.entry_price) * abs_size
@@ -437,11 +462,11 @@ class PaperTradingExecutor:
         """Close all paper positions."""
         logger.critical("[PAPER] EMERGENCY CLOSE ALL")
         results = []
-        for symbol in list(self._positions.keys()):
-            pos = self._positions[symbol]
+        for pos_key in list(self._positions.keys()):
+            pos = self._positions[pos_key]
             is_buy = pos.size < 0
             try:
-                fill_price = self._get_fill_price(symbol, is_buy)
+                fill_price = self._get_fill_price(pos.symbol, is_buy)
                 abs_size = abs(pos.size)
 
                 if pos.side == "long":
@@ -450,10 +475,10 @@ class PaperTradingExecutor:
                     pnl = (pos.entry_price - fill_price) * abs_size
 
                 self.balance += pnl - (abs_size * fill_price * self.commission_pct)
-                del self._positions[symbol]
+                del self._positions[pos_key]
 
                 results.append(ExecutionResult(success=True, realized_pnl=pnl))
-                logger.info("[PAPER] Emergency close | %s | pnl=$%.2f", symbol, pnl)
+                logger.info("[PAPER] Emergency close | %s | pnl=$%.2f", pos.symbol, pnl)
             except Exception as e:
                 results.append(ExecutionResult(success=False, error=str(e)))
         return results
@@ -463,9 +488,10 @@ class PaperTradingExecutor:
         symbol: str,
         target_pct: float = 5.0,
         max_loss_pct: float = -10.0,
+        strategy_name: str = "",
     ) -> Optional[ExecutionResult]:
         """Check PnL guard and close if triggered."""
-        pos_data = await self.get_position(symbol)
+        pos_data = await self.get_position(symbol, strategy_name=strategy_name)
         if not pos_data:
             return None
 
@@ -475,11 +501,11 @@ class PaperTradingExecutor:
                 "[PAPER] PnL guard triggered | %s | pnl=%.2f%% | target=%.1f%% | max_loss=%.1f%%",
                 symbol, pnl_pct, target_pct, max_loss_pct,
             )
-            # Simulate close
-            pos = self._positions.get(symbol)
+            pos_key = f"{strategy_name}:{symbol}" if strategy_name else symbol
+            pos = self._positions.get(pos_key)
             if pos:
                 is_buy = pos.size < 0
-                fill_price = self._get_fill_price(symbol, is_buy)
+                fill_price = self._get_fill_price(pos.symbol, is_buy)
                 abs_size = abs(pos.size)
 
                 if pos.side == "long":
@@ -488,15 +514,15 @@ class PaperTradingExecutor:
                     pnl = (pos.entry_price - fill_price) * abs_size
 
                 self.balance += pnl - (abs_size * fill_price * self.commission_pct)
-                del self._positions[symbol]
+                del self._positions[pos_key]
 
                 return ExecutionResult(success=True, realized_pnl=pnl)
         return None
 
     def get_active_positions(self) -> Dict[str, Dict]:
-        """Get active paper positions as dict."""
+        """Get active paper positions as dict keyed by symbol."""
         return {
-            k: {
+            v.symbol: {
                 "strategy": v.strategy_name,
                 "symbol": v.symbol,
                 "side": v.side,

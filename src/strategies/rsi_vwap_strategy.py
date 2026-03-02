@@ -47,32 +47,32 @@ class RSIVWAPStrategy(BaseStrategy):
         if pd.isna(prev_rsi):
             return None
 
-        # Long: RSI was below oversold and recovering (crossing up) + price crosses above VWAP
-        # Much tighter than before: require RSI to actually be in oversold territory recently
-        rsi_recovering = prev_rsi <= oversold + 5 and rsi > prev_rsi
-        if rsi_recovering and prev_price < prev_vwap and price > vwap:
-            strength = min(0.5 + (oversold + 10 - rsi) / 30, 0.9)  # Stronger when RSI is lower
+        # Long: RSI crosses UP through oversold level + price crosses above VWAP
+        # Requires actual crossover (prev below, current at/above) — not just "near"
+        rsi_cross_up = prev_rsi < oversold and rsi >= oversold
+        if rsi_cross_up and prev_price < prev_vwap and price > vwap:
+            strength = min(0.5 + (oversold - prev_rsi) / 20, 0.95)  # Stronger when deeper oversold
             return Signal(
                 signal_type=SignalType.LONG,
                 symbol=self.config.symbol,
                 price=price,
                 size_usd=self.config.size_usd,
                 strength=max(strength, 0.5),
-                reason=f"RSI+VWAP LONG: RSI={rsi:.1f} recovering from {prev_rsi:.1f}, price crossed above VWAP {vwap:.2f}",
+                reason=f"RSI+VWAP LONG: RSI crossed {oversold} ({prev_rsi:.1f}->{rsi:.1f}), price above VWAP {vwap:.2f}",
                 metadata={"rsi": rsi, "vwap": vwap},
             )
 
-        # Short: RSI was above overbought and declining (crossing down) + price crosses below VWAP
-        rsi_declining = prev_rsi >= overbought - 5 and rsi < prev_rsi
-        if rsi_declining and prev_price > prev_vwap and price < vwap:
-            strength = min(0.5 + (rsi - overbought + 10) / 30, 0.9)
+        # Short: RSI crosses DOWN through overbought level + price crosses below VWAP
+        rsi_cross_down = prev_rsi > overbought and rsi <= overbought
+        if rsi_cross_down and prev_price > prev_vwap and price < vwap:
+            strength = min(0.5 + (prev_rsi - overbought) / 20, 0.95)
             return Signal(
                 signal_type=SignalType.SHORT,
                 symbol=self.config.symbol,
                 price=price,
                 size_usd=self.config.size_usd,
                 strength=max(strength, 0.5),
-                reason=f"RSI+VWAP SHORT: RSI={rsi:.1f} declining from {prev_rsi:.1f}, price crossed below VWAP {vwap:.2f}",
+                reason=f"RSI+VWAP SHORT: RSI crossed {overbought} ({prev_rsi:.1f}->{rsi:.1f}), price below VWAP {vwap:.2f}",
                 metadata={"rsi": rsi, "vwap": vwap},
             )
 
@@ -96,16 +96,16 @@ class RSIVWAPStrategy(BaseStrategy):
         is_long = position.get("is_long", position.get("size", 0) > 0)
         pnl_pct = position.get("pnl_perc", 0)
 
-        # Exit long: RSI overbought or price below VWAP
-        if is_long and (rsi > overbought or price < vwap):
+        # Exit long: RSI overbought AND price losing VWAP (0.3% buffer to avoid noise exits)
+        if is_long and (rsi > overbought or price < vwap * 0.997):
             return Signal(
                 signal_type=SignalType.CLOSE_LONG,
                 symbol=self.config.symbol,
                 reason=f"RSI+VWAP exit long: RSI={rsi:.1f}, price vs VWAP={price - vwap:.2f}",
             )
 
-        # Exit short: RSI oversold or price above VWAP
-        if not is_long and (rsi < oversold or price > vwap):
+        # Exit short: RSI oversold AND price regaining VWAP (0.3% buffer)
+        if not is_long and (rsi < oversold or price > vwap * 1.003):
             return Signal(
                 signal_type=SignalType.CLOSE_SHORT,
                 symbol=self.config.symbol,

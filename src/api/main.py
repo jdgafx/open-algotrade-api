@@ -218,6 +218,14 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning("Auto-start: could not restore strategies — %s", e)
 
+    # ── Auto-start risk controller (Layer 0 seatbelt — always on) ──
+    if risk_controller is not None:
+        try:
+            await risk_controller.start()
+            logger.info("RiskController auto-started | monitoring active")
+        except Exception as e:
+            logger.warning("RiskController auto-start failed: %s", e)
+
     yield
 
     # Shutdown: stop all services
@@ -898,9 +906,11 @@ def list_strategy_instances(request: Request, db: Session = Depends(get_db)):
             trades = executor.get_trade_history() if hasattr(executor, "get_trade_history") else []
             active_pos = executor.get_active_positions() if hasattr(executor, "get_active_positions") else {}
 
-            # Build per-strategy breakdown from trade history
+            # Build per-strategy breakdown from trade history (exits only — entries have pnl=0)
             strat_trades: dict = {}
             for t in trades:
+                if t.get("action") != "exit":
+                    continue
                 sname = t.get("strategy", "unknown")
                 if sname not in strat_trades:
                     strat_trades[sname] = {"total": 0, "wins": 0, "pnl": 0.0}
@@ -1339,9 +1349,11 @@ async def paper_stats(request: Request):
     positions_raw = await executor.get_all_positions()
     active_pos = executor.get_active_positions()
 
-    # Build per-strategy breakdown from trade history
+    # Build per-strategy breakdown from trade history (exits only — entries have pnl=0)
     strat_map: dict = {}
     for t in trades:
+        if t.get("action") != "exit":
+            continue
         sname = t.get("strategy", "unknown")
         if sname not in strat_map:
             strat_map[sname] = {"total_trades": 0, "realized_pnl": 0.0}
