@@ -66,6 +66,7 @@ class RiskController:
         self._trailing_stops: Dict[str, float] = {}  # symbol -> highest/lowest mark
         self._last_check: Optional[datetime] = None
         self._subscribers: List[Callable] = []
+        self._last_snapshot: Optional[RiskSnapshot] = None
 
         logger.info("RiskController initialized | config=%s", self.config.model_dump())
 
@@ -147,7 +148,9 @@ class RiskController:
         logger.info("RiskController STOPPED")
 
     def get_snapshot(self) -> RiskSnapshot:
-        """Get current risk state snapshot."""
+        """Get current risk state snapshot (returns last live snapshot if available)."""
+        if self._last_snapshot is not None:
+            return self._last_snapshot
         return RiskSnapshot(
             status=self._status,
             account_value=self._start_of_day_equity,
@@ -239,7 +242,7 @@ class RiskController:
             (total_margin / account_value * 100) if account_value > 0 else 0.0
         )
 
-        # Update snapshot and broadcast
+        # Update snapshot, store for API, and broadcast
         snapshot = RiskSnapshot(
             status=self._status,
             account_value=account_value,
@@ -254,6 +257,7 @@ class RiskController:
             trailing_stops=dict(self._trailing_stops),
             last_check=self._last_check,
         )
+        self._last_snapshot = snapshot
         await self._broadcast(snapshot)
 
         # === RISK CHECKS (ordered by severity) ===
