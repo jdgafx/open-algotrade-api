@@ -55,8 +55,8 @@ class StrategyConfig:
     leverage: int = 3
     size_usd: float = 50.0  # Reduced from $100 (MoonDev: "tiny size, tiny size" for forward testing)
     max_positions: int = 1
-    target_pct: float = 5.0
-    max_loss_pct: float = -10.0
+    target_pct: float = 9.0  # MoonDev uses 9% global target
+    max_loss_pct: float = -8.0  # MoonDev uses -8% global stop
     lookback_days: int = 7
     interval_seconds: int = 30
     enabled: bool = True

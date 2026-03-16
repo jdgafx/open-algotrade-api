@@ -1005,6 +1005,149 @@ def create_strategy_instance(
 
 
 # ──────────────────────────────────────────────
+# Deploy Winners (hardcoded proven strategies)
+# (must be registered BEFORE /strategies/{name} to avoid path collision)
+# ──────────────────────────────────────────────
+
+@app.post("/strategies/deploy-winners")
+async def deploy_winner_strategies(request: Request):
+    """
+    Deploy the proven winning strategies across multiple assets with MoonDev-tuned parameters.
+    This creates strategy instances in the DB and starts them.
+
+    Winners based on paper trading data:
+    1. market_maker -- range-based MM (100% WR)
+    2. funding_arb -- momentum divergence arb (100% WR)
+    3. nadaraya_watson -- kernel regression + StochRSI (60% WR)
+    4. adx -- trend filter (36% WR but profitable R:R)
+    5. bollinger -- mean reversion (40% WR but profitable)
+    """
+    orchestrator = request.app.state.orchestrator
+    if orchestrator is None:
+        raise HTTPException(status_code=503, detail="Orchestrator not initialized")
+
+    db = next(get_db())
+
+    # Winner strategies with MoonDev-tuned params per asset
+    deployments = [
+        # Market Maker -- works on liquid assets with tight ranges
+        {
+            "name": "mm-eth", "strategy_type": "market_maker", "symbol": "ETH",
+            "timeframe": "5m", "size_usd": 100, "leverage": 3,
+            "params": {
+                "num_bars": 180, "quartile": 0.33, "max_l2h": 0.05,
+                "max_tr_pct": 0.02, "exit_pct": 0.004, "mm_stop_pct": 0.01,
+                "time_limit_minutes": 120, "last_n_bars": 17,
+                "cooldown_seconds": 300, "max_trades_per_hour": 3,
+                "min_signal_strength": 0.5,
+            },
+        },
+        {
+            "name": "mm-sol", "strategy_type": "market_maker", "symbol": "SOL",
+            "timeframe": "5m", "size_usd": 100, "leverage": 3,
+            "params": {
+                "num_bars": 180, "quartile": 0.33, "max_l2h": 0.06,
+                "max_tr_pct": 0.025, "exit_pct": 0.005, "mm_stop_pct": 0.012,
+                "time_limit_minutes": 90, "last_n_bars": 17,
+                "cooldown_seconds": 300, "max_trades_per_hour": 3,
+                "min_signal_strength": 0.5,
+            },
+        },
+        # Funding Arb -- structural edge, run on BTC and ETH
+        {
+            "name": "arb-eth", "strategy_type": "funding_arb", "symbol": "ETH",
+            "timeframe": "1h", "size_usd": 150, "leverage": 3,
+            "params": {
+                "momentum_threshold": 0.015, "combined_target_pct": 0.8,
+                "arb_max_loss_pct": -1.5, "min_hold_bars": 3,
+                "cooldown_seconds": 300, "max_trades_per_hour": 3,
+                "min_signal_strength": 0.4,
+            },
+        },
+        # Nadaraya-Watson -- kernel regression, tuned to MoonDev StochRSI 10/90
+        {
+            "name": "nw-eth", "strategy_type": "nadaraya_watson", "symbol": "ETH",
+            "timeframe": "1h", "size_usd": 100, "leverage": 3,
+            "params": {
+                "kernel_bandwidth": 8.0, "kernel_lookback": 200,
+                "overbought": 90, "oversold": 10,
+                "stoch_exit_window": 14, "exit_confirmation_times": 2,
+                "cooldown_seconds": 600, "max_trades_per_hour": 2,
+                "min_signal_strength": 0.5,
+            },
+        },
+        {
+            "name": "nw-sol", "strategy_type": "nadaraya_watson", "symbol": "SOL",
+            "timeframe": "1h", "size_usd": 100, "leverage": 3,
+            "params": {
+                "kernel_bandwidth": 8.0, "kernel_lookback": 200,
+                "overbought": 90, "oversold": 10,
+                "stoch_exit_window": 14, "exit_confirmation_times": 2,
+                "cooldown_seconds": 600, "max_trades_per_hour": 2,
+                "min_signal_strength": 0.5,
+            },
+        },
+        # ADX -- trend filter, works on BTC and ETH
+        {
+            "name": "adx-eth", "strategy_type": "adx", "symbol": "ETH",
+            "timeframe": "1h", "size_usd": 100, "leverage": 3,
+            "params": {
+                "adx_period": 14, "adx_threshold": 25,
+                "cooldown_seconds": 600, "max_trades_per_hour": 2,
+                "min_signal_strength": 0.5,
+            },
+        },
+    ]
+
+    created = []
+    skipped = []
+
+    try:
+        for dep in deployments:
+            # Check if strategy already exists
+            existing = db.query(models.StrategyInstance).filter(
+                models.StrategyInstance.name == dep["name"]
+            ).first()
+            if existing:
+                skipped.append(dep["name"])
+                continue
+
+            # Create new strategy instance
+            instance = models.StrategyInstance(
+                name=dep["name"],
+                strategy_type=dep["strategy_type"],
+                symbol=dep["symbol"],
+                timeframe=dep["timeframe"],
+                leverage=dep.get("leverage", 3),
+                size_usd=dep.get("size_usd", 100),
+                target_pct=9.0,       # MoonDev global target
+                max_loss_pct=-8.0,    # MoonDev global stop
+                interval_seconds=30,
+                enabled=True,
+                params=dep.get("params", {}),
+                tier=dep.get("tier", "bonus_algos"),
+                status="created",
+            )
+            db.add(instance)
+            db.commit()
+            db.refresh(instance)
+            created.append(dep["name"])
+
+        return {
+            "created": created,
+            "skipped": skipped,
+            "message": f"Created {len(created)} strategies, skipped {len(skipped)} (already exist). Use /strategies/{{name}}/start to start them.",
+            "next_steps": [
+                "Start each strategy: POST /strategies/{name}/start",
+                "Monitor: GET /strategies/leaderboard",
+                "Circuit breaker will auto-disable losers after 5 consecutive losses or $25 drawdown",
+            ],
+        }
+    finally:
+        db.close()
+
+
+# ──────────────────────────────────────────────
 # Aggregate Strategy Performance
 # (must be registered BEFORE /strategies/{name} to avoid path collision)
 # ──────────────────────────────────────────────

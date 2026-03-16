@@ -67,7 +67,7 @@ class FundingArbStrategy(BaseStrategy):
         self, data: pd.DataFrame, position: Dict[str, Any]
     ) -> Optional[Signal]:
         p = self.config.params
-        combined_target = p.get("combined_target_pct", 3.0)
+        combined_target = p.get("combined_target_pct", 0.8)  # MoonDev uses 0.6%, we use 0.8% (slightly looser)
 
         is_long = position.get("is_long", position.get("size", 0) > 0)
         pnl_pct = position.get("pnl_perc", 0)
@@ -78,6 +78,16 @@ class FundingArbStrategy(BaseStrategy):
                 signal_type=close_type,
                 symbol=self.config.symbol,
                 reason=f"Arb target hit: {pnl_pct:.1f}% >= {combined_target}%",
+            )
+
+        # Arb-specific tight stop (MoonDev uses -0.9%, we're slightly looser at -1.5%)
+        arb_max_loss = p.get("arb_max_loss_pct", -1.5)
+        if pnl_pct <= arb_max_loss:
+            close_type = SignalType.CLOSE_LONG if is_long else SignalType.CLOSE_SHORT
+            return Signal(
+                signal_type=close_type,
+                symbol=self.config.symbol,
+                reason=f"Arb tight stop: {pnl_pct:.1f}% <= {arb_max_loss}%",
             )
 
         if pnl_pct <= self.config.max_loss_pct:
@@ -96,7 +106,7 @@ class FundingArbStrategy(BaseStrategy):
             return None
 
         p = self.config.params
-        threshold = p.get("momentum_threshold", 0.02)  # Configurable, default 2%
+        threshold = p.get("momentum_threshold", 0.015)  # Slightly more sensitive (was 2%, now 1.5%)
 
         # Use 10-bar momentum with confirmation (last 3 bars reversing)
         recent = data.tail(10)

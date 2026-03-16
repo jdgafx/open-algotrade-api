@@ -4,8 +4,9 @@ Ported from ALGOS/6 Bonus Algos/4_nadarya_watson_algo/bot.py
 
 - Gaussian kernel regression to smooth price (Nadaraya-Watson envelope)
 - Stochastic RSI for momentum confirmation
-- Long: price at lower envelope + StochRSI oversold
-- Short: price at upper envelope + StochRSI overbought
+- Long: NW buy signal OR StochRSI oversold (MoonDev OR logic)
+- Short: NW sell signal OR StochRSI overbought
+- Exit: opposite signal with 2x confirmation (MoonDev original)
 """
 
 import logging
@@ -24,9 +25,9 @@ class NadarayaWatsonStrategy(BaseStrategy):
     async def should_enter(self, data: pd.DataFrame) -> Optional[Signal]:
         p = self.config.params
         bandwidth = p.get("kernel_bandwidth", 8.0)
-        lookback = p.get("kernel_lookback", 60)
-        overbought = p.get("overbought", 80)
-        oversold = p.get("oversold", 20)
+        lookback = p.get("kernel_lookback", 200)   # MoonDev uses 200
+        overbought = p.get("overbought", 90)       # MoonDev uses 90
+        oversold = p.get("oversold", 10)            # MoonDev uses 10
 
         if len(data) < lookback + 5:
             return None
@@ -37,40 +38,54 @@ class NadarayaWatsonStrategy(BaseStrategy):
 
         nw_upper = current.get("nw_upper", None)
         nw_lower = current.get("nw_lower", None)
-        stoch_k = current.get("stoch_k", 50)
+        stoch_k = current.get("stoch_k", None)
 
         if nw_upper is None or pd.isna(nw_upper):
             return None
 
-        # Long: price near lower envelope and StochRSI oversold
-        if price <= nw_lower and stoch_k < oversold:
-            # Strength: how deep below envelope + how oversold
-            envelope_depth = (nw_lower - price) / max(nw_upper - nw_lower, 0.01) if nw_upper > nw_lower else 0.1
-            stoch_depth = (oversold - stoch_k) / oversold
-            strength = min(0.6 + envelope_depth * 0.2 + stoch_depth * 0.2, 0.95)
+        # Check for Nadaraya-Watson envelope signals (derivative direction change)
+        nw_buy = bool(current.get("nw_buy", False))
+        nw_sell = bool(current.get("nw_sell", False))
+
+        stoch_oversold = stoch_k is not None and not pd.isna(stoch_k) and stoch_k < oversold
+        stoch_overbought = stoch_k is not None and not pd.isna(stoch_k) and stoch_k > overbought
+
+        # Long: NW buy signal OR StochRSI oversold (MoonDev uses OR)
+        if nw_buy or stoch_oversold:
+            conditions_met = int(nw_buy) + int(stoch_oversold)
+            strength = 0.65 if conditions_met == 1 else 0.9  # both = stronger signal
+            parts = []
+            if nw_buy:
+                parts.append("NW buy signal")
+            if stoch_oversold:
+                parts.append(f"StochRSI {stoch_k:.1f} < {oversold}")
             return Signal(
                 signal_type=SignalType.LONG,
                 symbol=self.config.symbol,
                 price=price,
                 size_usd=self.config.size_usd,
                 strength=strength,
-                reason=f"NW LONG: price {price:.2f} <= lower envelope {nw_lower:.2f}, StochRSI {stoch_k:.1f} < {oversold}",
-                metadata={"nw_lower": nw_lower, "stoch_k": stoch_k},
+                reason=f"NW LONG: {' + '.join(parts)}",
+                metadata={"nw_buy": nw_buy, "stoch_k": stoch_k, "nw_lower": nw_lower},
             )
 
-        # Short: price near upper envelope and StochRSI overbought
-        if price >= nw_upper and stoch_k > overbought:
-            envelope_depth = (price - nw_upper) / max(nw_upper - nw_lower, 0.01) if nw_upper > nw_lower else 0.1
-            stoch_depth = (stoch_k - overbought) / (100 - overbought)
-            strength = min(0.6 + envelope_depth * 0.2 + stoch_depth * 0.2, 0.95)
+        # Short: NW sell signal OR StochRSI overbought (MoonDev uses OR)
+        if nw_sell or stoch_overbought:
+            conditions_met = int(nw_sell) + int(stoch_overbought)
+            strength = 0.65 if conditions_met == 1 else 0.9
+            parts = []
+            if nw_sell:
+                parts.append("NW sell signal")
+            if stoch_overbought:
+                parts.append(f"StochRSI {stoch_k:.1f} > {overbought}")
             return Signal(
                 signal_type=SignalType.SHORT,
                 symbol=self.config.symbol,
                 price=price,
                 size_usd=self.config.size_usd,
                 strength=strength,
-                reason=f"NW SHORT: price {price:.2f} >= upper envelope {nw_upper:.2f}, StochRSI {stoch_k:.1f} > {overbought}",
-                metadata={"nw_upper": nw_upper, "stoch_k": stoch_k},
+                reason=f"NW SHORT: {' + '.join(parts)}",
+                metadata={"nw_sell": nw_sell, "stoch_k": stoch_k, "nw_upper": nw_upper},
             )
 
         return None
@@ -80,7 +95,9 @@ class NadarayaWatsonStrategy(BaseStrategy):
     ) -> Optional[Signal]:
         p = self.config.params
         bandwidth = p.get("kernel_bandwidth", 8.0)
-        lookback = p.get("kernel_lookback", 60)
+        lookback = p.get("kernel_lookback", 200)
+        overbought = p.get("overbought", 90)
+        oversold = p.get("oversold", 10)
 
         data = self._add_indicators(data, bandwidth, lookback, p)
         current = data.iloc[-1]
@@ -89,22 +106,33 @@ class NadarayaWatsonStrategy(BaseStrategy):
         is_long = position.get("is_long", position.get("size", 0) > 0)
         pnl_pct = position.get("pnl_perc", 0)
 
-        nw_mid = current.get("nw_mid", price)
+        # 2x confirmation exit (MoonDev original logic)
+        stoch_exit_window = p.get("stoch_exit_window", 14)
+        exit_times = p.get("exit_confirmation_times", 2)  # MoonDev requires 2x
+        recent_stoch = data["stoch_k"].tail(stoch_exit_window)
 
-        # Exit at mean reversion (NW midline)
-        if is_long and price >= nw_mid:
-            return Signal(
-                signal_type=SignalType.CLOSE_LONG,
-                symbol=self.config.symbol,
-                reason=f"NW mean reversion exit: price {price:.2f} >= midline {nw_mid:.2f}",
-            )
-        if not is_long and price <= nw_mid:
-            return Signal(
-                signal_type=SignalType.CLOSE_SHORT,
-                symbol=self.config.symbol,
-                reason=f"NW mean reversion exit: price {price:.2f} <= midline {nw_mid:.2f}",
-            )
+        if is_long:
+            # Exit long when StochRSI has been overbought 2+ times OR NW sell signal
+            overbought_count = int((recent_stoch > overbought).sum()) if not recent_stoch.isna().all() else 0
+            nw_sell_now = bool(current.get("nw_sell", False))
+            if overbought_count >= exit_times or nw_sell_now:
+                return Signal(
+                    signal_type=SignalType.CLOSE_LONG,
+                    symbol=self.config.symbol,
+                    reason=f"NW exit: overbought {overbought_count}x in {stoch_exit_window} bars" if overbought_count >= exit_times else "NW sell signal",
+                )
+        if not is_long:
+            # Exit short when StochRSI has been oversold 2+ times OR NW buy signal
+            oversold_count = int((recent_stoch < oversold).sum()) if not recent_stoch.isna().all() else 0
+            nw_buy_now = bool(current.get("nw_buy", False))
+            if oversold_count >= exit_times or nw_buy_now:
+                return Signal(
+                    signal_type=SignalType.CLOSE_SHORT,
+                    symbol=self.config.symbol,
+                    reason=f"NW exit: oversold {oversold_count}x in {stoch_exit_window} bars" if oversold_count >= exit_times else "NW buy signal",
+                )
 
+        # Fallback exits: target profit and max loss
         if pnl_pct >= self.config.target_pct:
             close_type = SignalType.CLOSE_LONG if is_long else SignalType.CLOSE_SHORT
             return Signal(signal_type=close_type, symbol=self.config.symbol, reason=f"Target: {pnl_pct:.1f}%")
@@ -135,6 +163,8 @@ class NadarayaWatsonStrategy(BaseStrategy):
             df["nw_mid"] = df["close"]
             df["nw_upper"] = df["close"]
             df["nw_lower"] = df["close"]
+            df["nw_buy"] = False
+            df["nw_sell"] = False
             df["stoch_k"] = 50
             return df
 
@@ -156,6 +186,16 @@ class NadarayaWatsonStrategy(BaseStrategy):
         df["nw_mid"] = nw_mid
         df["nw_upper"] = nw_upper
         df["nw_lower"] = nw_lower
+
+        # NW buy/sell signals: derivative direction change (MoonDev's original logic)
+        nw_series = pd.Series(smoothed, index=df.index[-lookback:])
+        nw_diff = nw_series.diff()
+        df["nw_buy"] = False
+        df["nw_sell"] = False
+        # Buy signal: NW starts rising (diff goes from negative to positive)
+        df.loc[df.index[-lookback:], "nw_buy"] = (nw_diff > 0) & (nw_diff.shift(1) < 0)
+        # Sell signal: NW starts falling (diff goes from positive to negative)
+        df.loc[df.index[-lookback:], "nw_sell"] = (nw_diff < 0) & (nw_diff.shift(1) > 0)
 
         # Stochastic RSI
         stoch_period = params.get("stoch_period", 14)
