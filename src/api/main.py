@@ -1075,6 +1075,55 @@ def get_strategies_performance(request: Request, db: Session = Depends(get_db)):
     )
 
 
+@app.get("/strategies/leaderboard")
+async def strategy_leaderboard(request: Request):
+    """Get strategies ranked by PnL with profitability metrics."""
+    orchestrator = request.app.state.orchestrator
+    if orchestrator is None:
+        raise HTTPException(status_code=503, detail="Orchestrator not initialized")
+
+    db = next(get_db())
+    try:
+        strategies = db.query(models.StrategyInstance).all()
+
+        leaderboard = []
+        for s in strategies:
+            win_rate = (s.winning_trades / s.total_trades * 100) if s.total_trades > 0 else 0
+            leaderboard.append({
+                "name": s.name,
+                "strategy_type": s.strategy_type,
+                "status": s.status,
+                "total_pnl": round(s.total_pnl, 2),
+                "total_trades": s.total_trades,
+                "winning_trades": s.winning_trades,
+                "losing_trades": s.losing_trades,
+                "win_rate": round(win_rate, 1),
+                "profitable": s.total_pnl > 0,
+                "avg_pnl_per_trade": round(s.total_pnl / s.total_trades, 2) if s.total_trades > 0 else 0,
+            })
+
+        leaderboard.sort(key=lambda x: x["total_pnl"], reverse=True)
+
+        profitable = [s for s in leaderboard if s["profitable"]]
+        losing = [s for s in leaderboard if not s["profitable"] and s["total_trades"] > 0]
+        inactive = [s for s in leaderboard if s["total_trades"] == 0]
+
+        return {
+            "leaderboard": leaderboard,
+            "summary": {
+                "total_strategies": len(leaderboard),
+                "profitable_count": len(profitable),
+                "losing_count": len(losing),
+                "inactive_count": len(inactive),
+                "total_pnl": round(sum(s["total_pnl"] for s in leaderboard), 2),
+                "profitable_pnl": round(sum(s["total_pnl"] for s in profitable), 2),
+                "losing_pnl": round(sum(s["total_pnl"] for s in losing), 2),
+            },
+        }
+    finally:
+        db.close()
+
+
 @app.get("/strategies/{name}", response_model=schemas.StrategyInstanceOut)
 def get_strategy_instance(name: str, request: Request, db: Session = Depends(get_db)):
     """Get a specific strategy instance by name, enriched with live orchestrator stats."""
@@ -1211,6 +1260,33 @@ async def stop_strategy_instance(request: Request, name: str, db: Session = Depe
     instance.status = "stopped"
     db.commit()
     return {"status": "stopped", "name": name}
+
+
+@app.post("/strategies/{name}/circuit-breaker/reset")
+async def reset_circuit_breaker(name: str, request: Request):
+    """Reset a strategy's circuit breaker and optionally restart it."""
+    orchestrator = request.app.state.orchestrator
+    if orchestrator is None:
+        raise HTTPException(status_code=503, detail="Orchestrator not initialized")
+
+    strategy = orchestrator.get_strategy(name)
+    if strategy is None:
+        raise HTTPException(status_code=404, detail=f"Strategy {name} not found")
+
+    was_triggered = strategy.state.circuit_breaker_triggered if hasattr(strategy.state, 'circuit_breaker_triggered') else False
+
+    # Reset circuit breaker state
+    if hasattr(strategy.state, 'circuit_breaker_triggered'):
+        strategy.state.circuit_breaker_triggered = False
+        strategy.state.circuit_breaker_reason = ""
+        strategy.state.consecutive_losses = 0
+
+    return {
+        "name": name,
+        "circuit_breaker_was_triggered": was_triggered,
+        "circuit_breaker_reset": True,
+        "message": f"Circuit breaker reset for {name}. Use /strategies/{name}/start to restart.",
+    }
 
 
 # ──────────────────────────────────────────────

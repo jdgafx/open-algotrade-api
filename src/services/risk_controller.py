@@ -270,14 +270,14 @@ class RiskController:
             await self._handle_max_daily_loss(account_value, daily_pnl, daily_pnl_pct)
             return  # Everything closed, no further checks needed
 
-        # 2. Per-position checks
+        # 2. Per-position checks — handle both live and paper executor field names
         for pos in positions:
-            symbol = pos.get("coin", "")
+            symbol = pos.get("coin") or pos.get("symbol", "")
             size = pos.get("size", 0)
             entry_px = pos.get("entry_px", 0)
             leverage = pos.get("leverage", 1.0)
-            pnl_pct = pos.get("return_on_equity", 0.0)
-            is_long = pos.get("long", True)
+            pnl_pct = pos.get("return_on_equity") or pos.get("pnl_perc", 0.0)
+            is_long = pos.get("long") if "long" in pos else pos.get("is_long", True)
 
             # 2a. LEVERAGE CHECK
             if leverage > self.config.max_leverage:
@@ -369,7 +369,8 @@ class RiskController:
         try:
             positions = await self.executor.get_all_positions()
             for pos in positions:
-                if pos.get("coin") == symbol:
+                pos_symbol = pos.get("coin") or pos.get("symbol", "")
+                if pos_symbol == symbol:
                     await asyncio.to_thread(
                         self.client.kill_switch, symbol, 3, self.client.vault_address
                     )

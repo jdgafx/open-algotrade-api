@@ -37,28 +37,58 @@ REGIME_COLORS = {
     MarketRegime.UNKNOWN: "#6b7280",            # gray
 }
 
-# All known strategy types — used as the universal allow-list
-_ALL_STRATEGIES = [
-    "turtle", "sma_crossover", "macd", "ichimoku", "adx",
-    "ema_bollinger", "vwma", "sma_adx_bb_vol",
-    "mean_reversion", "rsi", "bollinger", "rsi_vwap",
-    "nadaraya_watson", "supply_demand_zone",
-    "consolidation_pop", "grid_fibonacci", "elliott_wave", "elliott_pivot",
-    "vwap_bot", "funding_arb", "correlation", "market_maker", "pivot_lines",
-    "solana_sniper", "quarter_theory",
-]
-
 # Which strategies work in which regimes.
-# Permissive: most strategies allowed in most regimes.
-# The gate is advisory, not a kill switch — better to trade suboptimally
-# than to block all signals for days.
 REGIME_STRATEGY_MAP = {
-    MarketRegime.TRENDING_UP: _ALL_STRATEGIES,
-    MarketRegime.TRENDING_DOWN: _ALL_STRATEGIES,
-    MarketRegime.MEAN_REVERTING: _ALL_STRATEGIES,
-    MarketRegime.HIGH_VOLATILITY: _ALL_STRATEGIES,
-    MarketRegime.LOW_VOLATILITY: _ALL_STRATEGIES,
-    MarketRegime.UNKNOWN: _ALL_STRATEGIES,
+    MarketRegime.TRENDING_UP: [
+        # Trend-following thrives here
+        "turtle", "sma_crossover", "macd", "ichimoku", "adx",
+        "ema_bollinger", "vwma", "sma_adx_bb_vol",
+        # Momentum plays
+        "consolidation_pop", "elliott_wave", "elliott_pivot",
+        # Market-neutral always allowed
+        "vwap_bot", "funding_arb", "market_maker", "pivot_lines",
+        "correlation", "quarter_theory",
+    ],
+    MarketRegime.TRENDING_DOWN: [
+        # Trend-following works short
+        "turtle", "sma_crossover", "macd", "ichimoku", "adx",
+        "ema_bollinger", "vwma", "sma_adx_bb_vol",
+        # Market-neutral always allowed
+        "vwap_bot", "funding_arb", "market_maker", "pivot_lines",
+        "correlation",
+    ],
+    MarketRegime.MEAN_REVERTING: [
+        # Mean reversion strategies thrive here
+        "mean_reversion", "rsi", "bollinger", "rsi_vwap",
+        "nadaraya_watson", "supply_demand_zone",
+        "grid_fibonacci",
+        # Market-neutral always allowed
+        "vwap_bot", "funding_arb", "market_maker", "pivot_lines",
+        "correlation",
+    ],
+    MarketRegime.HIGH_VOLATILITY: [
+        # Volatility strategies
+        "consolidation_pop", "grid_fibonacci",
+        "elliott_wave", "elliott_pivot",
+        # Market-neutral always allowed
+        "vwap_bot", "funding_arb", "market_maker",
+        # Funding arb thrives in vol (funding rates spike)
+        "correlation",
+    ],
+    MarketRegime.LOW_VOLATILITY: [
+        # Mean reversion + range strategies
+        "mean_reversion", "rsi", "bollinger", "rsi_vwap",
+        "nadaraya_watson", "supply_demand_zone",
+        "grid_fibonacci",
+        # Market-neutral always allowed
+        "vwap_bot", "funding_arb", "market_maker", "pivot_lines",
+        "correlation",
+    ],
+    MarketRegime.UNKNOWN: [
+        # Only market-neutral when we don't know the regime
+        "vwap_bot", "funding_arb", "market_maker", "pivot_lines",
+        "correlation", "nadaraya_watson",
+    ],
 }
 
 

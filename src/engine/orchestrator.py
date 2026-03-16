@@ -374,6 +374,14 @@ class StrategyOrchestrator:
                             name, signal.signal_type.value, result.error,
                         )
 
+                # ── Per-strategy circuit breaker check ──
+                if strategy.state.circuit_breaker_triggered:
+                    logger.critical(
+                        "CIRCUIT BREAKER: %s auto-disabled | reason: %s",
+                        name, strategy.state.circuit_breaker_reason,
+                    )
+                    break
+
                 await asyncio.sleep(sleep_seconds)
 
             except asyncio.CancelledError:

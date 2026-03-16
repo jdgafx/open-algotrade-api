@@ -78,6 +78,10 @@ class StrategyState:
     errors: int = 0
     consecutive_errors: int = 0
     start_time: Optional[datetime] = None
+    # Circuit breaker state
+    consecutive_losses: int = 0
+    circuit_breaker_triggered: bool = False
+    circuit_breaker_reason: str = ""
     # Anti-overtrading state
     last_trade_close_time: Optional[datetime] = None
     trades_this_hour: int = 0
@@ -139,6 +143,15 @@ class BaseStrategy(ABC):
         self.state.iterations += 1
         self.state.last_iteration = datetime.now(timezone.utc)
         now = datetime.now(timezone.utc)
+
+        # ── Circuit breaker check ──
+        if self.state.circuit_breaker_triggered:
+            self._logger.warning(
+                "HALTED by circuit breaker | %s | reason: %s",
+                self.config.name,
+                self.state.circuit_breaker_reason,
+            )
+            return None
 
         # ── Anti-overtrading parameters (configurable per strategy) ──
         min_hold_bars = self.config.params.get("min_hold_bars", 3)
@@ -242,8 +255,10 @@ class BaseStrategy(ABC):
 
         if pnl > 0:
             self.state.winning_trades += 1
+            self.state.consecutive_losses = 0
         else:
             self.state.losing_trades += 1
+            self.state.consecutive_losses += 1
 
         if self.state.total_pnl > self.state.peak_pnl:
             self.state.peak_pnl = self.state.total_pnl
@@ -251,6 +266,34 @@ class BaseStrategy(ABC):
         drawdown = self.state.peak_pnl - self.state.total_pnl
         if drawdown > self.state.max_drawdown:
             self.state.max_drawdown = drawdown
+
+        # ── Circuit breaker checks ──
+        max_consecutive_losses = self.config.params.get("max_consecutive_losses", 5)
+        max_strategy_drawdown = self.config.params.get("max_strategy_drawdown", 25.0)
+
+        if self.state.consecutive_losses >= max_consecutive_losses:
+            self.state.circuit_breaker_triggered = True
+            self.state.circuit_breaker_reason = (
+                f"{self.state.consecutive_losses} consecutive losses "
+                f"(limit: {max_consecutive_losses})"
+            )
+            self._logger.critical(
+                "CIRCUIT BREAKER TRIPPED | %s | %s",
+                self.config.name,
+                self.state.circuit_breaker_reason,
+            )
+
+        if self.state.max_drawdown >= max_strategy_drawdown:
+            self.state.circuit_breaker_triggered = True
+            self.state.circuit_breaker_reason = (
+                f"max drawdown ${self.state.max_drawdown:.2f} "
+                f"exceeds limit ${max_strategy_drawdown:.2f}"
+            )
+            self._logger.critical(
+                "CIRCUIT BREAKER TRIPPED | %s | %s",
+                self.config.name,
+                self.state.circuit_breaker_reason,
+            )
 
         # Anti-overtrading: update close time and hourly counter
         self.state.last_trade_close_time = now
@@ -294,6 +337,9 @@ class BaseStrategy(ABC):
             "total_pnl": round(self.state.total_pnl, 2),
             "max_drawdown": round(self.state.max_drawdown, 2),
             "errors": self.state.errors,
+            "consecutive_losses": self.state.consecutive_losses,
+            "circuit_breaker_triggered": self.state.circuit_breaker_triggered,
+            "circuit_breaker_reason": self.state.circuit_breaker_reason,
             "uptime": uptime,
             "trades_this_hour": self.state.trades_this_hour,
             "entry_bar_count": self.state.entry_bar_count,
