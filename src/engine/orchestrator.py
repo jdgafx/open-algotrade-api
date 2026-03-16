@@ -72,7 +72,7 @@ class StrategyOrchestrator:
         executor: HyperliquidVaultExecutor,
         regime_detector=None,
         # MoonDev profitability params
-        max_global_trades_per_hour: int = 6,
+        max_global_trades_per_hour: int = 20,
         daily_loss_limit_pct: float = 2.0,
         max_portfolio_exposure_pct: float = 80.0,
     ):
