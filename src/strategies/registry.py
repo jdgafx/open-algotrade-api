@@ -97,6 +97,7 @@ def _register_all():
     from .sma_adx_bb_vol_strategy import SMAAdxBBVolStrategy
     from .rsi_vwap_strategy import RSIVWAPStrategy
     from .solana_sniper_strategy import SolanaSniperStrategy
+    from .liquidation_dip_strategy import LiquidationDipStrategy
 
     # ═══════════════════════════════════════════════════════════════════
     # TIER A — Battle-tested HL native strategies
@@ -439,6 +440,24 @@ def _register_all():
             "min_signal_strength": 0.3,
         },
         category="momentum", risk_level="high",
+    )
+    register_strategy(
+        "liquidation_dip", LiquidationDipStrategy, StrategyTier.A,
+        "MoonDev's Double Dip — buys the second touch of liquidation lows after bounce (681% backtest)",
+        "BTC", "5m",
+        {
+            "liq_threshold_usd": 500_000,
+            "bounce_pct": 0.005,
+            "dip_tolerance_pct": 0.002,
+            "max_liq_age_hours": 4,
+            "mode": "double_dip",
+            "take_profit_pct": 1.5,
+            "stop_loss_pct": 10.0,
+            "time_limit_hours": 24,
+            "min_hold_bars": 3, "cooldown_seconds": 120, "max_trades_per_hour": 5,
+            "min_signal_strength": 0.3,
+        },
+        category="liquidation", risk_level="high",
     )
 
 
