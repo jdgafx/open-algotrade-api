@@ -3,10 +3,14 @@ HyperliquidVaultExecutor — Bridges BaseStrategy signals to Hyperliquid vault e
 
 Translates Signal objects from strategies into actual HyperliquidClient API calls.
 Handles leverage, sizing, vault routing, PnL tracking, and position lifecycle.
+
+Supports limit order entry (default) with automatic market order fallback.
+Limit entries pay maker fees (0.01%) vs taker fees (0.035%) — a 3.5x savings.
 """
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -21,6 +25,10 @@ from src.strategies.base_strategy import (
 
 logger = logging.getLogger(__name__)
 
+# Fee tracking constants
+MAKER_FEE_BPS = 1.0   # 0.01%
+TAKER_FEE_BPS = 3.5   # 0.035%
+
 
 @dataclass
 class ExecutionResult:
@@ -28,6 +36,7 @@ class ExecutionResult:
     order_result: Optional[OrderResult] = None
     realized_pnl: float = 0.0
     error: Optional[str] = None
+    fill_type: str = ""  # "limit", "market", or "limit_fallback_market"
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -45,19 +54,26 @@ class HyperliquidVaultExecutor:
         vault_address: Optional[str] = None,
         default_slippage: float = 0.01,
         max_position_usd: float = 10000.0,
+        use_limit_orders: bool = True,
+        limit_order_timeout: float = 30.0,
     ):
         self.client = client
         self.vault_address = vault_address or client.vault_address
         self.default_slippage = default_slippage
         self.max_position_usd = max_position_usd
+        self.use_limit_orders = use_limit_orders
+        self.limit_order_timeout = limit_order_timeout
 
         self._active_positions: Dict[str, Dict] = {}
         self._execution_history: List[ExecutionResult] = []
+        self._fee_savings_usd: float = 0.0
 
         logger.info(
-            "HyperliquidVaultExecutor initialized | vault=%s | max_pos=$%.0f",
+            "HyperliquidVaultExecutor initialized | vault=%s | max_pos=$%.0f | limit_orders=%s | timeout=%.0fs",
             self.vault_address or "master",
             self.max_position_usd,
+            self.use_limit_orders,
+            self.limit_order_timeout,
         )
 
     async def execute_signal(
@@ -107,21 +123,17 @@ class HyperliquidVaultExecutor:
                     success=False, error=f"Size too small: {asset_size}"
                 )
 
-            order_result = await asyncio.to_thread(
-                self.client.market_order,
-                symbol,
-                is_buy,
-                asset_size,
-                self.default_slippage,
-                False,
-                self.vault_address,
-            )
+            # Try limit order first (maker fee 0.01%) with market fallback (taker 0.035%)
+            if self.use_limit_orders:
+                result = await self._execute_limit_entry(
+                    symbol, is_buy, asset_size, size_usd, config.name
+                )
+            else:
+                result = await self._execute_market_entry(
+                    symbol, is_buy, asset_size, size_usd, config.name
+                )
 
-            result = ExecutionResult(
-                success=order_result.success, order_result=order_result
-            )
-
-            if order_result.success:
+            if result.success:
                 self._active_positions[f"{config.name}:{symbol}"] = {
                     "strategy": config.name,
                     "symbol": symbol,
@@ -129,24 +141,40 @@ class HyperliquidVaultExecutor:
                     "size": asset_size,
                     "entry_time": datetime.now(timezone.utc).isoformat(),
                     "signal_reason": signal.reason,
+                    "fill_type": result.fill_type,
                 }
-                logger.info(
-                    "Entry executed | %s | %s %s %.6f ($%.0f) | oid=%s",
-                    config.name,
-                    "LONG" if is_buy else "SHORT",
-                    symbol,
-                    asset_size,
-                    size_usd,
-                    order_result.oid,
-                )
+                # Track fee savings when limit orders fill
+                if result.fill_type == "limit":
+                    saved = size_usd * (TAKER_FEE_BPS - MAKER_FEE_BPS) / 10000
+                    self._fee_savings_usd += saved
+                    logger.info(
+                        "Entry executed (LIMIT) | %s | %s %s %.6f ($%.0f) | oid=%s | saved $%.4f fees",
+                        config.name,
+                        "LONG" if is_buy else "SHORT",
+                        symbol,
+                        asset_size,
+                        size_usd,
+                        result.order_result.oid if result.order_result else "?",
+                        saved,
+                    )
+                else:
+                    logger.info(
+                        "Entry executed (MARKET%s) | %s | %s %s %.6f ($%.0f) | oid=%s",
+                        " fallback" if result.fill_type == "limit_fallback_market" else "",
+                        config.name,
+                        "LONG" if is_buy else "SHORT",
+                        symbol,
+                        asset_size,
+                        size_usd,
+                        result.order_result.oid if result.order_result else "?",
+                    )
             else:
-                result.error = order_result.error
                 logger.warning(
                     "Entry failed | %s | %s %s | error=%s",
                     config.name,
                     symbol,
                     signal.signal_type.value,
-                    order_result.error,
+                    result.error,
                 )
 
             self._execution_history.append(result)
@@ -157,6 +185,197 @@ class HyperliquidVaultExecutor:
             result = ExecutionResult(success=False, error=str(e))
             self._execution_history.append(result)
             return result
+
+    async def _execute_limit_entry(
+        self,
+        symbol: str,
+        is_buy: bool,
+        asset_size: float,
+        size_usd: float,
+        strategy_name: str,
+    ) -> ExecutionResult:
+        """
+        Attempt limit order entry with two tries before falling back to market.
+
+        1st attempt: place at best bid (buy) or best ask (sell) for queue priority.
+        2nd attempt: if unfilled, cancel and retry at mid-price for better fill chance.
+        Fallback: if still unfilled, cancel and use market order.
+        """
+        ask, bid, _ = await asyncio.to_thread(self.client.ask_bid, symbol)
+        mid = (ask + bid) / 2
+
+        # Attempt 1: passive limit at bid (buy) or ask (sell)
+        limit_px = bid if is_buy else ask
+
+        logger.info(
+            "Limit entry attempt 1 | %s | %s %.6f @ %.6f (bid=%.6f ask=%.6f)",
+            strategy_name,
+            "BUY" if is_buy else "SELL",
+            asset_size,
+            limit_px,
+            bid,
+            ask,
+        )
+
+        order_result = await asyncio.to_thread(
+            self.client.limit_order,
+            symbol,
+            is_buy,
+            asset_size,
+            limit_px,
+            False,       # reduce_only
+            "Gtc",       # good-til-cancel
+            self.vault_address,
+        )
+
+        # Immediately filled
+        if order_result.success and order_result.status == "filled":
+            return ExecutionResult(
+                success=True, order_result=order_result, fill_type="limit"
+            )
+
+        # Resting — wait for fill
+        if order_result.success and order_result.oid is not None:
+            filled = await self._wait_for_fill(
+                symbol, order_result.oid, self.limit_order_timeout / 2
+            )
+            if filled:
+                return ExecutionResult(
+                    success=True, order_result=order_result, fill_type="limit"
+                )
+
+            # Cancel unfilled order before attempt 2
+            await asyncio.to_thread(
+                self.client.cancel_order, symbol, order_result.oid, self.vault_address
+            )
+            logger.info(
+                "Limit entry attempt 1 timed out | %s | cancelling oid=%s",
+                strategy_name,
+                order_result.oid,
+            )
+        elif not order_result.success:
+            # Limit order itself failed (e.g. insufficient margin) — go straight to market
+            logger.warning(
+                "Limit entry attempt 1 failed | %s | error=%s | falling back to market",
+                strategy_name,
+                order_result.error,
+            )
+            return await self._execute_market_entry(
+                symbol, is_buy, asset_size, size_usd, strategy_name,
+                fill_type="limit_fallback_market",
+            )
+
+        # Attempt 2: retry at mid-price (more aggressive, still maker)
+        ask2, bid2, _ = await asyncio.to_thread(self.client.ask_bid, symbol)
+        mid2 = (ask2 + bid2) / 2
+        limit_px2 = mid2
+
+        logger.info(
+            "Limit entry attempt 2 | %s | %s %.6f @ %.6f (mid)",
+            strategy_name,
+            "BUY" if is_buy else "SELL",
+            asset_size,
+            limit_px2,
+        )
+
+        order_result2 = await asyncio.to_thread(
+            self.client.limit_order,
+            symbol,
+            is_buy,
+            asset_size,
+            limit_px2,
+            False,
+            "Gtc",
+            self.vault_address,
+        )
+
+        if order_result2.success and order_result2.status == "filled":
+            return ExecutionResult(
+                success=True, order_result=order_result2, fill_type="limit"
+            )
+
+        if order_result2.success and order_result2.oid is not None:
+            filled = await self._wait_for_fill(
+                symbol, order_result2.oid, self.limit_order_timeout / 2
+            )
+            if filled:
+                return ExecutionResult(
+                    success=True, order_result=order_result2, fill_type="limit"
+                )
+
+            # Cancel and fall back to market
+            await asyncio.to_thread(
+                self.client.cancel_order, symbol, order_result2.oid, self.vault_address
+            )
+            logger.info(
+                "Limit entry attempt 2 timed out | %s | cancelling oid=%s | falling back to market",
+                strategy_name,
+                order_result2.oid,
+            )
+
+        # Fallback: market order
+        return await self._execute_market_entry(
+            symbol, is_buy, asset_size, size_usd, strategy_name,
+            fill_type="limit_fallback_market",
+        )
+
+    async def _wait_for_fill(
+        self, symbol: str, oid: int, timeout: float
+    ) -> bool:
+        """
+        Poll open orders to detect when a limit order fills.
+
+        Returns True if the order is no longer in the open orders list
+        (meaning it was filled), False if timeout is reached.
+        """
+        poll_interval = min(2.0, timeout / 5)
+        deadline = time.monotonic() + timeout
+
+        while time.monotonic() < deadline:
+            await asyncio.sleep(poll_interval)
+
+            open_orders = await asyncio.to_thread(self.client.get_open_orders)
+            still_open = any(
+                o.get("oid") == oid and o.get("coin") == symbol
+                for o in open_orders
+            )
+
+            if not still_open:
+                logger.debug("Order filled | %s | oid=%s", symbol, oid)
+                return True
+
+        return False
+
+    async def _execute_market_entry(
+        self,
+        symbol: str,
+        is_buy: bool,
+        asset_size: float,
+        size_usd: float,
+        strategy_name: str,
+        fill_type: str = "market",
+    ) -> ExecutionResult:
+        """Execute a market order entry (taker fees apply)."""
+        order_result = await asyncio.to_thread(
+            self.client.market_order,
+            symbol,
+            is_buy,
+            asset_size,
+            self.default_slippage,
+            False,
+            self.vault_address,
+        )
+
+        result = ExecutionResult(
+            success=order_result.success,
+            order_result=order_result,
+            fill_type=fill_type,
+        )
+
+        if not order_result.success:
+            result.error = order_result.error
+
+        return result
 
     async def _execute_exit(
         self, signal: Signal, strategy: BaseStrategy
@@ -315,6 +534,17 @@ class HyperliquidVaultExecutor:
         successes = sum(1 for r in self._execution_history if r.success)
         total_pnl = sum(r.realized_pnl for r in self._execution_history)
 
+        limit_fills = sum(
+            1 for r in self._execution_history if r.fill_type == "limit"
+        )
+        market_fills = sum(
+            1 for r in self._execution_history if r.fill_type == "market"
+        )
+        fallback_fills = sum(
+            1 for r in self._execution_history
+            if r.fill_type == "limit_fallback_market"
+        )
+
         return {
             "total_executions": len(self._execution_history),
             "successful": successes,
@@ -323,4 +553,8 @@ class HyperliquidVaultExecutor:
             "total_realized_pnl": round(total_pnl, 2),
             "active_positions": len(self._active_positions),
             "vault_address": self.vault_address,
+            "limit_fills": limit_fills,
+            "market_fills": market_fills,
+            "limit_fallback_fills": fallback_fills,
+            "fee_savings_usd": round(self._fee_savings_usd, 4),
         }

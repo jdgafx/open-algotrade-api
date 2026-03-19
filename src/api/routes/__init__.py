@@ -5,6 +5,7 @@ from .backtest import router as backtest_router
 from .regime import router as regime_router
 from .risk import router as risk_router
 from .solana import router as solana_router
+from .funding import router as funding_router
 
 __all__ = [
     "liquidations_router",
@@ -14,4 +15,5 @@ __all__ = [
     "regime_router",
     "risk_router",
     "solana_router",
+    "funding_router",
 ]

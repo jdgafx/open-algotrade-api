@@ -150,6 +150,19 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("Could not initialize SolanaScanner: %s", e)
 
+    # ── 9. Funding Rate Monitor ──
+    funding_monitor = None
+    try:
+        from src.services.funding_monitor import FundingMonitor
+        hl_info_url = (
+            f"{client.base_url}/info" if client and hasattr(client, "base_url")
+            else "https://api.hyperliquid.xyz/info"
+        )
+        funding_monitor = FundingMonitor(base_url=hl_info_url, auto_start=True)
+        logger.info("FundingMonitor initialized | url=%s", hl_info_url)
+    except Exception as e:
+        logger.warning("Could not initialize FundingMonitor: %s", e)
+
     # Attach all to app.state
     app.state.orchestrator = orchestrator
     app.state.risk_controller = risk_controller
@@ -161,6 +174,7 @@ async def lifespan(app: FastAPI):
     app.state.paper_mode = paper_mode
     app.state.executor = executor
     app.state.solana_scanner = solana_scanner
+    app.state.funding_monitor = funding_monitor
 
     # ── Auto-start strategies that were running before shutdown ──
     if orchestrator is not None:
@@ -264,6 +278,13 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.error("Error shutting down Solana scanner: %s", e)
 
+    if funding_monitor is not None:
+        try:
+            funding_monitor.stop()
+            logger.info("FundingMonitor shut down cleanly")
+        except Exception as e:
+            logger.error("Error shutting down funding monitor: %s", e)
+
 
 app = FastAPI(title="Open Algotrade API", version="2.0.0", lifespan=lifespan)
 
@@ -297,6 +318,7 @@ from .routes import (
     backtest_router,
     regime_router,
     solana_router,
+    funding_router,
 )
 from .billing import router as billing_router
 
@@ -308,6 +330,7 @@ app.include_router(backtest_router)
 app.include_router(regime_router)
 app.include_router(billing_router)
 app.include_router(solana_router)
+app.include_router(funding_router)
 
 
 def _get_or_create_vault_state(db: Session) -> models.VaultState:

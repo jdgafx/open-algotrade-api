@@ -23,6 +23,7 @@ from typing import Dict, List, Optional
 
 from src.execution.hl_executor import HyperliquidVaultExecutor
 from src.lib.nice_funcs import HyperliquidClient
+from src.services.liquidation_guard import LiquidationGuard
 from src.strategies.base_strategy import BaseStrategy, StrategyConfig, StrategyTier
 from src.strategies.registry import create_strategy, get_strategy_class
 
@@ -71,6 +72,7 @@ class StrategyOrchestrator:
         client: HyperliquidClient,
         executor: HyperliquidVaultExecutor,
         regime_detector=None,
+        liquidation_guard: Optional[LiquidationGuard] = None,
         # MoonDev profitability params
         max_global_trades_per_hour: int = 20,
         daily_loss_limit_pct: float = 2.0,
@@ -79,6 +81,7 @@ class StrategyOrchestrator:
         self.client = client
         self.executor = executor
         self.regime_detector = regime_detector
+        self.liquidation_guard = liquidation_guard
         self._strategies: Dict[str, BaseStrategy] = {}
         self._strategy_types: Dict[str, str] = {}  # name -> strategy_type
         self._tasks: Dict[str, asyncio.Task] = {}
@@ -280,6 +283,38 @@ class StrategyOrchestrator:
 
         return should_trade
 
+    @staticmethod
+    def _extract_atr(data, period: int = 14) -> Optional[float]:
+        """
+        Extract the ATR value from OHLCV data.
+
+        If the dataframe already contains an 'atr' column (computed by a
+        strategy), use it directly.  Otherwise compute a simple ATR on the
+        fly from the high/low/close columns.
+        """
+        if data is None or data.empty:
+            return None
+
+        # Use pre-computed column if present
+        if "atr" in data.columns:
+            val = data["atr"].iloc[-1]
+            if val and val > 0:
+                return float(val)
+
+        # Compute ATR from raw OHLCV
+        try:
+            high = data["high"]
+            low = data["low"]
+            close = data["close"]
+            tr1 = high - low
+            tr2 = (high - close.shift(1)).abs()
+            tr3 = (low - close.shift(1)).abs()
+            true_range = tr1.combine(tr2, max).combine(tr3, max)
+            atr = true_range.rolling(window=min(period, len(data))).mean().iloc[-1]
+            return float(atr) if atr and atr > 0 else None
+        except Exception:
+            return None
+
     async def _run_strategy_loop(self, name: str, strategy: BaseStrategy):
         """
         Main loop for a single strategy.
@@ -356,6 +391,30 @@ class StrategyOrchestrator:
                             )
                             await asyncio.sleep(sleep_seconds)
                             continue
+
+                        # ── Gate 4: Liquidation Guard ──
+                        if self.liquidation_guard:
+                            is_long = signal.signal_type.value == "long"
+                            entry_price = signal.price or (
+                                float(data["close"].iloc[-1]) if not data.empty else 0.0
+                            )
+                            leverage = float(config.leverage)
+                            atr_value = self._extract_atr(data)
+
+                            safe, liq_price, dist, reason = self.liquidation_guard.is_entry_safe(
+                                entry_price=entry_price,
+                                leverage=leverage,
+                                is_long=is_long,
+                                symbol=symbol,
+                                atr_value=atr_value,
+                            )
+                            if not safe:
+                                logger.warning(
+                                    "LIQUIDATION GUARD BLOCKED | %s | %s | liq_price=%.2f | dist=%.2f%% | %s",
+                                    name, symbol, liq_price, dist, reason,
+                                )
+                                await asyncio.sleep(sleep_seconds)
+                                continue
 
                     # Execute the signal
                     result = await self.executor.execute_signal(signal, strategy)
@@ -434,4 +493,8 @@ class StrategyOrchestrator:
             "rate_limit_blocks": self._rate_limit_blocks,
             "daily_loss_blocks": self._daily_loss_blocks,
             "regime_detector_active": self.regime_detector is not None,
+            "liquidation_guard_active": self.liquidation_guard is not None,
+            "liquidation_guard_blocks": (
+                self.liquidation_guard.total_blocks if self.liquidation_guard else 0
+            ),
         }

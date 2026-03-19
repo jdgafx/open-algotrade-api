@@ -27,6 +27,12 @@ class RiskEventType(str, Enum):
     MONITORING_STARTED = "MONITORING_STARTED"
     MONITORING_STOPPED = "MONITORING_STOPPED"
     CONFIG_UPDATED = "CONFIG_UPDATED"
+    # Multi-tier drawdown cascade events
+    TIER1_REDUCE = "TIER1_REDUCE"
+    TIER2_STOP_NEW = "TIER2_STOP_NEW"
+    TIER3_CLOSE_ALL = "TIER3_CLOSE_ALL"
+    WEEKLY_SHUTDOWN = "WEEKLY_SHUTDOWN"
+    MONTHLY_SHUTDOWN = "MONTHLY_SHUTDOWN"
 
 
 class RiskSeverity(str, Enum):
@@ -103,6 +109,38 @@ class RiskConfig(BaseModel):
         description="How often to check positions (seconds).",
     )
 
+    # Multi-tier drawdown cascade (overrides simple max_daily_loss_pct when set)
+    drawdown_tier1_pct: float = Field(
+        default=1.0,
+        ge=0.1,
+        le=50.0,
+        description="Tier 1: reduce position sizes by 50%",
+    )
+    drawdown_tier2_pct: float = Field(
+        default=2.0,
+        ge=0.1,
+        le=50.0,
+        description="Tier 2: stop opening new positions",
+    )
+    drawdown_tier3_pct: float = Field(
+        default=3.0,
+        ge=0.1,
+        le=50.0,
+        description="Tier 3: close ALL positions + lockout",
+    )
+    drawdown_weekly_max_pct: float = Field(
+        default=5.0,
+        ge=0.1,
+        le=100.0,
+        description="Weekly max drawdown — 24h shutdown",
+    )
+    drawdown_monthly_max_pct: float = Field(
+        default=10.0,
+        ge=0.1,
+        le=100.0,
+        description="Monthly max drawdown — full shutdown, manual review needed",
+    )
+
 
 class RiskEvent(BaseModel):
     """A single risk event logged by the controller."""
@@ -133,6 +171,11 @@ class RiskSnapshot(BaseModel):
     lockout_until: Optional[datetime] = None
     trailing_stops: dict = Field(default_factory=dict)
     last_check: Optional[datetime] = None
+    # Multi-tier drawdown state
+    current_tier: int = Field(default=0, description="0=normal, 1=reduced, 2=no new, 3=closed")
+    weekly_pnl_pct: float = 0.0
+    monthly_pnl_pct: float = 0.0
+    new_entries_blocked: bool = False
 
 
 class RiskStatusResponse(BaseModel):

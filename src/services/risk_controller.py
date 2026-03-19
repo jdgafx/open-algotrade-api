@@ -5,7 +5,8 @@ Always-on position monitoring service that protects traders from blowing up.
 This is the MOST IMPORTANT feature of the entire platform.
 
 Monitors:
-- Daily P&L vs max daily loss threshold
+- Multi-tier daily drawdown cascade (1%/2%/3% defaults)
+- Weekly and monthly max drawdown thresholds
 - Per-position leverage limits
 - Margin usage limits
 - Global stop loss / take profit
@@ -13,10 +14,21 @@ Monitors:
 - Anti-tilt lockout
 - Liquidation cascade detection
 
+Drawdown Tiers (daily, escalate-only within a day):
+- Tier 0: Normal operation
+- Tier 1: Reduce new position sizes by 50%
+- Tier 2: Block all new position entries
+- Tier 3: Close ALL positions + anti-tilt lockout
+
+Extended Drawdown:
+- Weekly max: 24h shutdown
+- Monthly max: 7-day shutdown + auto-withdrawal, manual review required
+
 Actions:
 - Auto-close positions when limits breached
-- Auto-withdraw to wallet on max daily loss
+- Auto-withdraw to wallet on max daily/monthly loss
 - Lock trading after tilt detection
+- Block new entries at tier 2+
 - Log every risk action for audit trail
 """
 
@@ -68,6 +80,14 @@ class RiskController:
         self._subscribers: List[Callable] = []
         self._last_snapshot: Optional[RiskSnapshot] = None
 
+        # Multi-tier drawdown cascade state
+        self._tier_state: int = 0  # 0=normal, 1=reduced, 2=no new, 3=closed
+        self._new_entries_blocked: bool = False
+        self._start_of_week_equity: float = 0.0
+        self._start_of_month_equity: float = 0.0
+        self._week_start: Optional[datetime] = None
+        self._month_start: Optional[datetime] = None
+
         logger.info("RiskController initialized | config=%s", self.config.model_dump())
 
     @property
@@ -108,9 +128,23 @@ class RiskController:
             logger.warning("Could not get initial account value: %s", e)
             self._start_of_day_equity = 0.0
 
-        self._day_start = datetime.now(timezone.utc).replace(
+        now = datetime.now(timezone.utc)
+        self._day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+        # Initialize weekly/monthly equity tracking
+        self._start_of_week_equity = self._start_of_day_equity
+        self._start_of_month_equity = self._start_of_day_equity
+        # Monday of current week at 00:00 UTC
+        self._week_start = (now - timedelta(days=now.weekday())).replace(
             hour=0, minute=0, second=0, microsecond=0
         )
+        # First of current month at 00:00 UTC
+        self._month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+        # Reset tier state on fresh start
+        self._tier_state = 0
+        self._new_entries_blocked = False
+
         self._status = RiskStatus.MONITORING
         self._task = asyncio.create_task(self._monitoring_loop())
 
@@ -164,6 +198,10 @@ class RiskController:
             lockout_until=self._lockout_until,
             trailing_stops=dict(self._trailing_stops),
             last_check=self._last_check,
+            current_tier=self._tier_state,
+            weekly_pnl_pct=0.0,
+            monthly_pnl_pct=0.0,
+            new_entries_blocked=self._new_entries_blocked,
         )
 
     def get_events(self, limit: int = 100) -> List[RiskEvent]:
@@ -199,7 +237,32 @@ class RiskController:
             except Exception:
                 pass
             self._trailing_stops.clear()
-            logger.info("Day reset | new SOD=$%.2f", self._start_of_day_equity)
+            # Reset daily tier state
+            self._tier_state = 0
+            self._new_entries_blocked = False
+            logger.info("Day reset | new SOD=$%.2f | tier reset to 0", self._start_of_day_equity)
+
+        # Reset weekly equity on Monday 00:00 UTC
+        week_start = (now - timedelta(days=now.weekday())).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        if self._week_start and week_start > self._week_start:
+            self._week_start = week_start
+            try:
+                self._start_of_week_equity = await self.executor.get_account_value()
+            except Exception:
+                pass
+            logger.info("Week reset | new SOW=$%.2f", self._start_of_week_equity)
+
+        # Reset monthly equity on 1st of month 00:00 UTC
+        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        if self._month_start and month_start > self._month_start:
+            self._month_start = month_start
+            try:
+                self._start_of_month_equity = await self.executor.get_account_value()
+            except Exception:
+                pass
+            logger.info("Month reset | new SOM=$%.2f", self._start_of_month_equity)
 
         # Check lockout
         if self._lockout_until and now < self._lockout_until:
@@ -242,6 +305,28 @@ class RiskController:
             (total_margin / account_value * 100) if account_value > 0 else 0.0
         )
 
+        # Compute weekly/monthly PnL
+        weekly_pnl = (
+            account_value - self._start_of_week_equity
+            if self._start_of_week_equity > 0
+            else 0.0
+        )
+        weekly_pnl_pct = (
+            (weekly_pnl / self._start_of_week_equity * 100)
+            if self._start_of_week_equity > 0
+            else 0.0
+        )
+        monthly_pnl = (
+            account_value - self._start_of_month_equity
+            if self._start_of_month_equity > 0
+            else 0.0
+        )
+        monthly_pnl_pct = (
+            (monthly_pnl / self._start_of_month_equity * 100)
+            if self._start_of_month_equity > 0
+            else 0.0
+        )
+
         # Update snapshot, store for API, and broadcast
         snapshot = RiskSnapshot(
             status=self._status,
@@ -256,19 +341,41 @@ class RiskController:
             lockout_until=self._lockout_until,
             trailing_stops=dict(self._trailing_stops),
             last_check=self._last_check,
+            current_tier=self._tier_state,
+            weekly_pnl_pct=round(weekly_pnl_pct, 2),
+            monthly_pnl_pct=round(monthly_pnl_pct, 2),
+            new_entries_blocked=self._new_entries_blocked,
         )
         self._last_snapshot = snapshot
         await self._broadcast(snapshot)
 
         # === RISK CHECKS (ordered by severity) ===
 
-        # 1. MAX DAILY LOSS — the big one
+        # 0. MONTHLY MAX DRAWDOWN — full shutdown, manual review needed
         if (
-            self._start_of_day_equity > 0
-            and daily_pnl_pct <= -self.config.max_daily_loss_pct
+            self._start_of_month_equity > 0
+            and monthly_pnl_pct <= -self.config.drawdown_monthly_max_pct
         ):
-            await self._handle_max_daily_loss(account_value, daily_pnl, daily_pnl_pct)
-            return  # Everything closed, no further checks needed
+            await self._handle_monthly_shutdown(
+                account_value, monthly_pnl, monthly_pnl_pct
+            )
+            return
+
+        # 0b. WEEKLY MAX DRAWDOWN — 24h shutdown
+        if (
+            self._start_of_week_equity > 0
+            and weekly_pnl_pct <= -self.config.drawdown_weekly_max_pct
+        ):
+            await self._handle_weekly_shutdown(
+                account_value, weekly_pnl, weekly_pnl_pct
+            )
+            return
+
+        # 1. MULTI-TIER DAILY DRAWDOWN CASCADE
+        if self._start_of_day_equity > 0:
+            await self._check_drawdown_tiers(
+                account_value, daily_pnl, daily_pnl_pct, positions
+            )
 
         # 2. Per-position checks — handle both live and paper executor field names
         for pos in positions:
@@ -302,6 +409,199 @@ class RiskController:
             # 2e. TRAILING STOP
             if self.config.trailing_stop_pct is not None and self.config.trailing_stop_pct > 0:
                 await self._handle_trailing_stop(symbol, pnl_pct, is_long)
+
+    # ──────────────────────────────────────────────
+    # Public API — called by orchestrator
+    # ──────────────────────────────────────────────
+
+    def can_open_new_position(self) -> bool:
+        """Check if the risk controller allows opening new positions.
+
+        Returns False when:
+        - Tier >= 2 (new entries blocked due to drawdown cascade)
+        - Locked out (anti-tilt or weekly/monthly shutdown)
+        - Emergency status (all positions being closed)
+        """
+        if self._new_entries_blocked:
+            return False
+        if self._tier_state >= 2:
+            return False
+        if self._lockout_until and datetime.now(timezone.utc) < self._lockout_until:
+            return False
+        if self._status in (RiskStatus.LOCKED_OUT, RiskStatus.EMERGENCY):
+            return False
+        return True
+
+    def get_position_size_multiplier(self) -> float:
+        """Get the position size multiplier based on current drawdown tier.
+
+        Returns:
+            1.0 at tier 0 (normal), 0.5 at tier 1 (reduced), 0.0 at tier >= 2.
+        """
+        if self._tier_state == 0:
+            return 1.0
+        if self._tier_state == 1:
+            return 0.5
+        return 0.0
+
+    # ──────────────────────────────────────────────
+    # Multi-tier drawdown cascade
+    # ──────────────────────────────────────────────
+
+    async def _check_drawdown_tiers(
+        self,
+        account_value: float,
+        daily_pnl: float,
+        daily_pnl_pct: float,
+        positions: list,
+    ) -> None:
+        """Evaluate the multi-tier daily drawdown cascade.
+
+        Tiers escalate but never de-escalate within a single day.
+        - Tier 1: reduce position sizes by 50%
+        - Tier 2: stop opening new positions
+        - Tier 3: close ALL positions + lockout (delegates to _handle_max_daily_loss)
+        """
+        cfg = self.config
+
+        # Tier 3 — close everything (highest priority, check first)
+        if daily_pnl_pct <= -cfg.drawdown_tier3_pct and self._tier_state < 3:
+            self._tier_state = 3
+            self._new_entries_blocked = True
+            self._log_event(
+                RiskEventType.TIER3_CLOSE_ALL,
+                RiskSeverity.CRITICAL,
+                f"TIER 3 drawdown hit: {daily_pnl_pct:.2f}% "
+                f"(threshold: -{cfg.drawdown_tier3_pct:.1f}%). "
+                f"Closing ALL positions.",
+                details={
+                    "daily_pnl": daily_pnl,
+                    "daily_pnl_pct": daily_pnl_pct,
+                    "threshold": cfg.drawdown_tier3_pct,
+                    "tier": 3,
+                },
+            )
+            await self._handle_max_daily_loss(account_value, daily_pnl, daily_pnl_pct)
+            return
+
+        # Tier 2 — block new entries
+        if daily_pnl_pct <= -cfg.drawdown_tier2_pct and self._tier_state < 2:
+            self._tier_state = 2
+            self._new_entries_blocked = True
+            self._log_event(
+                RiskEventType.TIER2_STOP_NEW,
+                RiskSeverity.WARNING,
+                f"TIER 2 drawdown hit: {daily_pnl_pct:.2f}% "
+                f"(threshold: -{cfg.drawdown_tier2_pct:.1f}%). "
+                f"New position entries BLOCKED.",
+                details={
+                    "daily_pnl": daily_pnl,
+                    "daily_pnl_pct": daily_pnl_pct,
+                    "threshold": cfg.drawdown_tier2_pct,
+                    "tier": 2,
+                },
+            )
+            logger.warning(
+                "TIER 2 DRAWDOWN | pnl=%.2f%% | new entries BLOCKED", daily_pnl_pct
+            )
+            return
+
+        # Tier 1 — reduce position sizes
+        if daily_pnl_pct <= -cfg.drawdown_tier1_pct and self._tier_state < 1:
+            self._tier_state = 1
+            self._log_event(
+                RiskEventType.TIER1_REDUCE,
+                RiskSeverity.WARNING,
+                f"TIER 1 drawdown hit: {daily_pnl_pct:.2f}% "
+                f"(threshold: -{cfg.drawdown_tier1_pct:.1f}%). "
+                f"Position sizes reduced by 50%.",
+                details={
+                    "daily_pnl": daily_pnl,
+                    "daily_pnl_pct": daily_pnl_pct,
+                    "threshold": cfg.drawdown_tier1_pct,
+                    "tier": 1,
+                },
+            )
+            logger.warning(
+                "TIER 1 DRAWDOWN | pnl=%.2f%% | position sizes HALVED", daily_pnl_pct
+            )
+
+    async def _handle_weekly_shutdown(
+        self, account_value: float, weekly_pnl: float, weekly_pnl_pct: float
+    ) -> None:
+        """Weekly max drawdown hit — 24h shutdown."""
+        logger.critical(
+            "WEEKLY MAX DRAWDOWN HIT | pnl=$%.2f (%.2f%%) | 24h SHUTDOWN",
+            weekly_pnl,
+            weekly_pnl_pct,
+        )
+
+        self._status = RiskStatus.EMERGENCY
+
+        try:
+            await self.executor.emergency_close_all()
+        except Exception as e:
+            logger.error("Emergency close failed during weekly shutdown: %s", e)
+
+        self._tier_state = 3
+        self._new_entries_blocked = True
+        self._lockout_until = datetime.now(timezone.utc) + timedelta(hours=24)
+        self._status = RiskStatus.LOCKED_OUT
+
+        self._log_event(
+            RiskEventType.WEEKLY_SHUTDOWN,
+            RiskSeverity.CRITICAL,
+            f"Weekly max drawdown hit: ${weekly_pnl:.2f} ({weekly_pnl_pct:.2f}%). "
+            f"All positions closed. 24h lockout until {self._lockout_until.isoformat()}",
+            details={
+                "weekly_pnl": weekly_pnl,
+                "weekly_pnl_pct": weekly_pnl_pct,
+                "account_value": account_value,
+                "threshold": self.config.drawdown_weekly_max_pct,
+                "lockout_until": self._lockout_until.isoformat(),
+            },
+        )
+
+    async def _handle_monthly_shutdown(
+        self, account_value: float, monthly_pnl: float, monthly_pnl_pct: float
+    ) -> None:
+        """Monthly max drawdown hit — full shutdown, manual review needed."""
+        logger.critical(
+            "MONTHLY MAX DRAWDOWN HIT | pnl=$%.2f (%.2f%%) | FULL SHUTDOWN",
+            monthly_pnl,
+            monthly_pnl_pct,
+        )
+
+        self._status = RiskStatus.EMERGENCY
+
+        try:
+            await self.executor.emergency_close_all()
+        except Exception as e:
+            logger.error("Emergency close failed during monthly shutdown: %s", e)
+
+        if self.config.auto_withdraw_on_max_loss:
+            await self._auto_withdraw(account_value)
+
+        self._tier_state = 3
+        self._new_entries_blocked = True
+        # Lock out for 7 days — requires manual review/restart
+        self._lockout_until = datetime.now(timezone.utc) + timedelta(days=7)
+        self._status = RiskStatus.LOCKED_OUT
+
+        self._log_event(
+            RiskEventType.MONTHLY_SHUTDOWN,
+            RiskSeverity.CRITICAL,
+            f"Monthly max drawdown hit: ${monthly_pnl:.2f} ({monthly_pnl_pct:.2f}%). "
+            f"All positions closed. Auto-withdrawal triggered. "
+            f"MANUAL REVIEW REQUIRED. Locked until {self._lockout_until.isoformat()}",
+            details={
+                "monthly_pnl": monthly_pnl,
+                "monthly_pnl_pct": monthly_pnl_pct,
+                "account_value": account_value,
+                "threshold": self.config.drawdown_monthly_max_pct,
+                "lockout_until": self._lockout_until.isoformat(),
+            },
+        )
 
     # ──────────────────────────────────────────────
     # Risk Action Handlers
