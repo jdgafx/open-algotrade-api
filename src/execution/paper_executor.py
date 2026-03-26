@@ -14,10 +14,13 @@ Usage:
 """
 
 import asyncio
+import json
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import requests
@@ -139,6 +142,95 @@ class PaperTradingExecutor:
         self._trades.clear()
         self._trade_counter = 0
         self._execution_history.clear()
+
+    # ── Persistence ──
+
+    def _state_path(self) -> Path:
+        data_dir = Path(os.getenv("DATA_DIR", "/data"))
+        data_dir.mkdir(parents=True, exist_ok=True)
+        return data_dir / "paper_state.json"
+
+    def save_state(self) -> None:
+        """Persist paper trading state to disk so it survives redeploys."""
+        try:
+            state = {
+                "balance": self.balance,
+                "initial_balance": self.initial_balance,
+                "peak_balance": self.peak_balance,
+                "trade_counter": self._trade_counter,
+                "positions": {
+                    k: {
+                        "symbol": p.symbol, "side": p.side, "size": p.size,
+                        "entry_price": p.entry_price,
+                        "entry_time": p.entry_time.isoformat(),
+                        "leverage": p.leverage, "size_usd": p.size_usd,
+                        "strategy_name": p.strategy_name,
+                        "unrealized_pnl": p.unrealized_pnl,
+                    }
+                    for k, p in self._positions.items()
+                },
+                "trades": [
+                    {
+                        "id": t.id, "symbol": t.symbol, "side": t.side,
+                        "action": t.action, "price": t.price, "size": t.size,
+                        "size_usd": t.size_usd, "pnl": t.pnl,
+                        "pnl_pct": t.pnl_pct, "reason": t.reason,
+                        "strategy_name": t.strategy_name,
+                        "timestamp": t.timestamp.isoformat(),
+                    }
+                    for t in self._trades[-500:]  # keep last 500 trades
+                ],
+                "saved_at": datetime.now(timezone.utc).isoformat(),
+            }
+            self._state_path().write_text(json.dumps(state, indent=2))
+            logger.info("[PAPER] State saved | %d trades | balance=$%.2f", len(self._trades), self.balance)
+        except Exception as e:
+            logger.warning("[PAPER] Failed to save state: %s", e)
+
+    def load_state(self) -> bool:
+        """Restore paper trading state from disk. Returns True if state was loaded."""
+        path = self._state_path()
+        if not path.exists():
+            logger.info("[PAPER] No saved state found at %s", path)
+            return False
+        try:
+            state = json.loads(path.read_text())
+            self.balance = state.get("balance", self.initial_balance)
+            self.peak_balance = state.get("peak_balance", self.balance)
+            self._trade_counter = state.get("trade_counter", 0)
+
+            self._positions.clear()
+            for k, p in state.get("positions", {}).items():
+                self._positions[k] = PaperPosition(
+                    symbol=p["symbol"], side=p["side"], size=p["size"],
+                    entry_price=p["entry_price"],
+                    entry_time=datetime.fromisoformat(p["entry_time"]),
+                    leverage=p.get("leverage", 1),
+                    size_usd=p.get("size_usd", 0),
+                    strategy_name=p.get("strategy_name", ""),
+                    unrealized_pnl=p.get("unrealized_pnl", 0),
+                )
+
+            self._trades.clear()
+            for t in state.get("trades", []):
+                self._trades.append(PaperTrade(
+                    id=t["id"], symbol=t["symbol"], side=t["side"],
+                    action=t["action"], price=t["price"], size=t["size"],
+                    size_usd=t["size_usd"], pnl=t.get("pnl", 0),
+                    pnl_pct=t.get("pnl_pct", 0), reason=t.get("reason", ""),
+                    strategy_name=t.get("strategy_name", ""),
+                    timestamp=datetime.fromisoformat(t["timestamp"]),
+                ))
+
+            logger.info(
+                "[PAPER] State restored | %d trades | %d positions | balance=$%.2f (saved %s)",
+                len(self._trades), len(self._positions), self.balance,
+                state.get("saved_at", "unknown"),
+            )
+            return True
+        except Exception as e:
+            logger.warning("[PAPER] Failed to load state: %s", e)
+            return False
 
     def _fetch_mid_price(self, symbol: str) -> float:
         """Fetch current mid price from HL public API."""

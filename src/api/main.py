@@ -23,6 +23,35 @@ models.Base.metadata.create_all(bind=engine)
 logger = logging.getLogger(__name__)
 
 
+def _auto_deploy_winners(db, orchestrator):
+    """Deploy default winner strategies into an empty DB so they auto-start."""
+    winners = [
+        {"name": "mm-eth", "strategy_type": "market_maker", "symbol": "ETH", "timeframe": "5m", "size_usd": 100, "leverage": 3, "params": {"num_bars": 180, "quartile": 0.33, "max_l2h": 0.05, "max_tr_pct": 0.02, "exit_pct": 0.004, "mm_stop_pct": 0.01, "time_limit_minutes": 120, "last_n_bars": 17, "cooldown_seconds": 300, "max_trades_per_hour": 3, "min_signal_strength": 0.5}},
+        {"name": "mm-sol", "strategy_type": "market_maker", "symbol": "SOL", "timeframe": "5m", "size_usd": 100, "leverage": 3, "params": {"num_bars": 180, "quartile": 0.33, "max_l2h": 0.06, "max_tr_pct": 0.025, "exit_pct": 0.005, "mm_stop_pct": 0.012, "time_limit_minutes": 90, "last_n_bars": 17, "cooldown_seconds": 300, "max_trades_per_hour": 3, "min_signal_strength": 0.5}},
+        {"name": "arb-eth", "strategy_type": "funding_arb", "symbol": "ETH", "timeframe": "1h", "size_usd": 150, "leverage": 3, "params": {"momentum_threshold": 0.015, "combined_target_pct": 0.8, "arb_max_loss_pct": -1.5, "min_hold_bars": 3, "cooldown_seconds": 300, "max_trades_per_hour": 3, "min_signal_strength": 0.4}},
+        {"name": "nw-eth", "strategy_type": "nadaraya_watson", "symbol": "ETH", "timeframe": "1h", "size_usd": 100, "leverage": 3, "params": {"kernel_bandwidth": 8.0, "kernel_lookback": 200, "overbought": 90, "oversold": 10, "cooldown_seconds": 600, "max_trades_per_hour": 2, "min_signal_strength": 0.5}},
+        {"name": "nw-sol", "strategy_type": "nadaraya_watson", "symbol": "SOL", "timeframe": "1h", "size_usd": 100, "leverage": 3, "params": {"kernel_bandwidth": 8.0, "kernel_lookback": 200, "overbought": 90, "oversold": 10, "cooldown_seconds": 600, "max_trades_per_hour": 2, "min_signal_strength": 0.5}},
+        {"name": "adx-eth", "strategy_type": "adx", "symbol": "ETH", "timeframe": "1h", "size_usd": 100, "leverage": 3, "params": {"adx_period": 14, "adx_threshold": 25, "cooldown_seconds": 600, "max_trades_per_hour": 2, "min_signal_strength": 0.5}},
+        {"name": "vwap-btc", "strategy_type": "vwap_bot", "symbol": "BTC", "timeframe": "15m", "size_usd": 100, "leverage": 3, "params": {"vwap_bias_long": 0.7, "vwap_bias_short": 0.3, "min_vwap_distance": 0.0008, "cooldown_seconds": 300, "max_trades_per_hour": 3, "min_signal_strength": 0.5}},
+        {"name": "mean-rev-eth", "strategy_type": "mean_reversion", "symbol": "ETH", "timeframe": "15m", "size_usd": 100, "leverage": 3, "params": {"zscore_entry": 1.5, "zscore_exit": 0.3, "dynamic_sizing": True, "cooldown_seconds": 300, "max_trades_per_hour": 3, "min_signal_strength": 0.5}},
+    ]
+    for w in winners:
+        try:
+            inst = models.StrategyInstance(
+                name=w["name"], strategy_type=w["strategy_type"], symbol=w["symbol"],
+                timeframe=w["timeframe"], leverage=w.get("leverage", 3),
+                size_usd=w.get("size_usd", 100), target_pct=9.0, max_loss_pct=-8.0,
+                interval_seconds=30, enabled=True, params=w.get("params", {}),
+                tier="bonus_algos", status="running",
+            )
+            db.add(inst)
+            db.commit()
+            logger.info("Auto-deploy: created %s (%s on %s)", w["name"], w["strategy_type"], w["symbol"])
+        except Exception as e:
+            db.rollback()
+            logger.warning("Auto-deploy: failed to create %s — %s", w["name"], e)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize all services on startup, clean up on shutdown."""
@@ -176,6 +205,13 @@ async def lifespan(app: FastAPI):
     app.state.solana_scanner = solana_scanner
     app.state.funding_monitor = funding_monitor
 
+    # ── Restore paper trading state from disk ──
+    if paper_mode and executor is not None:
+        try:
+            executor.load_state()
+        except Exception as e:
+            logger.warning("Paper state restore failed: %s", e)
+
     # ── Auto-start strategies that were running before shutdown ──
     if orchestrator is not None:
         try:
@@ -188,6 +224,15 @@ async def lifespan(app: FastAPI):
                 running_instances = db.query(models.StrategyInstance).filter(
                     models.StrategyInstance.status == "running"
                 ).all()
+
+                # If DB is empty (fresh deploy), auto-deploy winner strategies
+                all_instances = db.query(models.StrategyInstance).count()
+                if all_instances == 0:
+                    logger.info("Auto-deploy: empty DB detected — deploying winner strategies")
+                    _auto_deploy_winners(db, orchestrator)
+                    running_instances = db.query(models.StrategyInstance).filter(
+                        models.StrategyInstance.status == "running"
+                    ).all()
 
                 if running_instances:
                     logger.info("Auto-start: found %d strategies with status=running", len(running_instances))
@@ -232,6 +277,19 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning("Auto-start: could not restore strategies — %s", e)
 
+    # ── Periodic paper state saver (every 5 minutes) ──
+    async def _paper_state_saver():
+        while True:
+            await asyncio.sleep(300)  # 5 minutes
+            if paper_mode and executor is not None:
+                try:
+                    executor.save_state()
+                except Exception as e:
+                    logger.warning("Paper state save failed: %s", e)
+
+    if paper_mode and executor is not None:
+        asyncio.create_task(_paper_state_saver())
+
     # ── Auto-start risk controller (Layer 0 seatbelt — always on) ──
     if risk_controller is not None:
         try:
@@ -241,6 +299,14 @@ async def lifespan(app: FastAPI):
             logger.warning("RiskController auto-start failed: %s", e)
 
     yield
+
+    # Shutdown: save paper state before stopping
+    if paper_mode and executor is not None:
+        try:
+            executor.save_state()
+            logger.info("Paper state saved on shutdown")
+        except Exception as e:
+            logger.warning("Paper state save on shutdown failed: %s", e)
 
     # Shutdown: stop all services
     if orchestrator is not None:
