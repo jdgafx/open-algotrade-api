@@ -38,8 +38,14 @@ class BollingerStrategy(BaseStrategy):
         bb_width = current["bb_width"]
         prev_width = prev["bb_width"]
 
-        is_squeeze = prev_width < squeeze_threshold
-        expanding = bb_width > prev_width
+        # Relative squeeze: current width is below 80% of its 20-bar rolling average
+        # This adapts to the symbol's typical volatility instead of an absolute threshold
+        rolling_avg = data["bb_width"].rolling(20).mean().iloc[-1]
+        relative_squeeze = rolling_avg > 0 and prev_width < rolling_avg * 0.8
+        # Also check absolute threshold as fallback
+        absolute_squeeze = prev_width < squeeze_threshold
+        is_squeeze = relative_squeeze or absolute_squeeze
+        expanding = bb_width > prev_width * 1.05  # at least 5% wider than previous
 
         if is_squeeze and expanding and price > current["bb_upper"]:
             # Strength: tighter the prior squeeze, stronger the breakout signal
@@ -56,7 +62,7 @@ class BollingerStrategy(BaseStrategy):
             )
 
         if is_squeeze and expanding and price < current["bb_lower"]:
-            expansion_ratio = bb_width / max(prev_width, 0.001)
+            expansion_ratio = bb_width / max(prev_width * 1.05, 0.001)
             strength = min(0.5 + expansion_ratio * 0.1, 0.95)
             return Signal(
                 signal_type=SignalType.SHORT,

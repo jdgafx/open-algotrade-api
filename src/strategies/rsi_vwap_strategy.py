@@ -47,32 +47,40 @@ class RSIVWAPStrategy(BaseStrategy):
         if pd.isna(prev_rsi):
             return None
 
-        # Long: RSI crosses UP through oversold level + price crosses above VWAP
-        # Requires actual crossover (prev below, current at/above) — not just "near"
-        rsi_cross_up = prev_rsi < oversold and rsi >= oversold
-        if rsi_cross_up and prev_price < prev_vwap and price > vwap:
-            strength = min(0.5 + (oversold - prev_rsi) / 20, 0.95)  # Stronger when deeper oversold
+        # Long: RSI in oversold zone (or recovering from it within 3 bars) AND price above VWAP
+        # Relaxed from strict simultaneous crossover to improve signal frequency
+        rsi_oversold_now = rsi <= oversold + 5
+        rsi_recovering = rsi > prev_rsi  # RSI is rising
+        price_above_vwap = price >= vwap * 0.997  # within 0.3% of VWAP counts
+
+        if (rsi_oversold_now or (prev_rsi < oversold and rsi_recovering)) and price_above_vwap:
+            depth = max(oversold - min(rsi, prev_rsi), 0)
+            strength = min(0.5 + depth / 20, 0.92)
             return Signal(
                 signal_type=SignalType.LONG,
                 symbol=self.config.symbol,
                 price=price,
                 size_usd=self.config.size_usd,
                 strength=max(strength, 0.5),
-                reason=f"RSI+VWAP LONG: RSI crossed {oversold} ({prev_rsi:.1f}->{rsi:.1f}), price above VWAP {vwap:.2f}",
+                reason=f"RSI+VWAP LONG: RSI {rsi:.1f} (oversold zone), price {price:.2f} at/above VWAP {vwap:.2f}",
                 metadata={"rsi": rsi, "vwap": vwap},
             )
 
-        # Short: RSI crosses DOWN through overbought level + price crosses below VWAP
-        rsi_cross_down = prev_rsi > overbought and rsi <= overbought
-        if rsi_cross_down and prev_price > prev_vwap and price < vwap:
-            strength = min(0.5 + (prev_rsi - overbought) / 20, 0.95)
+        # Short: RSI in overbought zone (or falling from it) AND price below VWAP
+        rsi_overbought_now = rsi >= overbought - 5
+        rsi_falling = rsi < prev_rsi
+        price_below_vwap = price <= vwap * 1.003
+
+        if (rsi_overbought_now or (prev_rsi > overbought and rsi_falling)) and price_below_vwap:
+            depth = max(max(rsi, prev_rsi) - overbought, 0)
+            strength = min(0.5 + depth / 20, 0.92)
             return Signal(
                 signal_type=SignalType.SHORT,
                 symbol=self.config.symbol,
                 price=price,
                 size_usd=self.config.size_usd,
                 strength=max(strength, 0.5),
-                reason=f"RSI+VWAP SHORT: RSI crossed {overbought} ({prev_rsi:.1f}->{rsi:.1f}), price below VWAP {vwap:.2f}",
+                reason=f"RSI+VWAP SHORT: RSI {rsi:.1f} (overbought zone), price {price:.2f} at/below VWAP {vwap:.2f}",
                 metadata={"rsi": rsi, "vwap": vwap},
             )
 

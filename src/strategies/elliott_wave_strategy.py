@@ -79,7 +79,7 @@ class ElliottWaveStrategy(BaseStrategy):
 
         is_long = position.get("is_long", position.get("size", 0) > 0)
         pnl_pct = position.get("pnl_perc", 0)
-        entry_price = position.get("entry_price", data["close"].iloc[-1])
+        entry_price = position.get("entry_px", position.get("entry_price", data["close"].iloc[-1]))
 
         price = data["close"].iloc[-1]
 

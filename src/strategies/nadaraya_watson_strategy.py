@@ -25,9 +25,9 @@ class NadarayaWatsonStrategy(BaseStrategy):
     async def should_enter(self, data: pd.DataFrame) -> Optional[Signal]:
         p = self.config.params
         bandwidth = p.get("kernel_bandwidth", 8.0)
-        lookback = p.get("kernel_lookback", 200)   # MoonDev uses 200
-        overbought = p.get("overbought", 90)       # MoonDev uses 90
-        oversold = p.get("oversold", 10)            # MoonDev uses 10
+        lookback = p.get("kernel_lookback", 100)   # 100 bars: fast enough, still meaningful
+        overbought = p.get("overbought", 80)       # Relaxed from 90 for more signals
+        oversold = p.get("oversold", 20)            # Relaxed from 10 for more signals
 
         if len(data) < lookback + 5:
             return None
@@ -43,15 +43,19 @@ class NadarayaWatsonStrategy(BaseStrategy):
         if nw_upper is None or pd.isna(nw_upper):
             return None
 
-        # Check for Nadaraya-Watson envelope signals (derivative direction change)
+        # NW envelope signals: direction change OR price below/above band
         nw_buy = bool(current.get("nw_buy", False))
         nw_sell = bool(current.get("nw_sell", False))
+
+        # Also trigger when price touches the NW envelope bands (more frequent)
+        nw_band_long = nw_lower is not None and not pd.isna(nw_lower) and price <= nw_lower * 1.002
+        nw_band_short = nw_upper is not None and not pd.isna(nw_upper) and price >= nw_upper * 0.998
 
         stoch_oversold = stoch_k is not None and not pd.isna(stoch_k) and stoch_k < oversold
         stoch_overbought = stoch_k is not None and not pd.isna(stoch_k) and stoch_k > overbought
 
-        # Long: NW buy signal OR StochRSI oversold (MoonDev uses OR)
-        if nw_buy or stoch_oversold:
+        # Long: NW buy signal OR price at lower band OR StochRSI oversold
+        if nw_buy or nw_band_long or stoch_oversold:
             conditions_met = int(nw_buy) + int(stoch_oversold)
             strength = 0.65 if conditions_met == 1 else 0.9  # both = stronger signal
             parts = []
@@ -69,8 +73,8 @@ class NadarayaWatsonStrategy(BaseStrategy):
                 metadata={"nw_buy": nw_buy, "stoch_k": stoch_k, "nw_lower": nw_lower},
             )
 
-        # Short: NW sell signal OR StochRSI overbought (MoonDev uses OR)
-        if nw_sell or stoch_overbought:
+        # Short: NW sell signal OR price at upper band OR StochRSI overbought
+        if nw_sell or nw_band_short or stoch_overbought:
             conditions_met = int(nw_sell) + int(stoch_overbought)
             strength = 0.65 if conditions_met == 1 else 0.9
             parts = []
@@ -144,12 +148,13 @@ class NadarayaWatsonStrategy(BaseStrategy):
 
     @staticmethod
     def _nadaraya_watson_kernel(prices: np.ndarray, bandwidth: float) -> np.ndarray:
-        """Gaussian kernel regression (Nadaraya-Watson estimator)."""
+        """Gaussian kernel regression — vectorized O(n²) with numpy broadcasting."""
         n = len(prices)
-        smoothed = np.zeros(n)
-        for i in range(n):
-            weights = np.exp(-0.5 * ((np.arange(n) - i) / bandwidth) ** 2)
-            smoothed[i] = np.sum(weights * prices) / np.sum(weights)
+        idx = np.arange(n, dtype=np.float64)
+        # (n, n) weight matrix: weight[i,j] = exp(-0.5 * ((i-j)/bw)²)
+        diff = (idx[:, None] - idx[None, :]) / bandwidth
+        weights = np.exp(-0.5 * diff ** 2)
+        smoothed = (weights * prices[None, :]).sum(axis=1) / weights.sum(axis=1)
         return smoothed
 
     def _add_indicators(self, df: pd.DataFrame, bandwidth: float, lookback: int, params: dict) -> pd.DataFrame:

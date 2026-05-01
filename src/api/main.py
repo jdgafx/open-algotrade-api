@@ -643,7 +643,12 @@ async def set_trading_mode(request: Request):
     # Rebuild orchestrator with new client/executor
     if client and executor:
         from src.engine.orchestrator import StrategyOrchestrator
-        request.app.state.orchestrator = StrategyOrchestrator(client=client, executor=executor)
+        regime_detector = getattr(request.app.state, "regime_detector", None)
+        request.app.state.orchestrator = StrategyOrchestrator(
+            client=client,
+            executor=executor,
+            regime_detector=regime_detector,
+        )
 
     request.app.state.executor = executor
     request.app.state.trading_mode = new_mode

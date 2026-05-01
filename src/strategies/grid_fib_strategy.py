@@ -97,7 +97,7 @@ class GridFibStrategy(BaseStrategy):
         fib_range = swing_high - swing_low
 
         price = data["close"].iloc[-1]
-        entry_price = position.get("entry_price", price)
+        entry_price = position.get("entry_px", position.get("entry_price", price))
         is_long = position.get("is_long", position.get("size", 0) > 0)
         pnl_pct = position.get("pnl_perc", 0)
 

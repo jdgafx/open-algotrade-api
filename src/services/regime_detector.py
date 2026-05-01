@@ -38,57 +38,77 @@ REGIME_COLORS = {
 }
 
 # Which strategies work in which regimes.
+_ALL_STRATEGIES = [
+    "turtle", "sma_crossover", "macd", "ichimoku", "adx",
+    "ema_bollinger", "vwma", "sma_adx_bb_vol",
+    "consolidation_pop", "elliott_wave", "elliott_pivot",
+    "mean_reversion", "rsi", "bollinger", "rsi_vwap",
+    "nadaraya_watson", "supply_demand_zone", "grid_fibonacci",
+    "vwap_bot", "funding_arb", "market_maker", "pivot_lines",
+    "correlation", "quarter_theory", "solana_sniper", "liquidation_dip",
+]
+
 REGIME_STRATEGY_MAP = {
     MarketRegime.TRENDING_UP: [
         # Trend-following thrives here
         "turtle", "sma_crossover", "macd", "ichimoku", "adx",
         "ema_bollinger", "vwma", "sma_adx_bb_vol",
-        # Momentum plays
+        # Momentum + volatility plays
         "consolidation_pop", "elliott_wave", "elliott_pivot",
+        # Mean-reversion still fires at extremes within a trend
+        "mean_reversion", "rsi", "bollinger", "rsi_vwap",
+        "nadaraya_watson", "supply_demand_zone", "grid_fibonacci",
         # Market-neutral always allowed
         "vwap_bot", "funding_arb", "market_maker", "pivot_lines",
-        "correlation", "quarter_theory",
+        "correlation", "quarter_theory", "liquidation_dip",
     ],
     MarketRegime.TRENDING_DOWN: [
         # Trend-following works short
         "turtle", "sma_crossover", "macd", "ichimoku", "adx",
         "ema_bollinger", "vwma", "sma_adx_bb_vol",
+        # Momentum plays
+        "consolidation_pop", "elliott_wave", "elliott_pivot",
+        # Mean-reversion at extremes
+        "mean_reversion", "rsi", "bollinger", "rsi_vwap",
+        "nadaraya_watson", "supply_demand_zone", "grid_fibonacci",
         # Market-neutral always allowed
         "vwap_bot", "funding_arb", "market_maker", "pivot_lines",
-        "correlation",
+        "correlation", "quarter_theory", "liquidation_dip",
     ],
     MarketRegime.MEAN_REVERTING: [
         # Mean reversion strategies thrive here
         "mean_reversion", "rsi", "bollinger", "rsi_vwap",
-        "nadaraya_watson", "supply_demand_zone",
-        "grid_fibonacci",
+        "nadaraya_watson", "supply_demand_zone", "grid_fibonacci",
+        # Trend-following still useful (catches regime breakouts)
+        "turtle", "sma_crossover", "macd", "ichimoku", "adx",
+        "ema_bollinger", "vwma", "sma_adx_bb_vol",
         # Market-neutral always allowed
         "vwap_bot", "funding_arb", "market_maker", "pivot_lines",
-        "correlation",
+        "correlation", "quarter_theory",
     ],
     MarketRegime.HIGH_VOLATILITY: [
         # Volatility strategies
         "consolidation_pop", "grid_fibonacci",
         "elliott_wave", "elliott_pivot",
+        # Trend-following also works in vol (big directional moves)
+        "turtle", "sma_crossover", "macd", "ichimoku", "adx",
+        "ema_bollinger", "vwma", "sma_adx_bb_vol",
+        # RSI/mean-rev at extremes during vol spikes
+        "mean_reversion", "rsi", "bollinger", "rsi_vwap",
+        "nadaraya_watson", "quarter_theory",
         # Market-neutral always allowed
         "vwap_bot", "funding_arb", "market_maker",
-        # Funding arb thrives in vol (funding rates spike)
-        "correlation",
+        "correlation", "pivot_lines", "liquidation_dip",
     ],
     MarketRegime.LOW_VOLATILITY: [
         # Mean reversion + range strategies
         "mean_reversion", "rsi", "bollinger", "rsi_vwap",
-        "nadaraya_watson", "supply_demand_zone",
-        "grid_fibonacci",
+        "nadaraya_watson", "supply_demand_zone", "grid_fibonacci",
         # Market-neutral always allowed
         "vwap_bot", "funding_arb", "market_maker", "pivot_lines",
-        "correlation",
+        "correlation", "quarter_theory",
     ],
-    MarketRegime.UNKNOWN: [
-        # Only market-neutral when we don't know the regime
-        "vwap_bot", "funding_arb", "market_maker", "pivot_lines",
-        "correlation", "nadaraya_watson",
-    ],
+    MarketRegime.UNKNOWN: _ALL_STRATEGIES,  # Unknown regime = allow all
 }
 
 
@@ -111,6 +131,7 @@ class RegimeDetector:
     def fit(self, symbol: str, data: pd.DataFrame) -> bool:
         """
         Fit HMM model on price data for a given symbol.
+        Results are cached for 15 minutes to avoid re-fitting on every tick.
 
         Args:
             symbol: Asset symbol (e.g. "BTC")
@@ -119,6 +140,12 @@ class RegimeDetector:
         Returns:
             True if fitting succeeded
         """
+        # TTL cache: skip re-fit if model is less than 15 minutes old
+        cached = self._models.get(symbol)
+        if cached and cached.get("fitted_at"):
+            age_seconds = (datetime.now(timezone.utc) - cached["fitted_at"]).total_seconds()
+            if age_seconds < 900:
+                return True
         try:
             close_col = "Close" if "Close" in data.columns else "close"
             high_col = "High" if "High" in data.columns else "high"

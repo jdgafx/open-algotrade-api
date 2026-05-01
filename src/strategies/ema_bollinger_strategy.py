@@ -46,33 +46,37 @@ class EMABollingerStrategy(BaseStrategy):
         if any(pd.isna(v) for v in [ema_s, ema_l, bb_upper, bb_lower, prev_ema_s, prev_ema_l]):
             return None
 
-        # BB proximity: price within 20% of band distance from the band
+        # BB proximity: price within 30% of band distance from the band
         bb_range = bb_upper - bb_lower
-        bb_proximity = bb_range * 0.2 if bb_range > 0 else 0
+        bb_proximity = bb_range * 0.3 if bb_range > 0 else 0
 
-        # Long: bullish EMA cross + price near lower band (within proximity)
-        if prev_ema_s <= prev_ema_l and ema_s > ema_l and price <= bb_lower + bb_proximity:
-            strength = min(0.6 + (bb_lower + bb_proximity - price) / max(bb_range, 1) * 2, 0.9)
+        # Long: short EMA above long EMA (uptrend) + price near lower BB
+        # No crossover required — trend alignment is sufficient
+        if ema_s > ema_l and price <= bb_lower + bb_proximity:
+            # Stronger signal when short EMA crossed recently
+            just_crossed = prev_ema_s <= prev_ema_l
+            strength = min(0.75 if just_crossed else 0.6 + (bb_lower + bb_proximity - price) / max(bb_range, 1) * 2, 0.9)
             return Signal(
                 signal_type=SignalType.LONG,
                 symbol=self.config.symbol,
                 price=price,
                 size_usd=self.config.size_usd,
                 strength=strength,
-                reason=f"EMA+BB LONG: EMA cross bullish, price {price:.2f} near lower BB {bb_lower:.2f}",
+                reason=f"EMA+BB LONG: uptrend (EMA{short_ema}>{ema_s:.0f}>EMA{long_ema}), price {price:.2f} near lower BB {bb_lower:.2f}",
                 metadata={"ema_short": ema_s, "ema_long": ema_l, "bb_lower": bb_lower},
             )
 
-        # Short: bearish EMA cross + price near upper band (within proximity)
-        if prev_ema_l <= prev_ema_s and ema_l > ema_s and price >= bb_upper - bb_proximity:
-            strength = min(0.6 + (price - bb_upper + bb_proximity) / max(bb_range, 1) * 2, 0.9)
+        # Short: short EMA below long EMA (downtrend) + price near upper BB
+        if ema_s < ema_l and price >= bb_upper - bb_proximity:
+            just_crossed = prev_ema_l <= prev_ema_s
+            strength = min(0.75 if just_crossed else 0.6 + (price - bb_upper + bb_proximity) / max(bb_range, 1) * 2, 0.9)
             return Signal(
                 signal_type=SignalType.SHORT,
                 symbol=self.config.symbol,
                 price=price,
                 size_usd=self.config.size_usd,
                 strength=strength,
-                reason=f"EMA+BB SHORT: EMA cross bearish, price {price:.2f} near upper BB {bb_upper:.2f}",
+                reason=f"EMA+BB SHORT: downtrend (EMA{short_ema}<EMA{long_ema}), price {price:.2f} near upper BB {bb_upper:.2f}",
                 metadata={"ema_short": ema_s, "ema_long": ema_l, "bb_upper": bb_upper},
             )
 
