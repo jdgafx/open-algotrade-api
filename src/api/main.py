@@ -140,10 +140,9 @@ async def lifespan(app: FastAPI):
                 client=client,
                 executor=executor,
                 regime_detector=regime_detector,
-                # MoonDev profitability controls
-                max_global_trades_per_hour=6,      # Max 6 entries/hr across ALL strategies
-                daily_loss_limit_pct=2.0,           # Hard stop at -2% daily ($200 on $10k)
-                max_portfolio_exposure_pct=80.0,    # Max 80% of account in positions
+                max_global_trades_per_hour=20,
+                daily_loss_limit_pct=2.0,
+                max_portfolio_exposure_pct=80.0,
             )
             logger.info("StrategyOrchestrator initialized | mode=%s | regime_gate=ON", trading_mode.upper())
     except Exception as e:
@@ -648,6 +647,9 @@ async def set_trading_mode(request: Request):
             client=client,
             executor=executor,
             regime_detector=regime_detector,
+            max_global_trades_per_hour=20,
+            daily_loss_limit_pct=2.0,
+            max_portfolio_exposure_pct=80.0,
         )
 
     request.app.state.executor = executor
