@@ -50,33 +50,27 @@ class IchimokuStrategy(BaseStrategy):
 
         cloud_thickness = abs(span_a - span_b)
 
-        # Long: price above cloud + Tenkan crosses above Kijun
-        if (
-            price > cloud_top
-            and prev_tenkan <= prev_kijun
-            and tenkan > kijun
-        ):
-            # Strength: how far above cloud + cloud thickness (thick cloud = strong support)
+        # Long: price above cloud + Tenkan above Kijun (bullish alignment)
+        # Crossover (just_crossed) gives stronger signal; already-aligned is a valid entry too
+        if price > cloud_top and tenkan > kijun:
+            just_crossed = prev_tenkan <= prev_kijun
             dist_above = (price - cloud_top) / price if price > 0 else 0
-            strength = min(0.6 + dist_above * 10 + cloud_thickness / price * 5, 0.95)
+            strength = min(0.75 if just_crossed else 0.6 + dist_above * 10 + cloud_thickness / price * 5, 0.95)
             return Signal(
                 signal_type=SignalType.LONG,
                 symbol=self.config.symbol,
                 price=price,
                 size_usd=self.config.size_usd,
                 strength=strength,
-                reason=f"Ichimoku LONG: TK cross bullish, price {price:.2f} above cloud [{cloud_bottom:.2f}-{cloud_top:.2f}]",
+                reason=f"Ichimoku LONG: {'TK cross ' if just_crossed else ''}bullish, price {price:.2f} above cloud [{cloud_bottom:.2f}-{cloud_top:.2f}]",
                 metadata={"tenkan": tenkan, "kijun": kijun, "cloud_top": cloud_top},
             )
 
-        # Short: price below cloud + Kijun crosses above Tenkan
-        if (
-            price < cloud_bottom
-            and prev_kijun <= prev_tenkan
-            and kijun > tenkan
-        ):
+        # Short: price below cloud + Kijun above Tenkan (bearish alignment)
+        if price < cloud_bottom and kijun > tenkan:
+            just_crossed = prev_kijun <= prev_tenkan
             dist_below = (cloud_bottom - price) / price if price > 0 else 0
-            strength = min(0.6 + dist_below * 10 + cloud_thickness / price * 5, 0.95)
+            strength = min(0.75 if just_crossed else 0.6 + dist_below * 10 + cloud_thickness / price * 5, 0.95)
             return Signal(
                 signal_type=SignalType.SHORT,
                 symbol=self.config.symbol,
