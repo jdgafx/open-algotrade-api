@@ -550,6 +550,44 @@ class PaperTradingExecutor:
                 pass
         return self.balance + total_unrealized
 
+    async def close_by_symbol(self, symbol: str) -> List[ExecutionResult]:
+        """Close all paper positions for a given symbol — called by risk controller."""
+        results = []
+        keys_to_close = [k for k, p in self._positions.items() if p.symbol == symbol]
+        for pos_key in keys_to_close:
+            pos = self._positions[pos_key]
+            is_buy = pos.size < 0
+            try:
+                fill_price = self._get_fill_price(pos.symbol, is_buy)
+                abs_size = abs(pos.size)
+                if pos.side == "long":
+                    pnl = (fill_price - pos.entry_price) * abs_size
+                else:
+                    pnl = (pos.entry_price - fill_price) * abs_size
+                pnl_on_margin = pnl * pos.leverage if pos.leverage > 1 else pnl
+                commission = abs_size * fill_price * self.commission_pct
+                self.balance += pnl_on_margin - commission
+                if self.balance > self.peak_balance:
+                    self.peak_balance = self.balance
+                pnl_pct = (pnl / (pos.entry_price * abs_size)) * 100 if abs_size > 0 else 0
+                self._trade_counter += 1
+                trade = PaperTrade(
+                    id=self._trade_counter, symbol=symbol, side=pos.side,
+                    action="exit", price=fill_price, size=abs_size,
+                    size_usd=abs_size * fill_price, pnl=pnl_on_margin,
+                    pnl_pct=pnl_pct, reason="risk_stop",
+                    strategy_name=pos.strategy_name,
+                )
+                self._trades.append(trade)
+                del self._positions[pos_key]
+                results.append(ExecutionResult(success=True, realized_pnl=pnl_on_margin))
+                logger.info("[PAPER] Risk close | %s | pnl=$%.2f (%.2f%%)", symbol, pnl_on_margin, pnl_pct)
+            except Exception as e:
+                logger.error("[PAPER] close_by_symbol error | %s | %s", symbol, e)
+                results.append(ExecutionResult(success=False, error=str(e)))
+        self.save_state()
+        return results
+
     async def emergency_close_all(self) -> List[ExecutionResult]:
         """Close all paper positions."""
         logger.critical("[PAPER] EMERGENCY CLOSE ALL")

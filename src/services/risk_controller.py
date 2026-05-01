@@ -657,6 +657,15 @@ class RiskController:
                 details={"lockout_until": self._lockout_until.isoformat()},
             )
 
+    async def _close_position_by_symbol(self, symbol: str) -> None:
+        """Close all positions for a symbol. Routes to paper executor or live kill_switch."""
+        if hasattr(self.executor, "close_by_symbol"):
+            await self.executor.close_by_symbol(symbol)
+        else:
+            await asyncio.to_thread(
+                self.client.kill_switch, symbol, 3, self.client.vault_address
+            )
+
     async def _handle_leverage_exceeded(self, symbol: str, leverage: float) -> None:
         """Position leverage exceeds max — close position."""
         logger.warning(
@@ -667,14 +676,7 @@ class RiskController:
         )
 
         try:
-            positions = await self.executor.get_all_positions()
-            for pos in positions:
-                pos_symbol = pos.get("coin") or pos.get("symbol", "")
-                if pos_symbol == symbol:
-                    await asyncio.to_thread(
-                        self.client.kill_switch, symbol, 3, self.client.vault_address
-                    )
-                    break
+            await self._close_position_by_symbol(symbol)
         except Exception as e:
             logger.error("Failed to close overleveraged position %s: %s", symbol, e)
 
@@ -695,9 +697,7 @@ class RiskController:
         )
 
         try:
-            await asyncio.to_thread(
-                self.client.kill_switch, symbol, 3, self.client.vault_address
-            )
+            await self._close_position_by_symbol(symbol)
         except Exception as e:
             logger.error("Failed to close over-margin position %s: %s", symbol, e)
 
@@ -718,9 +718,7 @@ class RiskController:
         )
 
         try:
-            await asyncio.to_thread(
-                self.client.kill_switch, symbol, 3, self.client.vault_address
-            )
+            await self._close_position_by_symbol(symbol)
         except Exception as e:
             logger.error("Stop loss execution failed for %s: %s", symbol, e)
 
@@ -741,9 +739,7 @@ class RiskController:
         )
 
         try:
-            await asyncio.to_thread(
-                self.client.kill_switch, symbol, 3, self.client.vault_address
-            )
+            await self._close_position_by_symbol(symbol)
         except Exception as e:
             logger.error("Take profit execution failed for %s: %s", symbol, e)
 
@@ -786,9 +782,7 @@ class RiskController:
             )
 
             try:
-                await asyncio.to_thread(
-                    self.client.kill_switch, symbol, 3, self.client.vault_address
-                )
+                await self._close_position_by_symbol(symbol)
                 self._trailing_stops.pop(symbol, None)
             except Exception as e:
                 logger.error("Trailing stop execution failed for %s: %s", symbol, e)

@@ -1424,12 +1424,13 @@ def update_strategy_instance(
     if not instance:
         raise HTTPException(status_code=404, detail=f"Strategy '{name}' not found")
 
+    from sqlalchemy.orm.attributes import flag_modified
+
     update_data = data.model_dump(exclude_unset=True)
     for field, value in update_data.items():
         if field == "params" and value is not None:
-            current_params = instance.params or {}
-            current_params.update(value)
-            instance.params = current_params
+            instance.params = {**(instance.params or {}), **value}
+            flag_modified(instance, "params")
         else:
             setattr(instance, field, value)
 
