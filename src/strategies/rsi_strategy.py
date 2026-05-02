@@ -21,6 +21,8 @@ logger = logging.getLogger(__name__)
 
 class RSIStrategy(BaseStrategy):
 
+    _entry_mode: str = "classic"
+
     async def should_enter(self, data: pd.DataFrame) -> Optional[Signal]:
         p = self.config.params
         rsi_period = p.get("rsi_period", 14)
@@ -53,6 +55,7 @@ class RSIStrategy(BaseStrategy):
                 "[RSI] Classic oversold reversal LONG: RSI %.1f -> %.1f crossing above %d",
                 prev_rsi, rsi, oversold,
             )
+            self._entry_mode = "classic"
             return Signal(
                 signal_type=SignalType.LONG,
                 symbol=self.config.symbol,
@@ -68,6 +71,7 @@ class RSIStrategy(BaseStrategy):
                 "[RSI] Classic overbought reversal SHORT: RSI %.1f -> %.1f crossing below %d",
                 prev_rsi, rsi, overbought,
             )
+            self._entry_mode = "classic"
             return Signal(
                 signal_type=SignalType.SHORT,
                 symbol=self.config.symbol,
@@ -123,6 +127,7 @@ class RSIStrategy(BaseStrategy):
                 "RSI %.1f > prior RSI %.1f (higher low)",
                 price, price_min, rsi, rsi_at_price_min,
             )
+            self._entry_mode = "divergence"
             return Signal(
                 signal_type=SignalType.LONG,
                 symbol=self.config.symbol,
@@ -151,6 +156,7 @@ class RSIStrategy(BaseStrategy):
                 "RSI %.1f < prior RSI %.1f (lower high)",
                 price, price_max, rsi, rsi_at_price_max,
             )
+            self._entry_mode = "divergence"
             return Signal(
                 signal_type=SignalType.SHORT,
                 symbol=self.config.symbol,
@@ -196,6 +202,7 @@ class RSIStrategy(BaseStrategy):
             )
             # Scale strength by how far above threshold
             strength = min(0.5 + (rsi - long_threshold) / 50, 0.8)
+            self._entry_mode = "trend"
             return Signal(
                 signal_type=SignalType.LONG,
                 symbol=self.config.symbol,
@@ -219,6 +226,7 @@ class RSIStrategy(BaseStrategy):
                 rsi, short_threshold, rsi_roc, momentum_period,
             )
             strength = min(0.5 + (short_threshold - rsi) / 50, 0.8)
+            self._entry_mode = "trend"
             return Signal(
                 signal_type=SignalType.SHORT,
                 symbol=self.config.symbol,
@@ -251,7 +259,7 @@ class RSIStrategy(BaseStrategy):
         pnl_pct = position.get("pnl_perc", 0)
 
         # Determine entry mode from position metadata to use appropriate exit logic
-        entry_mode = position.get("metadata", {}).get("mode", "classic")
+        entry_mode = self._entry_mode
 
         if entry_mode.startswith("trend"):
             # Trend exits: RSI reversal against trend direction

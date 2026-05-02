@@ -21,6 +21,8 @@ logger = logging.getLogger(__name__)
 
 class MeanReversionStrategy(BaseStrategy):
 
+    _entry_mode: str = "original"
+
     async def should_enter(self, data: pd.DataFrame) -> Optional[Signal]:
         p = self.config.params
         sma_period = p.get("sma_entry_period", 20)
@@ -85,6 +87,7 @@ class MeanReversionStrategy(BaseStrategy):
                 "trend bullish, size_usd %.2f",
                 deviation, price, sma, size,
             )
+            self._entry_mode = "original"
             return Signal(
                 signal_type=SignalType.LONG,
                 symbol=self.config.symbol,
@@ -103,6 +106,7 @@ class MeanReversionStrategy(BaseStrategy):
                 "trend bearish, size_usd %.2f",
                 deviation, price, sma, size,
             )
+            self._entry_mode = "original"
             return Signal(
                 signal_type=SignalType.SHORT,
                 symbol=self.config.symbol,
@@ -130,6 +134,7 @@ class MeanReversionStrategy(BaseStrategy):
                 "size_usd %.2f",
                 zscore, zscore_threshold, price, sma, size,
             )
+            self._entry_mode = "zscore"
             return Signal(
                 signal_type=SignalType.LONG,
                 symbol=self.config.symbol,
@@ -155,6 +160,7 @@ class MeanReversionStrategy(BaseStrategy):
                 "size_usd %.2f",
                 zscore, zscore_threshold, price, sma, size,
             )
+            self._entry_mode = "zscore"
             return Signal(
                 signal_type=SignalType.SHORT,
                 symbol=self.config.symbol,
@@ -196,6 +202,7 @@ class MeanReversionStrategy(BaseStrategy):
                 "(prev %.2f), SMA %.2f, size_usd %.2f",
                 price, bb_lower, prev_price, sma, size,
             )
+            self._entry_mode = "bollinger"
             return Signal(
                 signal_type=SignalType.LONG,
                 symbol=self.config.symbol,
@@ -220,6 +227,7 @@ class MeanReversionStrategy(BaseStrategy):
                 "(prev %.2f), SMA %.2f, size_usd %.2f",
                 price, bb_upper, prev_price, sma, size,
             )
+            self._entry_mode = "bollinger"
             return Signal(
                 signal_type=SignalType.SHORT,
                 symbol=self.config.symbol,
@@ -272,7 +280,7 @@ class MeanReversionStrategy(BaseStrategy):
         is_long = position.get("is_long", position.get("size", 0) > 0)
         entry_px = position.get("entry_px", 0)
         pnl_pct = position.get("pnl_perc", 0)
-        entry_mode = position.get("metadata", {}).get("mode", "original")
+        entry_mode = self._entry_mode
 
         # Z-score based exit: price has reverted close to mean
         if entry_mode == "zscore" and not pd.isna(zscore):

@@ -51,6 +51,7 @@ class StrategyOrchestrator:
         executor: HyperliquidVaultExecutor,
         regime_detector=None,
         liquidation_guard: Optional[LiquidationGuard] = None,
+        risk_controller=None,
         # MoonDev profitability params
         max_global_trades_per_hour: int = 20,
         daily_loss_limit_pct: float = 2.0,
@@ -60,6 +61,7 @@ class StrategyOrchestrator:
         self.executor = executor
         self.regime_detector = regime_detector
         self.liquidation_guard = liquidation_guard
+        self.risk_controller = risk_controller
         self._strategies: Dict[str, BaseStrategy] = {}
         self._strategy_types: Dict[str, str] = {}  # name -> strategy_type
         self._tasks: Dict[str, asyncio.Task] = {}
@@ -373,6 +375,13 @@ class StrategyOrchestrator:
                             )
                             await asyncio.sleep(sleep_seconds)
                             continue
+
+                        # ── Gate 3.5: RiskController ──
+                        if self.risk_controller and hasattr(self.risk_controller, 'can_open_new_position'):
+                            if not self.risk_controller.can_open_new_position():
+                                logger.info("[Orchestrator] RiskController blocked entry for %s", signal.symbol)
+                                await asyncio.sleep(sleep_seconds)
+                                continue
 
                         # ── Gate 4: Liquidation Guard ──
                         if self.liquidation_guard:

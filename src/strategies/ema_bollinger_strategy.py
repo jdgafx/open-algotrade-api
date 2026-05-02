@@ -22,8 +22,8 @@ class EMABollingerStrategy(BaseStrategy):
 
     async def should_enter(self, data: pd.DataFrame) -> Optional[Signal]:
         p = self.config.params
-        short_ema = p.get("short_ema_period", 50)
-        long_ema = p.get("long_ema_period", 200)
+        short_ema = p.get("short_ema_period", 21)
+        long_ema = p.get("long_ema_period", 55)
         bb_period = p.get("bb_period", 20)
         bb_std = p.get("bb_std", 2.0)
 
@@ -86,8 +86,8 @@ class EMABollingerStrategy(BaseStrategy):
         self, data: pd.DataFrame, position: Dict[str, Any]
     ) -> Optional[Signal]:
         p = self.config.params
-        short_ema = p.get("short_ema_period", 50)
-        long_ema = p.get("long_ema_period", 200)
+        short_ema = p.get("short_ema_period", 21)
+        long_ema = p.get("long_ema_period", 55)
         bb_period = p.get("bb_period", 20)
         bb_std = p.get("bb_std", 2.0)
 

@@ -20,6 +20,8 @@ logger = logging.getLogger(__name__)
 
 class MACDStrategy(BaseStrategy):
 
+    _entry_mode: str = "classic"
+
     async def should_enter(self, data: pd.DataFrame) -> Optional[Signal]:
         p = self.config.params
         fast = p.get("fast_period", 12)
@@ -67,6 +69,7 @@ class MACDStrategy(BaseStrategy):
                 "hist confirmed %d bars, MA filter %s",
                 macd, sig, confirm_bars, "pass" if ma_long_ok else "skipped",
             )
+            self._entry_mode = "classic"
             return Signal(
                 signal_type=SignalType.LONG,
                 symbol=self.config.symbol,
@@ -89,6 +92,7 @@ class MACDStrategy(BaseStrategy):
                 "hist confirmed %d bars",
                 sig, macd, confirm_bars,
             )
+            self._entry_mode = "classic"
             return Signal(
                 signal_type=SignalType.SHORT,
                 symbol=self.config.symbol,
@@ -130,6 +134,7 @@ class MACDStrategy(BaseStrategy):
                 "[MACD] Zero-line cross LONG: MACD %.4f crossed above 0 (signal %.4f)",
                 macd, sig,
             )
+            self._entry_mode = "zero_cross"
             return Signal(
                 signal_type=SignalType.LONG,
                 symbol=self.config.symbol,
@@ -146,6 +151,7 @@ class MACDStrategy(BaseStrategy):
                 "[MACD] Zero-line cross SHORT: MACD %.4f crossed below 0 (signal %.4f)",
                 macd, sig,
             )
+            self._entry_mode = "zero_cross"
             return Signal(
                 signal_type=SignalType.SHORT,
                 symbol=self.config.symbol,
@@ -187,6 +193,7 @@ class MACDStrategy(BaseStrategy):
                 current_hist, growth_bars, avg_growth,
             )
             strength = min(0.5 + abs(current_hist) * 10, 0.8)
+            self._entry_mode = "histogram_momentum"
             return Signal(
                 signal_type=SignalType.LONG,
                 symbol=self.config.symbol,
@@ -212,6 +219,7 @@ class MACDStrategy(BaseStrategy):
                 current_hist, growth_bars, avg_growth,
             )
             strength = min(0.5 + abs(current_hist) * 10, 0.8)
+            self._entry_mode = "histogram_momentum"
             return Signal(
                 signal_type=SignalType.SHORT,
                 symbol=self.config.symbol,
@@ -252,7 +260,7 @@ class MACDStrategy(BaseStrategy):
 
         is_long = position.get("is_long", position.get("size", 0) > 0)
         pnl_pct = position.get("pnl_perc", 0)
-        entry_mode = position.get("metadata", {}).get("mode", "classic")
+        entry_mode = self._entry_mode
 
         # Exit long: signal crosses above MACD (classic exit)
         if is_long and prev_sig <= prev_macd and sig > macd:

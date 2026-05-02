@@ -135,16 +135,19 @@ async def lifespan(app: FastAPI):
     # ── 3. Strategy Orchestrator (with MoonDev profitability controls) ──
     try:
         from src.engine.orchestrator import StrategyOrchestrator
+        from src.services.liquidation_guard import LiquidationGuard
         if client and executor:
+            liquidation_guard = LiquidationGuard()
             orchestrator = StrategyOrchestrator(
                 client=client,
                 executor=executor,
                 regime_detector=regime_detector,
+                liquidation_guard=liquidation_guard,
                 max_global_trades_per_hour=20,
                 daily_loss_limit_pct=2.0,
                 max_portfolio_exposure_pct=80.0,
             )
-            logger.info("StrategyOrchestrator initialized | mode=%s | regime_gate=ON", trading_mode.upper())
+            logger.info("StrategyOrchestrator initialized | mode=%s | regime_gate=ON | liq_guard=ON", trading_mode.upper())
     except Exception as e:
         logger.warning("Could not initialize StrategyOrchestrator: %s", e)
 
@@ -154,6 +157,9 @@ async def lifespan(app: FastAPI):
         if executor:
             risk_controller = RiskController(client=client, executor=executor)
             logger.info("RiskController initialized | mode=%s", trading_mode.upper())
+            # Inject into orchestrator now that it's available
+            if orchestrator is not None:
+                orchestrator.risk_controller = risk_controller
         else:
             logger.warning("RiskController skipped — no executor available")
     except Exception as e:
@@ -642,11 +648,15 @@ async def set_trading_mode(request: Request):
     # Rebuild orchestrator with new client/executor
     if client and executor:
         from src.engine.orchestrator import StrategyOrchestrator
+        from src.services.liquidation_guard import LiquidationGuard
         regime_detector = getattr(request.app.state, "regime_detector", None)
+        existing_risk_controller = getattr(request.app.state, "risk_controller", None)
         request.app.state.orchestrator = StrategyOrchestrator(
             client=client,
             executor=executor,
             regime_detector=regime_detector,
+            liquidation_guard=LiquidationGuard(),
+            risk_controller=existing_risk_controller,
             max_global_trades_per_hour=20,
             daily_loss_limit_pct=2.0,
             max_portfolio_exposure_pct=80.0,
