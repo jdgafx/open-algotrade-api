@@ -150,8 +150,8 @@ class MarketMakerStrategy(BaseStrategy):
     ) -> Optional[Signal]:
         p = self.config.params
 
-        exit_pct: float = p.get("exit_pct", 0.004)            # 0.4% take profit (MoonDev default)
-        stop_loss_pct: float = p.get("mm_stop_pct", 0.01)     # 1% stop loss
+        exit_pct: float = p.get("exit_pct", 0.010)            # 1.0% take profit
+        stop_loss_pct: float = p.get("mm_stop_pct", 0.006)    # 0.6% stop loss
         time_limit: int = p.get("time_limit_minutes", 120)     # forced close after N minutes
         kill_size_usd: float = p.get("kill_size_usd", 2000.0)
 

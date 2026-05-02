@@ -116,18 +116,20 @@ def _register_all():
             "lookback_period": 55, "atr_period": 20, "atr_multiplier": 3.0,
             "take_profit_pct": 0.075,
             "min_hold_bars": 3, "cooldown_seconds": 120, "max_trades_per_hour": 5,
-            "min_signal_strength": 0.3,
+            "min_signal_strength": 0.65,
         },
         category="breakout", risk_level="medium",
     )
     register_strategy(
         "bollinger", BollingerStrategy, StrategyTier.A,
-        "Bollinger Band squeeze breakout with band-width triggers",
-        "BTC", "1h",
+        "MoonDev BB Squeeze + Keltner Channel + ADX>25 breakout (Harvard repo)",
+        "BTC", "6h",
         {
-            "bb_period": 20, "bb_std": 2.0, "squeeze_threshold": 0.05,
-            "min_hold_bars": 3, "cooldown_seconds": 120, "max_trades_per_hour": 5,
-            "min_signal_strength": 0.3,
+            "bb_period": 20, "bb_std": 2.0,
+            "keltner_period": 20, "keltner_atr_mult": 1.5,
+            "adx_period": 14, "adx_threshold": 25,
+            "min_hold_bars": 2, "cooldown_seconds": 180, "max_trades_per_hour": 3,
+            "min_signal_strength": 0.65,
         },
         category="breakout", risk_level="medium",
     )
@@ -138,7 +140,7 @@ def _register_all():
         {
             "zone_lookback_days": 30, "zone_threshold": 0.015,
             "min_hold_bars": 2, "cooldown_seconds": 180, "max_trades_per_hour": 4,
-            "min_signal_strength": 0.3,
+            "min_signal_strength": 0.65,
         },
         category="reversal", risk_level="medium",
     )
@@ -150,7 +152,7 @@ def _register_all():
             "vwap_bias_long": 0.7, "vwap_bias_short": 0.3,
             "min_vwap_distance": 0.0008,
             "min_hold_bars": 3, "cooldown_seconds": 90, "max_trades_per_hour": 6,
-            "min_signal_strength": 0.3,
+            "min_signal_strength": 0.65,
         },
         category="trend", risk_level="low",
     )
@@ -164,7 +166,7 @@ def _register_all():
             "combined_target_pct": 3.0,
             "momentum_threshold": 0.015,
             "min_hold_bars": 3, "cooldown_seconds": 120, "max_trades_per_hour": 5,
-            "min_signal_strength": 0.35,
+            "min_signal_strength": 0.65,
         },
         category="arbitrage", risk_level="low",
     )
@@ -183,7 +185,7 @@ def _register_all():
             "sl_pct": 0.015, "tp_pct": 0.025,
             "momentum_threshold": 0.01,
             "min_hold_bars": 3, "cooldown_seconds": 90, "max_trades_per_hour": 6,
-            "min_signal_strength": 0.3,
+            "min_signal_strength": 0.65,
         },
         category="statistical", risk_level="medium",
     )
@@ -196,7 +198,7 @@ def _register_all():
             "range_position_buy": 0.3, "range_position_sell": 0.7,
             "tp_pct": 0.02, "sl_pct": 0.015,
             "min_hold_bars": 3, "cooldown_seconds": 90, "max_trades_per_hour": 6,
-            "min_signal_strength": 0.3,
+            "min_signal_strength": 0.65,
         },
         category="breakout", risk_level="medium",
     )
@@ -209,7 +211,7 @@ def _register_all():
             "stoch_period": 14, "stoch_k": 3, "stoch_d": 3,
             "overbought": 75, "oversold": 25,
             "min_hold_bars": 3, "cooldown_seconds": 90, "max_trades_per_hour": 6,
-            "min_signal_strength": 0.3,
+            "min_signal_strength": 0.65,
         },
         category="statistical", risk_level="medium",
     )
@@ -221,8 +223,9 @@ def _register_all():
             "spread": 0.003,
             "max_position_usd": 500.0, "kill_size_usd": 1000.0,
             "atr_period": 14, "refresh_seconds": 30,
+            "exit_pct": 0.010, "mm_stop_pct": 0.006,
             "min_hold_bars": 2, "cooldown_seconds": 60, "max_trades_per_hour": 10,
-            "min_signal_strength": 0.25,
+            "min_signal_strength": 0.50,
         },
         category="market_making", risk_level="high",
     )
@@ -238,7 +241,7 @@ def _register_all():
             "bb_period": 20, "bb_std": 2.0,
             "dynamic_sizing": True,
             "min_hold_bars": 3, "cooldown_seconds": 90, "max_trades_per_hour": 6,
-            "min_signal_strength": 0.3,
+            "min_signal_strength": 0.65,
         },
         category="mean_reversion", risk_level="medium",
     )
@@ -254,7 +257,7 @@ def _register_all():
         {
             "sma_period": 20, "support_lookback": 20,
             "min_hold_bars": 3, "cooldown_seconds": 120, "max_trades_per_hour": 5,
-            "min_signal_strength": 0.3,
+            "min_signal_strength": 0.65,
         },
         category="trend", risk_level="low",
     )
@@ -270,7 +273,7 @@ def _register_all():
             "divergence_lookback": 14,
             "rsi_momentum_period": 3,
             "min_hold_bars": 3, "cooldown_seconds": 120, "max_trades_per_hour": 5,
-            "min_signal_strength": 0.3,
+            "min_signal_strength": 0.65,
         },
         category="reversal", risk_level="low",
     )
@@ -281,7 +284,7 @@ def _register_all():
         {
             "fast_period": 20, "mid_period": 41, "slow_period": 75,
             "min_hold_bars": 3, "cooldown_seconds": 90, "max_trades_per_hour": 6,
-            "min_signal_strength": 0.3,
+            "min_signal_strength": 0.65,
         },
         category="trend", risk_level="low",
     )
@@ -296,9 +299,9 @@ def _register_all():
         "BTC", "1h",
         {
             "adx_period": 14, "di_period": 14,
-            "adx_threshold": 20, "exit_threshold": 15,
+            "adx_threshold": 25, "exit_threshold": 20,
             "min_hold_bars": 3, "cooldown_seconds": 120, "max_trades_per_hour": 5,
-            "min_signal_strength": 0.3,
+            "min_signal_strength": 0.65,
         },
         category="trend", risk_level="medium",
     )
@@ -314,7 +317,7 @@ def _register_all():
             "histogram_mode": True, "zero_cross_mode": True,
             "histogram_growth_bars": 2,
             "min_hold_bars": 3, "cooldown_seconds": 120, "max_trades_per_hour": 5,
-            "min_signal_strength": 0.3,
+            "min_signal_strength": 0.65,
         },
         category="trend", risk_level="medium",
     )
@@ -325,7 +328,7 @@ def _register_all():
         {
             "tenkan_period": 9, "kijun_period": 26, "senkou_b_period": 52,
             "min_hold_bars": 2, "cooldown_seconds": 180, "max_trades_per_hour": 4,
-            "min_signal_strength": 0.3,
+            "min_signal_strength": 0.65,
         },
         category="trend", risk_level="medium",
     )
@@ -338,7 +341,7 @@ def _register_all():
             "fib_retracement_min": 0.382, "fib_retracement_max": 0.618,
             "min_swing_pct": 0.5, "reversal_exit_pct": 3.0,
             "min_hold_bars": 2, "cooldown_seconds": 180, "max_trades_per_hour": 4,
-            "min_signal_strength": 0.3,
+            "min_signal_strength": 0.65,
         },
         category="pattern", risk_level="high",
     )
@@ -349,7 +352,7 @@ def _register_all():
         {
             "pivot_lookback": 24,
             "min_hold_bars": 3, "cooldown_seconds": 120, "max_trades_per_hour": 5,
-            "min_signal_strength": 0.3,
+            "min_signal_strength": 0.65,
         },
         category="reversal", risk_level="low",
     )
@@ -361,7 +364,7 @@ def _register_all():
             "quarter_size": None, "breakout_pct": 0.1,
             "take_profit_quarters": 2, "stop_loss_quarters": 1,
             "min_hold_bars": 3, "cooldown_seconds": 120, "max_trades_per_hour": 5,
-            "min_signal_strength": 0.3,
+            "min_signal_strength": 0.65,
         },
         category="breakout", risk_level="medium",
     )
@@ -373,7 +376,7 @@ def _register_all():
             "short_ema_period": 20, "long_ema_period": 50,
             "bb_period": 20, "bb_std": 2.0,
             "min_hold_bars": 3, "cooldown_seconds": 120, "max_trades_per_hour": 5,
-            "min_signal_strength": 0.3,
+            "min_signal_strength": 0.65,
         },
         category="trend", risk_level="medium",
     )
@@ -387,7 +390,7 @@ def _register_all():
             "trend_period": 20,
             "take_profit_fib": 0.618, "stop_loss_fib": 1.0,
             "min_hold_bars": 2, "cooldown_seconds": 180, "max_trades_per_hour": 4,
-            "min_signal_strength": 0.3,
+            "min_signal_strength": 0.65,
         },
         category="grid", risk_level="medium",
     )
@@ -398,7 +401,7 @@ def _register_all():
         {
             "swing_lookback": 5, "pivot_lookback": 24,
             "min_hold_bars": 2, "cooldown_seconds": 180, "max_trades_per_hour": 4,
-            "min_signal_strength": 0.3,
+            "min_signal_strength": 0.65,
         },
         category="pattern", risk_level="medium",
     )
@@ -409,9 +412,9 @@ def _register_all():
         {
             "sma_period": 20, "adx_period": 14,
             "bb_period": 20, "bb_std": 2.0,
-            "min_adx": 20, "volume_multiplier": 1.1,
+            "min_adx": 25, "volume_multiplier": 1.1,
             "min_hold_bars": 3, "cooldown_seconds": 120, "max_trades_per_hour": 5,
-            "min_signal_strength": 0.3,
+            "min_signal_strength": 0.65,
         },
         category="trend", risk_level="medium",
     )
@@ -423,7 +426,7 @@ def _register_all():
             "rsi_period": 14,
             "oversold": 35, "overbought": 65,
             "min_hold_bars": 3, "cooldown_seconds": 90, "max_trades_per_hour": 6,
-            "min_signal_strength": 0.3,
+            "min_signal_strength": 0.65,
         },
         category="reversal", risk_level="low",
     )
@@ -437,7 +440,7 @@ def _register_all():
             "max_top10_holder_pct": 0.7, "min_liquidity": 400,
             "require_price_above_avg": True,
             "min_hold_bars": 3, "cooldown_seconds": 120, "max_trades_per_hour": 5,
-            "min_signal_strength": 0.3,
+            "min_signal_strength": 0.65,
         },
         category="momentum", risk_level="high",
     )
@@ -455,7 +458,7 @@ def _register_all():
             "stop_loss_pct": 10.0,
             "time_limit_hours": 24,
             "min_hold_bars": 3, "cooldown_seconds": 120, "max_trades_per_hour": 5,
-            "min_signal_strength": 0.3,
+            "min_signal_strength": 0.60,
         },
         category="liquidation", risk_level="high",
     )

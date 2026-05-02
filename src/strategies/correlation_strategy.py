@@ -110,6 +110,30 @@ class CorrelationStrategy(BaseStrategy):
 
         return None
 
+    @staticmethod
+    def _adx_is_trending(data: pd.DataFrame, period: int = 14) -> bool:
+        """Returns True if ADX > 25 (trending, skip mean reversion)."""
+        if len(data) < period * 2:
+            return False
+        high = data["high"]
+        low = data["low"]
+        close = data["close"]
+        tr = pd.concat([
+            high - low,
+            (high - close.shift(1)).abs(),
+            (low - close.shift(1)).abs()
+        ], axis=1).max(axis=1)
+        atr = tr.ewm(span=period, adjust=False).mean()
+        up_move = high.diff()
+        down_move = -low.diff()
+        plus_dm = up_move.where((up_move > down_move) & (up_move > 0), 0.0)
+        minus_dm = down_move.where((down_move > up_move) & (down_move > 0), 0.0)
+        plus_di = 100 * plus_dm.ewm(span=period, adjust=False).mean() / atr.replace(0, 1)
+        minus_di = 100 * minus_dm.ewm(span=period, adjust=False).mean() / atr.replace(0, 1)
+        dx = (100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, 1))
+        adx = dx.ewm(span=period, adjust=False).mean().iloc[-1]
+        return adx > 25
+
     def _momentum_entry(self, data: pd.DataFrame) -> Optional[Signal]:
         """Fallback without leader data: use momentum mean reversion."""
         p = self.config.params
@@ -118,6 +142,9 @@ class CorrelationStrategy(BaseStrategy):
 
         if len(data) < window:
             return None
+
+        if self._adx_is_trending(data):
+            return None  # Skip mean reversion when market is trending
 
         recent = data.tail(window)
         sma = recent["close"].mean()

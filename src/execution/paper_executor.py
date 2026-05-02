@@ -102,7 +102,7 @@ class PaperTradingExecutor:
         self.base_url = base_url
         self.default_slippage = default_slippage
         self.max_position_usd = max_position_usd
-        self.commission_pct = commission_pct / 100  # convert bps to decimal
+        self.commission_pct = commission_pct / 100  # 0.02 = "0.02 percent" → /100 → 0.0002 decimal (HL maker fee)
 
         # Paper account state
         self.balance = initial_balance

@@ -42,7 +42,7 @@ class SMAStrategy(BaseStrategy):
         if prev["close"] < prev.get("sma", sma) and price > sma:
             # Stronger signal near support
             near_support = support > 0 and (price - support) / price < 0.02
-            strength = 1.5 if near_support else 1.0
+            strength = 0.80 if near_support else 0.65
             return Signal(
                 signal_type=SignalType.LONG,
                 symbol=self.config.symbol,
@@ -56,7 +56,7 @@ class SMAStrategy(BaseStrategy):
         # Short: price crosses below SMA
         if prev["close"] > prev.get("sma", sma) and price < sma:
             near_resistance = resistance > 0 and (resistance - price) / price < 0.02
-            strength = 1.5 if near_resistance else 1.0
+            strength = 0.80 if near_resistance else 0.65
             return Signal(
                 signal_type=SignalType.SHORT,
                 symbol=self.config.symbol,

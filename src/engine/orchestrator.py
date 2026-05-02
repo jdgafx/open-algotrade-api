@@ -30,28 +30,6 @@ from src.strategies.registry import create_strategy, get_strategy_class
 logger = logging.getLogger(__name__)
 
 
-# Strategy type -> category mapping for regime gating
-STRATEGY_TYPE_MAP = {
-    # Trend-following strategies (work in TRENDING regimes)
-    "turtle": "trend", "sma_crossover": "trend", "macd": "trend",
-    "ichimoku": "trend", "adx": "trend", "ema_bollinger": "trend",
-    "vwma": "trend",
-    # Mean-reversion strategies (work in MEAN_REVERTING / LOW_VOL regimes)
-    "mean_reversion": "mean_reversion", "rsi": "mean_reversion",
-    "bollinger": "mean_reversion", "rsi_vwap": "mean_reversion",
-    "nadaraya_watson": "mean_reversion", "supply_demand_zone": "mean_reversion",
-    # Volatility strategies (work in HIGH_VOL regimes)
-    "consolidation_pop": "volatility", "grid_fibonacci": "volatility",
-    "elliott_wave": "volatility", "elliott_pivot": "volatility",
-    # Market-neutral (work in any regime)
-    "vwap_bot": "neutral", "funding_arb": "neutral",
-    "correlation": "neutral", "market_maker": "neutral",
-    "pivot_lines": "neutral",
-    # Specials
-    "solana_sniper": "momentum", "quarter_theory": "breakout",
-    "sma_adx_bb_vol": "trend",
-}
-
 
 class StrategyOrchestrator:
     """
@@ -113,6 +91,10 @@ class StrategyOrchestrator:
 
     def add_strategy(self, name: str, strategy_type: str, config: StrategyConfig) -> BaseStrategy:
         """Add and instantiate a strategy."""
+        # Force config.name to match the orchestrator-level name so executor
+        # position keys (f"{config.name}:{symbol}") match orchestrator lookups
+        # (get_position(symbol, strategy_name=name)).
+        config.name = name
         strategy = create_strategy(strategy_type, config)
         self._strategies[name] = strategy
         self._strategy_types[name] = strategy_type

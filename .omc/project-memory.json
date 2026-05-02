@@ -1,0 +1,136 @@
+{
+  "version": "1.0.0",
+  "lastScanned": 1777679294139,
+  "projectRoot": "/home/chris/dev/open-algotrade-3/backend",
+  "techStack": {
+    "languages": [
+      {
+        "name": "Python",
+        "version": null,
+        "confidence": "high",
+        "markers": [
+          "requirements.txt"
+        ]
+      }
+    ],
+    "frameworks": [],
+    "packageManager": "pip",
+    "runtime": null
+  },
+  "build": {
+    "buildCommand": null,
+    "testCommand": "source .venv/bin/activate && python -m pytest tests/ -x -q --tb=short 2>&1 | tail -10",
+    "lintCommand": null,
+    "devCommand": null,
+    "scripts": {}
+  },
+  "conventions": {
+    "namingStyle": null,
+    "importStyle": null,
+    "testPattern": null,
+    "fileOrganization": null
+  },
+  "structure": {
+    "isMonorepo": false,
+    "workspaces": [],
+    "mainDirectories": [
+      "src",
+      "tests"
+    ],
+    "gitBranches": {
+      "defaultBranch": "main",
+      "branchingStrategy": null
+    }
+  },
+  "customNotes": [],
+  "directoryMap": {
+    "src": {
+      "path": "src",
+      "purpose": "Source code",
+      "fileCount": 1,
+      "lastAccessed": 1777679294135,
+      "keyFiles": [
+        "__init__.py"
+      ]
+    },
+    "tests": {
+      "path": "tests",
+      "purpose": "Test files",
+      "fileCount": 5,
+      "lastAccessed": 1777679294137,
+      "keyFiles": [
+        "conftest.py",
+        "test_api.py",
+        "test_backtester.py",
+        "test_paper_executor.py",
+        "test_strategies.py"
+      ]
+    },
+    "src/api": {
+      "path": "src/api",
+      "purpose": "API routes",
+      "fileCount": 6,
+      "lastAccessed": 1777679294138,
+      "keyFiles": [
+        "auth.py",
+        "billing.py",
+        "database.py"
+      ]
+    },
+    "src/lib": {
+      "path": "src/lib",
+      "purpose": "Library code",
+      "fileCount": 3,
+      "lastAccessed": 1777679294138,
+      "keyFiles": [
+        "__init__.py",
+        "moondev_api.py",
+        "nice_funcs.py"
+      ]
+    },
+    "src/services": {
+      "path": "src/services",
+      "purpose": "Business logic services",
+      "fileCount": 13,
+      "lastAccessed": 1777679294139,
+      "keyFiles": [
+        "__init__.py",
+        "fee_calculator.py",
+        "funding_monitor.py"
+      ]
+    }
+  },
+  "hotPaths": [
+    {
+      "path": "src/services/risk_controller.py",
+      "accessCount": 8,
+      "lastAccessed": 1777679680291,
+      "type": "file"
+    },
+    {
+      "path": "src/api/main.py",
+      "accessCount": 8,
+      "lastAccessed": 1777679771531,
+      "type": "file"
+    },
+    {
+      "path": "src/execution/paper_executor.py",
+      "accessCount": 8,
+      "lastAccessed": 1777748944788,
+      "type": "file"
+    },
+    {
+      "path": "src/services/regime_detector.py",
+      "accessCount": 2,
+      "lastAccessed": 1777680125743,
+      "type": "file"
+    },
+    {
+      "path": "src/strategies/ema_bollinger_strategy.py",
+      "accessCount": 1,
+      "lastAccessed": 1777680031734,
+      "type": "file"
+    }
+  ],
+  "userDirectives": []
+}

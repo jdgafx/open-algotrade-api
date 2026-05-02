@@ -230,6 +230,11 @@ class BaseStrategy(ABC):
                             min_signal_strength,
                         )
                         signal = None
+                    else:
+                        # Count this entry toward hourly rate limit BEFORE execution
+                        # so concurrent open positions count against max_trades_per_hour.
+                        # (record_trade only fires on close, which would bypass the cap.)
+                        self.state.trades_this_hour += 1
 
             if signal and signal.signal_type != SignalType.NONE:
                 self.state.last_signal = signal
