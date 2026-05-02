@@ -28,11 +28,13 @@ class NadarayaWatsonStrategy(BaseStrategy):
         lookback = p.get("kernel_lookback", 100)   # 100 bars: fast enough, still meaningful
         overbought = p.get("overbought", 80)       # Relaxed from 90 for more signals
         oversold = p.get("oversold", 20)            # Relaxed from 10 for more signals
+        adx_period = p.get("adx_period", 14)
+        adx_threshold = p.get("adx_threshold", 25)
 
-        if len(data) < lookback + 5:
+        if len(data) < max(lookback + 5, adx_period * 2 + 2):
             return None
 
-        data = self._add_indicators(data, bandwidth, lookback, p)
+        data = self._add_indicators(data, bandwidth, lookback, p, adx_period)
         current = data.iloc[-1]
         price = current["close"]
 
@@ -41,6 +43,11 @@ class NadarayaWatsonStrategy(BaseStrategy):
         stoch_k = current.get("stoch_k", None)
 
         if nw_upper is None or pd.isna(nw_upper):
+            return None
+
+        # Mean reversion only works in ranging markets — skip when trending (ADX high)
+        adx = current.get("adx", 0)
+        if not pd.isna(adx) and adx >= adx_threshold:
             return None
 
         # NW envelope signals: direction change OR price below/above band
@@ -103,7 +110,8 @@ class NadarayaWatsonStrategy(BaseStrategy):
         overbought = p.get("overbought", 90)
         oversold = p.get("oversold", 10)
 
-        data = self._add_indicators(data, bandwidth, lookback, p)
+        adx_period = p.get("adx_period", 14)
+        data = self._add_indicators(data, bandwidth, lookback, p, adx_period)
         current = data.iloc[-1]
         price = current["close"]
 
@@ -157,8 +165,8 @@ class NadarayaWatsonStrategy(BaseStrategy):
         smoothed = (weights * prices[None, :]).sum(axis=1) / weights.sum(axis=1)
         return smoothed
 
-    def _add_indicators(self, df: pd.DataFrame, bandwidth: float, lookback: int, params: dict) -> pd.DataFrame:
-        if "nw_upper" in df.columns:
+    def _add_indicators(self, df: pd.DataFrame, bandwidth: float, lookback: int, params: dict, adx_period: int = 14) -> pd.DataFrame:
+        if "nw_upper" in df.columns and "adx" in df.columns:
             return df
         df = df.copy()
 
@@ -216,5 +224,20 @@ class NadarayaWatsonStrategy(BaseStrategy):
         rsi_max = rsi.rolling(stoch_period).max()
         stoch_rsi = ((rsi - rsi_min) / (rsi_max - rsi_min).replace(0, 1)) * 100
         df["stoch_k"] = stoch_rsi.rolling(stoch_k_smooth).mean()
+
+        # Wilder ADX — mean-reversion filter (enter only when ADX < threshold)
+        high, low, close = df["high"], df["low"], df["close"]
+        prev_close = close.shift(1)
+        tr = pd.concat([(high - low).abs(), (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
+        atr = tr.ewm(alpha=1.0 / adx_period, adjust=False).mean()
+        up_move = high.diff()
+        down_move = -low.diff()
+        plus_dm = pd.Series(np.where((up_move > down_move) & (up_move > 0), up_move, 0.0), index=df.index)
+        minus_dm = pd.Series(np.where((down_move > up_move) & (down_move > 0), down_move, 0.0), index=df.index)
+        atr_safe = atr.replace(0, np.nan)
+        plus_di = 100.0 * plus_dm.ewm(alpha=1.0 / adx_period, adjust=False).mean() / atr_safe
+        minus_di = 100.0 * minus_dm.ewm(alpha=1.0 / adx_period, adjust=False).mean() / atr_safe
+        dx = 100.0 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)
+        df["adx"] = dx.ewm(alpha=1.0 / adx_period, adjust=False).mean()
 
         return df
