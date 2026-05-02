@@ -37,39 +37,39 @@ class QuarterTheoryStrategy(BaseStrategy):
         if quarter_size is None:
             quarter_size = self._auto_quarter_size(price)
 
-        lower_quarter = math.floor(price / quarter_size) * quarter_size
-        upper_quarter = lower_quarter + quarter_size
-        threshold = quarter_size * breakout_pct / 100
-
+        # Compute quarter boundaries from PREVIOUS bar — the level that was (or wasn't) crossed
         prev_lower = math.floor(prev_price / quarter_size) * quarter_size
         prev_upper = prev_lower + quarter_size
+        threshold = quarter_size * breakout_pct / 100
 
-        # Long: price breaks above upper quarter level
-        if prev_price <= prev_upper + threshold and price > upper_quarter + threshold:
-            breakout_dist = (price - upper_quarter) / quarter_size
-            strength = min(0.5 + breakout_dist * 0.3, 0.9)
+        # Long: price crossed above prev_upper (prev bar was at or below the level; current bar above)
+        if prev_price <= prev_upper and price > prev_upper + threshold:
+            level_crossed = prev_upper
+            breakout_dist = (price - level_crossed) / quarter_size
+            strength = min(0.65 + breakout_dist * 0.5, 0.9)
             return Signal(
                 signal_type=SignalType.LONG,
                 symbol=self.config.symbol,
                 price=price,
                 size_usd=self.config.size_usd,
                 strength=strength,
-                reason=f"Quarter LONG: price {price:.2f} broke above {upper_quarter:.2f}",
-                metadata={"quarter_level": upper_quarter, "quarter_size": quarter_size},
+                reason=f"Quarter LONG: price {price:.2f} broke above {level_crossed:.2f}",
+                metadata={"quarter_level": level_crossed, "quarter_size": quarter_size},
             )
 
-        # Short: price breaks below lower quarter level
-        if prev_price >= prev_lower - threshold and price < lower_quarter - threshold:
-            breakout_dist = (lower_quarter - price) / quarter_size
-            strength = min(0.5 + breakout_dist * 0.3, 0.9)
+        # Short: price crossed below prev_lower
+        if prev_price >= prev_lower and price < prev_lower - threshold:
+            level_crossed = prev_lower
+            breakout_dist = (level_crossed - price) / quarter_size
+            strength = min(0.65 + breakout_dist * 0.5, 0.9)
             return Signal(
                 signal_type=SignalType.SHORT,
                 symbol=self.config.symbol,
                 price=price,
                 size_usd=self.config.size_usd,
                 strength=strength,
-                reason=f"Quarter SHORT: price {price:.2f} broke below {lower_quarter:.2f}",
-                metadata={"quarter_level": lower_quarter, "quarter_size": quarter_size},
+                reason=f"Quarter SHORT: price {price:.2f} broke below {level_crossed:.2f}",
+                metadata={"quarter_level": level_crossed, "quarter_size": quarter_size},
             )
 
         return None
