@@ -434,7 +434,7 @@ class HyperliquidVaultExecutor:
             self._execution_history.append(result)
             return result
 
-    async def get_position(self, symbol: str) -> Optional[Dict[str, Any]]:
+    async def get_position(self, symbol: str, strategy_name: str = "") -> Optional[Dict[str, Any]]:
         try:
             (
                 positions,

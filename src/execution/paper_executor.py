@@ -97,12 +97,12 @@ class PaperTradingExecutor:
         default_slippage: float = 0.0005,  # Reduced: assume maker orders (MoonDev: "maker only")
         max_position_usd: float = 5000.0,  # Reduced: cap per-position exposure
         initial_balance: float = 10000.0,
-        commission_pct: float = 0.02,  # HL maker fee (was 0.035 taker - MoonDev: "no taker orders")
+        commission_pct: float = 0.0002,  # HL maker fee: 0.02% expressed as decimal fraction
     ):
         self.base_url = base_url
         self.default_slippage = default_slippage
         self.max_position_usd = max_position_usd
-        self.commission_pct = commission_pct / 100  # 0.02 = "0.02 percent" → /100 → 0.0002 decimal (HL maker fee)
+        self.commission_pct = commission_pct  # already a decimal fraction (0.0002 = 0.02%)
 
         # Paper account state
         self.balance = initial_balance
@@ -456,6 +456,12 @@ class PaperTradingExecutor:
                 pnl_pct,
                 self.balance,
             )
+
+            try:
+                self.save_state()
+            except Exception as e:
+                logger.warning(f"Failed to save state after exit: {e}")
+
             return result
 
         except Exception as e:
@@ -540,7 +546,7 @@ class PaperTradingExecutor:
         total_unrealized = 0
         for pos_key, pos in self._positions.items():
             try:
-                mid = self._fetch_mid_price(pos.symbol)
+                mid = await asyncio.to_thread(self._fetch_mid_price, pos.symbol)
                 abs_size = abs(pos.size)
                 if pos.side == "long":
                     total_unrealized += (mid - pos.entry_price) * abs_size
@@ -558,7 +564,7 @@ class PaperTradingExecutor:
             pos = self._positions[pos_key]
             is_buy = pos.size < 0
             try:
-                fill_price = self._get_fill_price(pos.symbol, is_buy)
+                fill_price = await asyncio.to_thread(self._get_fill_price, pos.symbol, is_buy)
                 abs_size = abs(pos.size)
                 if pos.side == "long":
                     pnl = (fill_price - pos.entry_price) * abs_size
@@ -596,7 +602,7 @@ class PaperTradingExecutor:
             pos = self._positions[pos_key]
             is_buy = pos.size < 0
             try:
-                fill_price = self._get_fill_price(pos.symbol, is_buy)
+                fill_price = await asyncio.to_thread(self._get_fill_price, pos.symbol, is_buy)
                 abs_size = abs(pos.size)
 
                 if pos.side == "long":
@@ -604,11 +610,26 @@ class PaperTradingExecutor:
                 else:
                     pnl = (pos.entry_price - fill_price) * abs_size
 
-                self.balance += pnl - (abs_size * fill_price * self.commission_pct)
+                pnl_on_margin = pnl * pos.leverage if pos.leverage > 1 else pnl
+                commission = abs_size * fill_price * self.commission_pct
+                pnl_pct = (pnl / (pos.entry_price * abs_size)) * 100 if abs_size > 0 else 0
+                self.balance += pnl_on_margin - commission
+                if self.balance > self.peak_balance:
+                    self.peak_balance = self.balance
+
+                self._trade_counter += 1
+                trade = PaperTrade(
+                    id=self._trade_counter, symbol=pos.symbol, side=pos.side,
+                    action="exit", price=fill_price, size=abs_size,
+                    size_usd=abs_size * fill_price, pnl=pnl_on_margin,
+                    pnl_pct=pnl_pct, reason="emergency_close",
+                    strategy_name=pos.strategy_name,
+                )
+                self._trades.append(trade)
                 del self._positions[pos_key]
 
-                results.append(ExecutionResult(success=True, realized_pnl=pnl))
-                logger.info("[PAPER] Emergency close | %s | pnl=$%.2f", pos.symbol, pnl)
+                results.append(ExecutionResult(success=True, realized_pnl=pnl_on_margin))
+                logger.info("[PAPER] Emergency close | %s | pnl=$%.2f (%.2f%%)", pos.symbol, pnl_on_margin, pnl_pct)
             except Exception as e:
                 results.append(ExecutionResult(success=False, error=str(e)))
         return results
@@ -635,7 +656,7 @@ class PaperTradingExecutor:
             pos = self._positions.get(pos_key)
             if pos:
                 is_buy = pos.size < 0
-                fill_price = self._get_fill_price(pos.symbol, is_buy)
+                fill_price = await asyncio.to_thread(self._get_fill_price, pos.symbol, is_buy)
                 abs_size = abs(pos.size)
 
                 if pos.side == "long":

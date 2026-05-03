@@ -607,6 +607,14 @@ async def set_trading_mode(request: Request):
     if new_mode == old_mode:
         return {"status": "unchanged", "mode": old_mode}
 
+    # Persist paper executor state before teardown so open positions / balance survive the switch
+    old_executor = getattr(request.app.state, "executor", None)
+    if hasattr(old_executor, 'save_state'):
+        try:
+            old_executor.save_state()
+        except Exception as e:
+            logger.warning("Failed to save executor state before mode switch: %s", e)
+
     # Stop all running strategies first
     orchestrator = getattr(request.app.state, "orchestrator", None)
     if orchestrator:

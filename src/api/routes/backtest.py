@@ -176,9 +176,18 @@ def _engine_result_to_schema(
     )
 
     # Map equity curve: engine uses {"bar": int, "equity": float, "drawdown_pct": float}
+    # Convert bar index to ISO datetime using backtest start time + bar * timeframe interval.
+    _tf_seconds = {
+        "1m": 60, "3m": 180, "5m": 300, "15m": 900, "30m": 1800,
+        "1h": 3600, "2h": 7200, "4h": 14400, "6h": 21600, "8h": 28800,
+        "12h": 43200, "1d": 86400, "3d": 259200, "1w": 604800,
+    }
+    bar_seconds = _tf_seconds.get(config.timeframe, 3600)
+    ec_end_dt = datetime.now(timezone.utc)
+    ec_start_dt = ec_end_dt - timedelta(days=config.lookback_days)
     equity_curve = [
         EquityCurvePoint(
-            timestamp=str(p.get("bar", 0)),
+            timestamp=(ec_start_dt + timedelta(seconds=p.get("bar", 0) * bar_seconds)).strftime("%Y-%m-%dT%H:%M:%SZ"),
             equity=p.get("equity", 0.0),
         )
         for p in engine_result.equity_curve
@@ -274,6 +283,8 @@ async def run_backtest(config: BacktestConfig, background_tasks: BackgroundTasks
 
         result = _engine_result_to_schema(engine_result, result_id, config)
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("Backtest failed: %s", e)
         result = _make_empty_result(result_id, config, str(e))
