@@ -26,7 +26,7 @@ class ADXStrategy(BaseStrategy):
         p = self.config.params
         adx_period = p.get("adx_period", 14)
         di_period = p.get("di_period", 14)
-        adx_threshold = p.get("adx_threshold", 25)
+        adx_threshold = p.get("adx_threshold", 20)
 
         min_len = max(adx_period, di_period) + 5
         if len(data) < min_len:

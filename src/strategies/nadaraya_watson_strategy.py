@@ -29,7 +29,7 @@ class NadarayaWatsonStrategy(BaseStrategy):
         overbought = p.get("overbought", 80)       # Relaxed from 90 for more signals
         oversold = p.get("oversold", 20)            # Relaxed from 10 for more signals
         adx_period = p.get("adx_period", 14)
-        adx_threshold = p.get("adx_threshold", 25)
+        adx_threshold = p.get("adx_threshold", 35)
 
         if len(data) < max(lookback + 5, adx_period * 2 + 2):
             return None

@@ -25,7 +25,7 @@ class SMAStrategy(BaseStrategy):
         sma_period = p.get("sma_period", 20)
         support_lookback = p.get("support_lookback", 20)
         adx_period = p.get("adx_period", 14)
-        adx_threshold = p.get("adx_threshold", 25)
+        adx_threshold = p.get("adx_threshold", 15)
 
         if len(data) < max(sma_period, adx_period * 2) + 2:
             return None
