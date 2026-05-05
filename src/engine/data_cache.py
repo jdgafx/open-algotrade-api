@@ -21,9 +21,11 @@ class CandleCache:
             if entry is None:
                 return None
             data, ts = entry
-            if time.monotonic() - ts > self._ttl:
+            now = time.monotonic()
+            if now - ts > self._ttl:
                 del self._cache[key]
                 return None
+            self._cache[key] = (data, now)  # refresh access time for LRU eviction
             return data.copy()
 
     def set(self, symbol: str, timeframe: str, lookback_days: int, data: pd.DataFrame) -> None:
