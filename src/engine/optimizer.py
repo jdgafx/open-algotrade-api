@@ -85,13 +85,13 @@ class OptimizationEngine:
             params = trial.params
             try:
                 oos = await self._run_backtest(strategy_type, symbol, timeframe, out_sample, params)
-                pf = min(oos.profit_factor, 5.0)
-                composite = 0.7 * oos.sharpe_ratio + 0.3 * (pf / 5.0)
+                pf_capped = min(oos.profit_factor, 5.0)
+                composite = 0.7 * oos.sharpe_ratio + 0.3 * (pf_capped / 5.0)
                 results.append(OptimizationResult(
                     params=params,
                     in_sample_sharpe=trial.value,
                     out_sample_sharpe=oos.sharpe_ratio,
-                    out_sample_profit_factor=pf,
+                    out_sample_profit_factor=oos.profit_factor,
                     out_sample_win_rate=oos.win_rate,
                     out_sample_total_trades=oos.total_trades,
                     out_sample_max_drawdown=oos.max_drawdown_pct,
@@ -105,9 +105,8 @@ class OptimizationEngine:
         return results
 
     def _passes_walkforward(self, oos_result) -> bool:
-        pf = min(oos_result.profit_factor, 5.0)
         return (
-            pf >= self.MIN_OOS_PROFIT_FACTOR
+            oos_result.profit_factor >= self.MIN_OOS_PROFIT_FACTOR
             and oos_result.win_rate >= self.MIN_OOS_WIN_RATE
             and oos_result.total_trades >= self.MIN_OOS_TRADES
             and oos_result.max_drawdown_pct <= self.MAX_OOS_DRAWDOWN
