@@ -7,6 +7,7 @@ from typing import List, Optional
 from datetime import datetime, timedelta, timezone
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 load_dotenv()
 
@@ -326,7 +327,53 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning("RiskController auto-start failed: %s", e)
 
+    # ── RBI autonomous optimizer scheduler ──
+    from src.api.routes.rbi_optimize import _get_or_create_pipeline
+    _scheduler = AsyncIOScheduler()
+    _RBI_SCHEDULE = [
+        ("nadaraya_watson", 4,  "ETH", "1h", 24),
+        ("sma_crossover",   17, "BTC", "1h", 24),
+        ("rsi",             14, "BTC", "1h", 24),
+        ("adx",             6,  "ETH", "1h", 24),
+        ("macd",            19, "BTC", "1h", 24),
+        ("correlation",     23, "SOL", "1h", 24),
+        ("market_maker",    1,  "ETH", "1h", 24),
+        ("bollinger",       10, "BTC", "1h", 72),
+        ("ichimoku",        20, "BTC", "4h", 72),
+        ("grid_fibonacci",  26, "BTC", "4h", 72),
+        ("vwma",            18, "BTC", "1h", 72),
+        ("mean_reversion",  8,  "ETH", "1h", 72),
+        ("consolidation_pop", 11, "BTC", "15m", 168),
+        ("vwap_bot",          7,  "BTC", "1h",  168),
+        ("pivot_lines",       15, "BTC", "1h",  168),
+    ]
+
+    async def _rbi_job(strategy_type: str, strategy_id: int, symbol: str, timeframe: str):
+        pipeline = _get_or_create_pipeline(strategy_type)
+        try:
+            event = await pipeline.run_cycle(
+                strategy_type=strategy_type, strategy_id=strategy_id,
+                symbol=symbol, timeframe=timeframe, lookback_days=90, n_trials=80,
+            )
+            if event.promoted:
+                logger.info("Scheduler RBI promoted %s: %s", strategy_type, event.after_metrics)
+        except Exception as e:
+            logger.error("Scheduled RBI cycle failed for %s: %s", strategy_type, e)
+
+    for stype, sid, sym, tf, hours in _RBI_SCHEDULE:
+        _scheduler.add_job(
+            _rbi_job, "interval", hours=hours,
+            args=[stype, sid, sym, tf],
+            id=f"rbi_{stype}",
+            replace_existing=True,
+        )
+    _scheduler.start()
+    app.state.rbi_scheduler = _scheduler
+    logger.info("RBI scheduler started with %d jobs", len(_RBI_SCHEDULE))
+
     yield
+
+    _scheduler.shutdown(wait=False)
 
     # Shutdown: save paper state before stopping
     if paper_mode and executor is not None:
@@ -415,6 +462,7 @@ from .routes import (
     funding_router,
 )
 from .billing import router as billing_router
+from src.api.routes.rbi_optimize import router as rbi_optimize_router, llm_router as llm_gate_router
 
 app.include_router(risk_router, tags=["risk"])
 app.include_router(liquidations_router)
@@ -425,6 +473,8 @@ app.include_router(regime_router)
 app.include_router(billing_router)
 app.include_router(solana_router)
 app.include_router(funding_router)
+app.include_router(rbi_optimize_router)
+app.include_router(llm_gate_router)
 
 
 def _get_or_create_vault_state(db: Session) -> models.VaultState:
