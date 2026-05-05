@@ -14,13 +14,14 @@ from typing import Any, Dict, Optional
 import pandas as pd
 
 from .base_strategy import BaseStrategy, Signal, SignalType, StrategyConfig
+from .regime_bias_mixin import RegimeBiasMixin
 
 logger = logging.getLogger(__name__)
 
 
-class VWMAStrategy(BaseStrategy):
+class VWMAStrategy(RegimeBiasMixin, BaseStrategy):
 
-    async def should_enter(self, data: pd.DataFrame) -> Optional[Signal]:
+    async def _should_enter_impl(self, data: pd.DataFrame) -> Optional[Signal]:
         p = self.config.params
         fast = p.get("fast_period", 20)
         mid = p.get("mid_period", 41)
@@ -80,6 +81,10 @@ class VWMAStrategy(BaseStrategy):
             )
 
         return None
+
+    async def should_enter(self, data: pd.DataFrame) -> Optional[Signal]:
+        signal = await self._should_enter_impl(data)
+        return self._apply_regime_bias(signal)
 
     async def should_exit(
         self, data: pd.DataFrame, position: Dict[str, Any]

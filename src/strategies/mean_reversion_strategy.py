@@ -15,15 +15,16 @@ from typing import Any, Dict, Optional
 import pandas as pd
 
 from .base_strategy import BaseStrategy, Signal, SignalType, StrategyConfig
+from .regime_bias_mixin import RegimeBiasMixin
 
 logger = logging.getLogger(__name__)
 
 
-class MeanReversionStrategy(BaseStrategy):
+class MeanReversionStrategy(RegimeBiasMixin, BaseStrategy):
 
     _entry_mode: str = "original"
 
-    async def should_enter(self, data: pd.DataFrame) -> Optional[Signal]:
+    async def _should_enter_impl(self, data: pd.DataFrame) -> Optional[Signal]:
         p = self.config.params
         sma_period = p.get("sma_entry_period", 20)
         reversion_target = p.get("reversion_target_pct", 0.003)
@@ -118,6 +119,10 @@ class MeanReversionStrategy(BaseStrategy):
             )
 
         return None
+
+    async def should_enter(self, data: pd.DataFrame) -> Optional[Signal]:
+        signal = await self._should_enter_impl(data)
+        return self._apply_regime_bias(signal)
 
     def _check_zscore_entry(
         self, price: float, sma: float, zscore: float,

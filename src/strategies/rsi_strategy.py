@@ -15,15 +15,16 @@ from typing import Any, Dict, Optional
 import pandas as pd
 
 from .base_strategy import BaseStrategy, Signal, SignalType, StrategyConfig
+from .regime_bias_mixin import RegimeBiasMixin
 
 logger = logging.getLogger(__name__)
 
 
-class RSIStrategy(BaseStrategy):
+class RSIStrategy(RegimeBiasMixin, BaseStrategy):
 
     _entry_mode: str = "classic"
 
-    async def should_enter(self, data: pd.DataFrame) -> Optional[Signal]:
+    async def _should_enter_impl(self, data: pd.DataFrame) -> Optional[Signal]:
         p = self.config.params
         rsi_period = p.get("rsi_period", 14)
         oversold = p.get("oversold", 30)
@@ -101,6 +102,10 @@ class RSIStrategy(BaseStrategy):
                 return trend_signal
 
         return None
+
+    async def should_enter(self, data: pd.DataFrame) -> Optional[Signal]:
+        signal = await self._should_enter_impl(data)
+        return self._apply_regime_bias(signal)
 
     def _check_divergence(
         self, data: pd.DataFrame, price: float, rsi: float, lookback: int

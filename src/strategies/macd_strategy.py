@@ -14,15 +14,16 @@ from typing import Any, Dict, Optional
 import pandas as pd
 
 from .base_strategy import BaseStrategy, Signal, SignalType, StrategyConfig
+from .regime_bias_mixin import RegimeBiasMixin
 
 logger = logging.getLogger(__name__)
 
 
-class MACDStrategy(BaseStrategy):
+class MACDStrategy(RegimeBiasMixin, BaseStrategy):
 
     _entry_mode: str = "classic"
 
-    async def should_enter(self, data: pd.DataFrame) -> Optional[Signal]:
+    async def _should_enter_impl(self, data: pd.DataFrame) -> Optional[Signal]:
         p = self.config.params
         fast = p.get("fast_period", 12)
         slow = p.get("slow_period", 26)
@@ -121,6 +122,10 @@ class MACDStrategy(BaseStrategy):
                 return hist_signal
 
         return None
+
+    async def should_enter(self, data: pd.DataFrame) -> Optional[Signal]:
+        signal = await self._should_enter_impl(data)
+        return self._apply_regime_bias(signal)
 
     def _check_zero_cross(
         self, data: pd.DataFrame, price: float,
