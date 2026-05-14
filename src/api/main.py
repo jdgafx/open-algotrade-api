@@ -1478,7 +1478,7 @@ def get_strategy_instance(name: str, request: Request, db: Session = Depends(get
             instance.errors = stats.get("errors", instance.errors)
             last_sig = stats.get("last_signal")
             if last_sig:
-                instance.last_signal = last_sig
+                instance.last_signal = str(last_sig)
 
     return instance
 
