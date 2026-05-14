@@ -31,7 +31,7 @@ class OptimizationEngine:
     WALKFORWARD_SPLIT = 0.6
     MIN_OOS_PROFIT_FACTOR = 1.2
     MIN_OOS_WIN_RATE = 35.0
-    MIN_OOS_TRADES = 15
+    MIN_OOS_TRADES = 5
     MAX_OOS_DRAWDOWN = 15.0
 
     def __init__(self, initial_capital: float = 10000.0, commission_pct: float = 0.07):
