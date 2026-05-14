@@ -101,6 +101,7 @@ def _register_all():
     from .rsi_vwap_strategy import RSIVWAPStrategy
     from .solana_sniper_strategy import SolanaSniperStrategy
     from .liquidation_dip_strategy import LiquidationDipStrategy
+    from .closed_market_overnight_strategy import ClosedMarketOvernightStrategy
 
     # ═══════════════════════════════════════════════════════════════════
     # TIER A — Battle-tested HL native strategies
@@ -158,6 +159,19 @@ def _register_all():
             "min_signal_strength": 0.65,
         },
         category="trend", risk_level="low",
+    )
+
+    register_strategy(
+        "closed_market_overnight", ClosedMarketOvernightStrategy, StrategyTier.A,
+        "MoonDev v.10 — trade only when NYSE is closed (overnight + weekends); breakout entry, force-close at market open",
+        "BTC", "1h",
+        {
+            "momentum_lookback": 12, "breakout_pct": 0.002,
+            "tp_pct": 0.010, "sl_pct": 0.008,
+            "min_hold_bars": 2, "cooldown_seconds": 180, "max_trades_per_hour": 4,
+            "min_signal_strength": 0.65,
+        },
+        category="overnight", risk_level="low",
     )
     register_strategy(
         "funding_arb", FundingArbStrategy, StrategyTier.A,

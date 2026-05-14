@@ -95,6 +95,12 @@ PARAM_SPACES: dict[str, dict[str, tuple]] = {
         "max_tr_pct": ("float", 0.010, 0.030),
         "time_limit_minutes": ("int", 120, 600),
     },
+    "closed_market_overnight": {
+        "momentum_lookback": ("int", 6, 24),
+        "breakout_pct": ("float", 0.001, 0.005),
+        "tp_pct": ("float", 0.005, 0.020),
+        "sl_pct": ("float", 0.003, 0.015),
+    },
 }
 
 
