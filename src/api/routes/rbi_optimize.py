@@ -19,17 +19,28 @@ _pipelines: dict[str, RBIPipeline] = {}
 BACKEND_BASE = "http://localhost:8000"
 
 
+async def _resolve_name(client: httpx.AsyncClient, strategy_id: int) -> str:
+    r = await client.get(f"{BACKEND_BASE}/strategies", timeout=10.0)
+    r.raise_for_status()
+    for s in r.json():
+        if s.get("id") == strategy_id:
+            return s["name"]
+    raise HTTPException(status_code=404, detail=f"strategy_id={strategy_id} not found")
+
+
 async def _get_strategy(strategy_id: int) -> dict:
     async with httpx.AsyncClient() as client:
-        r = await client.get(f"{BACKEND_BASE}/strategies/{strategy_id}", timeout=10.0)
+        name = await _resolve_name(client, strategy_id)
+        r = await client.get(f"{BACKEND_BASE}/strategies/{name}", timeout=10.0)
         r.raise_for_status()
         return r.json()
 
 
 async def _patch_strategy(strategy_id: int, updates: dict) -> dict:
     async with httpx.AsyncClient() as client:
+        name = await _resolve_name(client, strategy_id)
         r = await client.patch(
-            f"{BACKEND_BASE}/strategies/{strategy_id}",
+            f"{BACKEND_BASE}/strategies/{name}",
             json=updates, timeout=10.0,
         )
         r.raise_for_status()
