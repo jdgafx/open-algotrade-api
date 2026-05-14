@@ -331,21 +331,21 @@ async def lifespan(app: FastAPI):
     from src.api.routes.rbi_optimize import _get_or_create_pipeline
     _scheduler = AsyncIOScheduler()
     _RBI_SCHEDULE = [
-        ("nadaraya_watson", 4,  "ETH", "1h", 24),
-        ("sma_crossover",   17, "BTC", "1h", 24),
-        ("rsi",             14, "BTC", "1h", 24),
-        ("adx",             6,  "ETH", "1h", 24),
-        ("macd",            19, "BTC", "1h", 24),
-        ("correlation",     23, "SOL", "1h", 24),
-        ("market_maker",    1,  "ETH", "1h", 24),
-        ("bollinger",       10, "BTC", "1h", 72),
-        ("ichimoku",        20, "BTC", "4h", 72),
-        ("grid_fibonacci",  26, "BTC", "4h", 72),
-        ("vwma",            18, "BTC", "1h", 72),
-        ("mean_reversion",  8,  "ETH", "1h", 72),
-        ("consolidation_pop", 11, "BTC", "15m", 168),
-        ("vwap_bot",          7,  "BTC", "1h",  168),
-        ("pivot_lines",       15, "BTC", "1h",  168),
+        ("nadaraya_watson", 4,  "ETH", "1h", 4),
+        ("sma_crossover",   17, "BTC", "1h", 4),
+        ("rsi",             14, "BTC", "1h", 4),
+        ("adx",             6,  "ETH", "1h", 4),
+        ("macd",            19, "BTC", "1h", 4),
+        ("correlation",     23, "SOL", "1h", 4),
+        ("market_maker",    1,  "ETH", "1h", 4),
+        ("bollinger",       10, "BTC", "1h", 8),
+        ("ichimoku",        20, "BTC", "4h", 8),
+        ("grid_fibonacci",  26, "BTC", "4h", 8),
+        ("vwma",            18, "BTC", "1h", 8),
+        ("mean_reversion",  8,  "ETH", "1h", 8),
+        ("consolidation_pop", 11, "BTC", "15m", 24),
+        ("vwap_bot",          7,  "BTC", "1h",  24),
+        ("pivot_lines",       15, "BTC", "1h",  24),
     ]
 
     async def _rbi_job(strategy_type: str, strategy_id: int, symbol: str, timeframe: str):
@@ -353,7 +353,7 @@ async def lifespan(app: FastAPI):
         try:
             event = await pipeline.run_cycle(
                 strategy_type=strategy_type, strategy_id=strategy_id,
-                symbol=symbol, timeframe=timeframe, lookback_days=90, n_trials=80,
+                symbol=symbol, timeframe=timeframe, lookback_days=14, n_trials=50,
             )
             if event.promoted:
                 logger.info("Scheduler RBI promoted %s: %s", strategy_type, event.after_metrics)

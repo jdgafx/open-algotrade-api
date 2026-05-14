@@ -61,7 +61,7 @@ class TriggerRequest(BaseModel):
     strategy_id: int
     symbol: str = "BTC"
     timeframe: str = "1h"
-    lookback_days: int = Field(default=90, ge=30, le=365)
+    lookback_days: int = Field(default=14, ge=5, le=365)
     n_trials: int = Field(default=100, ge=10, le=300)
 
 
