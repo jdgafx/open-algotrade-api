@@ -594,6 +594,56 @@ class PaperTradingExecutor:
         self.save_state()
         return results
 
+    async def close_by_strategy(self, strategy_name: str) -> List[ExecutionResult]:
+        """Close every open paper position whose strategy_name matches.
+
+        Used when a strategy is being disabled — without this, the orchestrator
+        stops calling should_exit on the disabled strategy and its positions
+        drift indefinitely. Mirrors close_by_symbol; emits exit trades with
+        reason='strategy_disabled' so they're attributable in the trade log.
+        """
+        results: List[ExecutionResult] = []
+        keys_to_close = [
+            k for k, p in self._positions.items() if p.strategy_name == strategy_name
+        ]
+        for pos_key in keys_to_close:
+            pos = self._positions[pos_key]
+            is_buy = pos.size < 0
+            try:
+                fill_price = await asyncio.to_thread(self._get_fill_price, pos.symbol, is_buy)
+                abs_size = abs(pos.size)
+                if pos.side == "long":
+                    pnl = (fill_price - pos.entry_price) * abs_size
+                else:
+                    pnl = (pos.entry_price - fill_price) * abs_size
+                pnl_on_margin = pnl * pos.leverage if pos.leverage > 1 else pnl
+                commission = abs_size * fill_price * self.commission_pct
+                self.balance += pnl_on_margin - commission
+                if self.balance > self.peak_balance:
+                    self.peak_balance = self.balance
+                pnl_pct = (pnl / (pos.entry_price * abs_size)) * 100 if abs_size > 0 else 0
+                self._trade_counter += 1
+                trade = PaperTrade(
+                    id=self._trade_counter, symbol=pos.symbol, side=pos.side,
+                    action="exit", price=fill_price, size=abs_size,
+                    size_usd=abs_size * fill_price, pnl=pnl_on_margin,
+                    pnl_pct=pnl_pct, reason="strategy_disabled",
+                    strategy_name=pos.strategy_name,
+                )
+                self._trades.append(trade)
+                del self._positions[pos_key]
+                results.append(ExecutionResult(success=True, realized_pnl=pnl_on_margin))
+                logger.info(
+                    "[PAPER] Orphan close | %s | %s | pnl=$%.2f (%.2f%%)",
+                    strategy_name, pos.symbol, pnl_on_margin, pnl_pct,
+                )
+            except Exception as e:
+                logger.error("[PAPER] close_by_strategy error | %s | %s | %s", strategy_name, pos.symbol, e)
+                results.append(ExecutionResult(success=False, error=str(e)))
+        if results:
+            self.save_state()
+        return results
+
     async def emergency_close_all(self) -> List[ExecutionResult]:
         """Close all paper positions."""
         logger.critical("[PAPER] EMERGENCY CLOSE ALL")

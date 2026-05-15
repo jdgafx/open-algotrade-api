@@ -350,3 +350,55 @@ class TestPaperExecutorStats:
         assert stats["total_trades"] == 2
         assert stats["balance"] > 10000.0  # Profitable trade
         assert stats["total_return_pct"] > 0
+
+
+class TestPaperExecutorOrphanFlush:
+    """Closing positions held by a strategy that is being disabled.
+
+    Regression for 2026-05-15: PATCH enabled=false on a strategy leaves
+    its open positions orphaned — orchestrator skips the strategy on the
+    next polling cycle, so should_exit() is never called and the
+    positions drift indefinitely. close_by_strategy() lets the disable
+    flow flush positions atomically.
+    """
+
+    @pytest.mark.asyncio
+    async def test_close_by_strategy_closes_only_named_strategy(self, executor, strategy):
+        # Open a position for "test-paper" (the strategy fixture's name)
+        signal_a = Signal(signal_type=SignalType.LONG, symbol="BTC", size_usd=500.0, reason="a-entry")
+        await executor.execute_signal(signal_a, strategy)
+
+        # Open a position for "other-strat" on ETH
+        other_config = StrategyConfig(name="other-strat", symbol="ETH", size_usd=500.0)
+        other = create_strategy("rsi", other_config)
+        signal_b = Signal(signal_type=SignalType.SHORT, symbol="ETH", size_usd=500.0, reason="b-entry")
+        await executor.execute_signal(signal_b, other)
+
+        assert len(executor._positions) == 2
+
+        results = await executor.close_by_strategy("test-paper")
+
+        # test-paper position closed, other-strat untouched
+        assert len(results) == 1
+        assert results[0].success is True
+        remaining = {pos.strategy_name for pos in executor._positions.values()}
+        assert remaining == {"other-strat"}
+
+    @pytest.mark.asyncio
+    async def test_close_by_strategy_records_exit_trade(self, executor, strategy):
+        signal = Signal(signal_type=SignalType.LONG, symbol="BTC", size_usd=500.0, reason="enter")
+        await executor.execute_signal(signal, strategy)
+
+        entry_trade_count = sum(1 for t in executor._trades if t.action == "entry")
+        await executor.close_by_strategy("test-paper")
+
+        exit_trades = [t for t in executor._trades if t.action == "exit"]
+        assert len(exit_trades) == 1
+        assert exit_trades[0].strategy_name == "test-paper"
+        assert exit_trades[0].reason == "strategy_disabled"
+
+    @pytest.mark.asyncio
+    async def test_close_by_strategy_no_positions_is_noop(self, executor):
+        results = await executor.close_by_strategy("nonexistent")
+        assert results == []
+        assert len(executor._positions) == 0

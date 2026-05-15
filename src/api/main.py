@@ -1586,7 +1586,12 @@ async def start_strategy_instance(request: Request, name: str, db: Session = Dep
 
 @app.post("/strategies/{name}/stop")
 async def stop_strategy_instance(request: Request, name: str, db: Session = Depends(get_db)):
-    """Stop a strategy instance via the orchestrator."""
+    """Stop a strategy instance via the orchestrator and flush any open positions.
+
+    Without the position flush, disabling a strategy leaves its open positions
+    orphaned (orchestrator stops calling should_exit on them, so they drift
+    indefinitely). close_by_strategy makes the disable atomic.
+    """
     instance = db.query(models.StrategyInstance).filter(
         models.StrategyInstance.name == name
     ).first()
@@ -1601,9 +1606,21 @@ async def stop_strategy_instance(request: Request, name: str, db: Session = Depe
         except Exception as e:
             logger.warning("Orchestrator stop error for %s (continuing DB update): %s", name, e)
 
+    # Flush orphan positions held by this strategy
+    closed_count = 0
+    executor = getattr(request.app.state, "executor", None)
+    if executor is not None and hasattr(executor, "close_by_strategy"):
+        try:
+            results = await executor.close_by_strategy(name)
+            closed_count = sum(1 for r in results if r.success)
+            if closed_count:
+                logger.info("Closed %d orphan position(s) for %s", closed_count, name)
+        except Exception as e:
+            logger.warning("Orphan flush error for %s (continuing DB update): %s", name, e)
+
     instance.status = "stopped"
     db.commit()
-    return {"status": "stopped", "name": name}
+    return {"status": "stopped", "name": name, "closed_positions": closed_count}
 
 
 @app.post("/strategies/{name}/circuit-breaker/reset")
