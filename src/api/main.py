@@ -1874,22 +1874,21 @@ async def paper_positions(request: Request):
         raise HTTPException(status_code=400, detail="Paper trading is not active")
 
     positions_raw = await executor.get_all_positions()
-    active_pos = executor.get_active_positions()
 
     positions_out = []
     for p in positions_raw:
-        symbol = p["symbol"]
-        pos_detail = active_pos.get(symbol, {})
+        abs_size = abs(p["size"])
         positions_out.append(schemas.PaperPosition(
-            symbol=symbol,
+            symbol=p["symbol"],
             side=p["side"],
-            size=abs(p["size"]),
+            size=abs_size,
+            size_usd=p.get("size_usd", 0.0),
             entry_price=p["entry_px"],
-            mark_price=p.get("entry_px", 0) + (p.get("unrealized_pnl", 0) / abs(p["size"])) if abs(p["size"]) > 0 else 0,
+            mark_price=p.get("entry_px", 0) + (p.get("unrealized_pnl", 0) / abs_size) if abs_size > 0 else 0,
             unrealized_pnl=p.get("unrealized_pnl", 0),
             pnl_pct=p.get("pnl_perc", 0),
-            strategy_name=pos_detail.get("strategy", ""),
-            entry_time=pos_detail.get("entry_time"),
+            strategy_name=p.get("strategy_name", ""),
+            entry_time=None,
         ))
 
     return schemas.PaperPositionsResponse(total=len(positions_out), positions=positions_out)

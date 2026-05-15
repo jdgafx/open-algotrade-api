@@ -522,6 +522,8 @@ class PaperTradingExecutor:
                 pnl_pct = (unrealized_pnl / (pos.entry_price * abs_size)) * 100 if abs_size > 0 else 0
                 positions.append({
                     "symbol": pos.symbol,
+                    "strategy_name": pos.strategy_name,
+                    "size_usd": pos.size_usd,
                     "size": pos.size,
                     "entry_px": pos.entry_price,
                     "pnl_perc": pnl_pct,
@@ -532,6 +534,8 @@ class PaperTradingExecutor:
             except Exception:
                 positions.append({
                     "symbol": pos.symbol,
+                    "strategy_name": pos.strategy_name,
+                    "size_usd": pos.size_usd,
                     "size": pos.size,
                     "entry_px": pos.entry_price,
                     "pnl_perc": 0,
