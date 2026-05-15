@@ -338,6 +338,7 @@ async def lifespan(app: FastAPI):
         ("macd",            19, "BTC", "1h", 4),
         ("correlation",     23, "SOL", "1h", 4),
         ("market_maker",    1,  "ETH", "1h", 4),
+        ("closed_market_overnight", 27, "BTC", "1h", 4),
         ("bollinger",       10, "BTC", "1h", 8),
         ("ichimoku",        20, "BTC", "4h", 8),
         ("grid_fibonacci",  26, "BTC", "4h", 8),
