@@ -200,9 +200,10 @@ class RBIAgentService:
                         "content-type": "application/json",
                     },
                     json={
-                        # User explicitly requested Opus inference. Switched from
-                        # the deprecated claude-sonnet-4-20250514 to claude-opus-4-7
-                        # (current latest Opus, per ~/.claude/CLAUDE.md model registry).
+                        # User explicitly requested Opus inference. Use the rolling
+                        # alias (claude-opus-4-7), not a dated-suffix name —
+                        # dated names get deprecated and 400 the API silently.
+                        # Per ~/.claude/CLAUDE.md model registry.
                         "model": "claude-opus-4-7",
                         "max_tokens": 4096,
                         "system": system_prompt,
