@@ -164,6 +164,7 @@ class StrategyInstanceUpdate(BaseModel):
     size_usd: Optional[float] = None
     target_pct: Optional[float] = None
     max_loss_pct: Optional[float] = None
+    lookback_days: Optional[int] = None
     interval_seconds: Optional[int] = None
     enabled: Optional[bool] = None
     params: Optional[Dict[str, Any]] = None

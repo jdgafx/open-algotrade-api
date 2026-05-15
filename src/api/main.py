@@ -42,7 +42,7 @@ def _auto_deploy_winners(db, orchestrator):
         {"name": "conspop-btc", "strategy_type": "consolidation_pop", "symbol": "BTC", "timeframe": "15m", "size_usd": 100, "leverage": 3, "params": {"atr_period": 14, "deviance_threshold": 0.45, "range_position_buy": 0.3, "range_position_sell": 0.7, "tp_pct": 0.02, "sl_pct": 0.015, "min_hold_bars": 3, "cooldown_seconds": 300, "max_trades_per_hour": 3, "min_signal_strength": 0.5}},
         {"name": "quarter-btc", "strategy_type": "quarter_theory", "symbol": "BTC", "timeframe": "1h", "size_usd": 100, "leverage": 3, "params": {"breakout_pct": 0.1, "take_profit_quarters": 2, "stop_loss_quarters": 1, "min_hold_bars": 3, "cooldown_seconds": 600, "max_trades_per_hour": 2, "min_signal_strength": 0.5}},
         # ── Full fleet: reversal strategies ──
-        {"name": "sdz-btc", "strategy_type": "supply_demand_zone", "symbol": "BTC", "timeframe": "4h", "size_usd": 100, "leverage": 3, "interval_seconds": 60, "params": {"zone_lookback_days": 30, "zone_threshold": 0.015, "min_hold_bars": 2, "cooldown_seconds": 900, "max_trades_per_hour": 2, "min_signal_strength": 0.5}},
+        {"name": "sdz-btc", "strategy_type": "supply_demand_zone", "symbol": "BTC", "timeframe": "4h", "size_usd": 100, "leverage": 3, "interval_seconds": 60, "lookback_days": 30, "params": {"zone_lookback_days": 30, "zone_threshold": 0.015, "min_hold_bars": 2, "cooldown_seconds": 900, "max_trades_per_hour": 2, "min_signal_strength": 0.5}},
         {"name": "rsi-btc", "strategy_type": "rsi", "symbol": "BTC", "timeframe": "1h", "size_usd": 100, "leverage": 3, "params": {"rsi_period": 14, "oversold": 30, "overbought": 70, "trend_mode": False, "divergence_mode": False, "min_hold_bars": 3, "cooldown_seconds": 600, "max_trades_per_hour": 2, "min_signal_strength": 0.5}},
         {"name": "pivot-btc", "strategy_type": "pivot_lines", "symbol": "BTC", "timeframe": "1h", "size_usd": 100, "leverage": 3, "params": {"pivot_lookback": 24, "min_hold_bars": 3, "cooldown_seconds": 600, "max_trades_per_hour": 2, "min_signal_strength": 0.5}},
         {"name": "rsivwap-btc", "strategy_type": "rsi_vwap", "symbol": "BTC", "timeframe": "15m", "size_usd": 100, "leverage": 3, "params": {"rsi_period": 14, "oversold": 30, "overbought": 70, "min_hold_bars": 3, "cooldown_seconds": 300, "max_trades_per_hour": 3, "min_signal_strength": 0.5}},
@@ -61,10 +61,19 @@ def _auto_deploy_winners(db, orchestrator):
     ]
     for w in winners:
         try:
+            # lookback_days default of 14 covers all strategies' min-bar requirements:
+            # 4h × 14d = 84 bars (ichimoku needs 57, grid_fib needs 50),
+            # 1h × 14d = 336 bars, 15m × 14d = 1344 bars, 5m × 14d = 4032 bars.
+            # sdz uses zone_lookback_days=30 (param) so its own data needs 30 days.
+            # Without this, the SQLAlchemy default of 7 was failing to apply for
+            # reasons not yet root-caused, leaving lookback_days=None → orchestrator
+            # called get_ohlcv(..., None) → undersized data window → strategies on
+            # long timeframes never accumulated enough bars to generate signals.
             inst = models.StrategyInstance(
                 name=w["name"], strategy_type=w["strategy_type"], symbol=w["symbol"],
                 timeframe=w["timeframe"], leverage=w.get("leverage", 3),
                 size_usd=w.get("size_usd", 100), target_pct=9.0, max_loss_pct=-8.0,
+                lookback_days=w.get("lookback_days", 14),
                 interval_seconds=30, enabled=True, params=w.get("params", {}),
                 tier="bonus_algos", status="running",
             )
