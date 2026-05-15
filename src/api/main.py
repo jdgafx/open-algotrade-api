@@ -183,7 +183,8 @@ async def lifespan(app: FastAPI):
         from src.services.liquidation_tracker import LiquidationTracker
         hl_base_url = client.base_url if client else "https://api.hyperliquid.xyz"
         liquidation_tracker = LiquidationTracker(base_url=hl_base_url)
-        logger.info("LiquidationTracker initialized | url=%s", hl_base_url)
+        await liquidation_tracker.start()
+        logger.info("LiquidationTracker initialized + started | url=%s", hl_base_url)
     except Exception as e:
         logger.warning("Could not initialize LiquidationTracker: %s", e)
 
@@ -192,7 +193,8 @@ async def lifespan(app: FastAPI):
         from src.services.whale_tracker import WhaleTracker
         hl_base_url = client.base_url if client else "https://api.hyperliquid.xyz"
         whale_tracker = WhaleTracker(base_url=hl_base_url)
-        logger.info("WhaleTracker initialized | url=%s", hl_base_url)
+        await whale_tracker.start()
+        logger.info("WhaleTracker initialized + started | url=%s", hl_base_url)
     except Exception as e:
         logger.warning("Could not initialize WhaleTracker: %s", e)
 
