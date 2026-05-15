@@ -19,6 +19,13 @@ from . import models, schemas
 from .database import engine, get_db
 from .auth import get_password_hash, verify_password, create_access_token, require_current_user
 
+# Ensure all SQLAlchemy models register with Base.metadata BEFORE create_all.
+# Without this import, rbi_jobs / rbi_strategy_results tables never get created
+# and /rbi/jobs returns 500 with "no such table". Importing is enough — the
+# module just needs to be loaded so its Column definitions execute. Adding
+# `# noqa: F401` to keep linters quiet.
+from src.services import rbi_models  # noqa: F401
+
 models.Base.metadata.create_all(bind=engine)
 
 logger = logging.getLogger(__name__)
