@@ -182,6 +182,7 @@ class StrategyInstanceOut(BaseModel):
     size_usd: float
     target_pct: float
     max_loss_pct: float
+    lookback_days: Optional[int] = None
     interval_seconds: int
     enabled: bool
     params: Dict[str, Any]

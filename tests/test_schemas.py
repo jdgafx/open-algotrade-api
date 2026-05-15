@@ -21,3 +21,15 @@ def test_strategy_instance_update_other_fields_still_work():
     u = StrategyInstanceUpdate(enabled=False, leverage=5, size_usd=200.0)
     d = u.model_dump(exclude_unset=True)
     assert d == {"enabled": False, "leverage": 5, "size_usd": 200.0}
+
+
+def test_strategy_instance_out_exposes_lookback_days():
+    """GET /strategies/{name} response must include lookback_days.
+
+    Regression for 2026-05-15: PATCH endpoint accepted lookback_days
+    after a partial schema fix, but StrategyInstanceOut still stripped
+    it from responses, making it impossible to verify whether the DB
+    write actually persisted.
+    """
+    from src.api.schemas import StrategyInstanceOut
+    assert "lookback_days" in StrategyInstanceOut.model_fields
