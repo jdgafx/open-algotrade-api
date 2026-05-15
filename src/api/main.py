@@ -40,7 +40,8 @@ def _auto_deploy_winners(db, orchestrator):
         {"name": "turtle-btc", "strategy_type": "turtle", "symbol": "BTC", "timeframe": "1h", "size_usd": 100, "leverage": 3, "params": {"lookback_period": 55, "atr_period": 20, "atr_multiplier": 3.0, "take_profit_pct": 0.075, "min_hold_bars": 3, "cooldown_seconds": 600, "max_trades_per_hour": 2, "min_signal_strength": 0.5}},
         {"name": "bollinger-btc", "strategy_type": "bollinger", "symbol": "BTC", "timeframe": "1h", "size_usd": 100, "leverage": 3, "params": {"bb_period": 20, "bb_std": 2.0, "squeeze_threshold": 0.05, "min_hold_bars": 3, "cooldown_seconds": 600, "max_trades_per_hour": 2, "min_signal_strength": 0.5}},
         {"name": "conspop-btc", "strategy_type": "consolidation_pop", "symbol": "BTC", "timeframe": "15m", "size_usd": 100, "leverage": 3, "params": {"atr_period": 14, "deviance_threshold": 0.45, "range_position_buy": 0.3, "range_position_sell": 0.7, "tp_pct": 0.02, "sl_pct": 0.015, "min_hold_bars": 3, "cooldown_seconds": 300, "max_trades_per_hour": 3, "min_signal_strength": 0.5}},
-        {"name": "quarter-btc", "strategy_type": "quarter_theory", "symbol": "BTC", "timeframe": "1h", "size_usd": 100, "leverage": 3, "params": {"breakout_pct": 0.1, "take_profit_quarters": 2, "stop_loss_quarters": 1, "min_hold_bars": 3, "cooldown_seconds": 600, "max_trades_per_hour": 2, "min_signal_strength": 0.5}},
+        # quarter-btc removed 2026-05-15: quarter_theory deliberately
+        # disabled in src/strategies/registry.py (buggy TP/SL in crypto).
         # ── Full fleet: reversal strategies ──
         {"name": "sdz-btc", "strategy_type": "supply_demand_zone", "symbol": "BTC", "timeframe": "4h", "size_usd": 100, "leverage": 3, "interval_seconds": 60, "lookback_days": 30, "params": {"zone_lookback_days": 30, "zone_threshold": 0.015, "min_hold_bars": 2, "cooldown_seconds": 900, "max_trades_per_hour": 2, "min_signal_strength": 0.5}},
         {"name": "rsi-btc", "strategy_type": "rsi", "symbol": "BTC", "timeframe": "1h", "size_usd": 100, "leverage": 3, "params": {"rsi_period": 14, "oversold": 30, "overbought": 70, "trend_mode": False, "divergence_mode": False, "min_hold_bars": 3, "cooldown_seconds": 600, "max_trades_per_hour": 2, "min_signal_strength": 0.5}},
@@ -55,8 +56,10 @@ def _auto_deploy_winners(db, orchestrator):
         {"name": "combo-btc", "strategy_type": "sma_adx_bb_vol", "symbol": "BTC", "timeframe": "1h", "size_usd": 100, "leverage": 3, "params": {"sma_period": 20, "adx_period": 14, "bb_period": 20, "bb_std": 2.0, "min_adx": 25, "volume_multiplier": 1.1, "min_hold_bars": 3, "cooldown_seconds": 600, "max_trades_per_hour": 2, "min_signal_strength": 0.5}},
         # ── Full fleet: statistical/pattern strategies ──
         {"name": "corr-sol", "strategy_type": "correlation", "symbol": "SOL", "timeframe": "15m", "size_usd": 100, "leverage": 3, "params": {"leader": "ETH", "correlation_window": 20, "lag_threshold": 0.003, "sl_pct": 0.005, "tp_pct": 0.015, "momentum_threshold": 0.015, "min_hold_bars": 3, "cooldown_seconds": 300, "max_trades_per_hour": 3, "min_signal_strength": 0.5}},
-        {"name": "elliott-btc", "strategy_type": "elliott_wave", "symbol": "BTC", "timeframe": "4h", "size_usd": 75, "leverage": 2, "interval_seconds": 60, "params": {"swing_lookback": 5, "fib_retracement_min": 0.382, "fib_retracement_max": 0.618, "min_swing_pct": 0.5, "reversal_exit_pct": 3.0, "min_hold_bars": 2, "cooldown_seconds": 900, "max_trades_per_hour": 1, "min_signal_strength": 0.6}},
-        {"name": "ellpiv-btc", "strategy_type": "elliott_pivot", "symbol": "BTC", "timeframe": "4h", "size_usd": 75, "leverage": 2, "interval_seconds": 60, "params": {"swing_lookback": 5, "pivot_lookback": 24, "min_hold_bars": 2, "cooldown_seconds": 900, "max_trades_per_hour": 1, "min_signal_strength": 0.6}},
+        # elliott-btc, ellpiv-btc removed 2026-05-15: elliott_wave and
+        # elliott_pivot are deliberately disabled in
+        # src/strategies/registry.py (unreliable in crypto). Re-add here
+        # only when the registry re-enables them.
         {"name": "gridfib-btc", "strategy_type": "grid_fibonacci", "symbol": "BTC", "timeframe": "4h", "size_usd": 100, "leverage": 3, "interval_seconds": 60, "params": {"fib_lookback": 50, "proximity_pct": 0.8, "trend_period": 20, "take_profit_fib": 0.618, "stop_loss_fib": 1.0, "min_hold_bars": 2, "cooldown_seconds": 900, "max_trades_per_hour": 2, "min_signal_strength": 0.5}},
     ]
     for w in winners:
