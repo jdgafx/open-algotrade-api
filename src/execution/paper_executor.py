@@ -365,6 +365,7 @@ class PaperTradingExecutor:
                 commission,
                 self.balance,
             )
+            self.save_state()
             return result
 
         except Exception as e:
