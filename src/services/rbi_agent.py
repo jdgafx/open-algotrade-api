@@ -200,7 +200,10 @@ class RBIAgentService:
                         "content-type": "application/json",
                     },
                     json={
-                        "model": "claude-sonnet-4-20250514",
+                        # User explicitly requested Opus inference. Switched from
+                        # the deprecated claude-sonnet-4-20250514 to claude-opus-4-7
+                        # (current latest Opus, per ~/.claude/CLAUDE.md model registry).
+                        "model": "claude-opus-4-7",
                         "max_tokens": 4096,
                         "system": system_prompt,
                         "messages": [{"role": "user", "content": user_prompt}],
@@ -218,7 +221,7 @@ class RBIAgentService:
                         "Content-Type": "application/json",
                     },
                     json={
-                        "model": "anthropic/claude-sonnet-4-20250514",
+                        "model": "anthropic/claude-opus-4-7",
                         "messages": [
                             {"role": "system", "content": system_prompt},
                             {"role": "user", "content": user_prompt},
