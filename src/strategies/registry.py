@@ -106,6 +106,7 @@ def _register_all():
     from .liquidation_momentum_strategy import LiquidationMomentumStrategy
     from .closed_market_overnight_strategy import ClosedMarketOvernightStrategy
     from .timeinality_strategy import TimeinailityStrategy
+    from .capitulation_reversal_strategy import CapitulationReversalStrategy
 
     # ═══════════════════════════════════════════════════════════════════
     # TIER A — Battle-tested HL native strategies
@@ -546,6 +547,26 @@ def _register_all():
             "min_signal_strength": 0.55,
         },
         category="time_bias", risk_level="medium",
+    )
+    register_strategy(
+        "capitulation_reversal", CapitulationReversalStrategy, StrategyTier.A,
+        "MoonDev capitulation reversal — LONG after extreme sell-off (536% return, 68% WR, ETH 1hr)",
+        "ETH", "1h",
+        {
+            "rsi_period": 14,
+            "rsi_oversold": 25,
+            "drop_lookback": 20,
+            "drop_pct": 0.03,
+            "vol_spike_mult": 1.5,
+            "vol_lookback": 20,
+            "require_bullish_confirm": True,
+            "take_profit_pct": 2.0,
+            "stop_loss_pct": 1.5,
+            "hold_cap_bars": 8,
+            "min_hold_bars": 1, "cooldown_seconds": 300, "max_trades_per_hour": 2,
+            "min_signal_strength": 0.60,
+        },
+        category="mean_reversion", risk_level="medium",
     )
 
 
