@@ -17,8 +17,8 @@ import httpx
 logger = logging.getLogger(__name__)
 
 _OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-_DEFAULT_MODEL = "google/gemini-2.5-flash"  # $0.30/Mtok in, best financial reasoning, 1M ctx
-_FALLBACK_MODEL = "google/gemini-2.5-flash-lite"  # $0.10/Mtok, fast fallback on timeout
+_DEFAULT_MODEL = "deepseek/deepseek-v4-flash:free"  # free, 1M ctx, DeepSeek V4
+_FALLBACK_MODEL = "google/gemini-2.5-flash"  # $0.30/Mtok, fallback on timeout/error
 _SUPERMEMORY_SEARCH_URL = "https://api.supermemory.ai/v3/search"
 _SUPERMEMORY_ADD_URL = "https://api.supermemory.ai/v3/documents"
 
