@@ -347,11 +347,12 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(_paper_state_saver())
 
     # ── BTC Winner High-Frequency + Leverage Boost (applied each startup) ──
-    # conspop-btc: +$45.92 historical, vwap-btc: +$27.69, rsi-btc: +$4.22
+    # conspop-btc: leverage reduced 25→5 (25x fee amplification caused -$62 loss on 9 trades)
+    # vwap-btc: +$3.12 proven winner | rsi-btc: +$3.09 proven winner
     _BTC_WINNERS = {
-        "conspop-btc": {"leverage": 25, "size_usd": 200, "cooldown_seconds": 120, "max_trades_per_hour": 6},
-        "vwap-btc":    {"leverage": 20, "size_usd": 150, "cooldown_seconds": 120, "max_trades_per_hour": 6},
-        "rsi-btc":     {"leverage": 15, "size_usd": 150, "cooldown_seconds": 300, "max_trades_per_hour": 4},
+        "conspop-btc": {"leverage": 5,  "size_usd": 500, "cooldown_seconds": 120, "max_trades_per_hour": 6},
+        "vwap-btc":    {"leverage": 20, "size_usd": 500, "cooldown_seconds": 120, "max_trades_per_hour": 6},
+        "rsi-btc":     {"leverage": 15, "size_usd": 500, "cooldown_seconds": 300, "max_trades_per_hour": 4},
     }
     try:
         from .database import SessionLocal as _BoostSL
@@ -459,17 +460,24 @@ async def lifespan(app: FastAPI):
                 n = len(running)
                 if n == 0:
                     return
-                new_size = min(round(investable / n, 2), 500.0)
+                # Performance-weighted sizing: proven winners get 2x base allocation
+                _WINNER_SET = {'vwap-btc', 'rsi-btc', 'pivot-btc', 'turtle-btc'}
+                total_weight = sum(2 if r.name in _WINNER_SET else 1 for r in running)
+                base_unit = investable / max(total_weight, 1)
                 for _cinst in running:
+                    weight = 2 if _cinst.name in _WINNER_SET else 1
+                    new_size = min(round(base_unit * weight, 2), 1500.0)
                     _cinst.size_usd = new_size
                     if orchestrator:
                         _cstrat = orchestrator.get_strategy(_cinst.name)
                         if _cstrat:
                             _cstrat.config.size_usd = new_size
                 _cdb.commit()
+                winner_size = min(round(base_unit * 2, 2), 1500.0)
+                other_size = min(round(base_unit, 2), 1500.0)
                 logger.info(
-                    "Compounder: balance=$%.2f | investable=$%.2f | size/strategy=$%.2f | n=%d",
-                    balance, investable, new_size, n,
+                    "Compounder: balance=$%.2f | investable=$%.2f | winners=$%.2f | others=$%.2f | n=%d",
+                    balance, investable, winner_size, other_size, n,
                 )
             finally:
                 _cdb.close()
