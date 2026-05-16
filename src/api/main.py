@@ -418,6 +418,9 @@ async def lifespan(app: FastAPI):
         ("consolidation_pop", 11, "BTC", "15m", 24),
         ("vwap_bot",          7,  "BTC", "1h",  24),
         ("pivot_lines",       15, "BTC", "1h",  24),
+        ("flip_flop",         39, "BTC", "1h",  4),
+        ("liquidation_dip",   28, "BTC", "5m",  8),
+        ("turtle",             9, "BTC", "1h",  8),
     ]
 
     async def _rbi_job(strategy_type: str, strategy_id: int, symbol: str, timeframe: str):
