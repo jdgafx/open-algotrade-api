@@ -108,6 +108,7 @@ def _register_all():
     from .timeinality_strategy import TimeinailityStrategy
     from .capitulation_reversal_strategy import CapitulationReversalStrategy
     from .day_of_week_strategy import DayOfWeekBiasStrategy
+    from .donchian_strategy import DonchianChannelStrategy
 
     # ═══════════════════════════════════════════════════════════════════
     # TIER A — Battle-tested HL native strategies
@@ -586,6 +587,22 @@ def _register_all():
             "min_signal_strength": 0.55,
         },
         category="time_bias", risk_level="low",
+    )
+    register_strategy(
+        "donchian_channel", DonchianChannelStrategy, StrategyTier.A,
+        "MoonDev Donchian channel breakout — top of 100-strategy sweep (563% return, BTC/ETH)",
+        "BTC", "1h",
+        {
+            "channel_period": 20,
+            "atr_period": 14,
+            "atr_sl_mult": 2.0,
+            "take_profit_pct": 3.0,
+            "stop_loss_pct": 1.5,
+            "hold_cap_bars": 12,
+            "min_hold_bars": 1, "cooldown_seconds": 300, "max_trades_per_hour": 1,
+            "min_signal_strength": 0.60,
+        },
+        category="breakout", risk_level="medium",
     )
 
 
