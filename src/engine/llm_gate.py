@@ -16,7 +16,8 @@ import httpx
 logger = logging.getLogger(__name__)
 
 _OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-_DEFAULT_MODEL = "deepseek/deepseek-chat-v3-0324"
+_DEFAULT_MODEL = "deepseek/deepseek-v3.2"
+_FALLBACK_MODEL = "google/gemini-2.5-flash"  # fast fallback when DeepSeek TTFT spikes
 
 _SYSTEM_PROMPT = (
     "You are a crypto trading signal evaluator for a Hyperliquid algorithmic trading system. "
@@ -117,7 +118,11 @@ class LLMGate:
 
         try:
             if os.getenv("OPENROUTER_API_KEY"):
-                raw = await _call_openrouter(prompt, self._model)
+                try:
+                    raw = await _call_openrouter(prompt, self._model)
+                except (httpx.TimeoutException, httpx.HTTPStatusError) as e:
+                    logger.warning("LLMGate primary model timeout/error (%s) — falling back to %s", e, _FALLBACK_MODEL)
+                    raw = await _call_openrouter(prompt, _FALLBACK_MODEL)
             else:
                 raw = await _call_anthropic_fallback(prompt)
             llm_proceed = bool(raw.get("proceed", True))
