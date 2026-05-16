@@ -347,10 +347,9 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(_paper_state_saver())
 
     # ── BTC Winner High-Frequency + Leverage Boost (applied each startup) ──
-    # conspop-btc: leverage reduced 25→5 (25x fee amplification caused -$62 loss on 9 trades)
     # vwap-btc: +$3.12 proven winner | rsi-btc: +$3.09 proven winner
+    # conspop-btc removed: stopped strategy, boost was dead code
     _BTC_WINNERS = {
-        "conspop-btc": {"leverage": 5,  "size_usd": 500, "cooldown_seconds": 120, "max_trades_per_hour": 6},
         "vwap-btc":    {"leverage": 20, "size_usd": 500, "cooldown_seconds": 120, "max_trades_per_hour": 6},
         "rsi-btc":     {"leverage": 15, "size_usd": 500, "cooldown_seconds": 300, "max_trades_per_hour": 4},
     }
@@ -463,12 +462,36 @@ async def lifespan(app: FastAPI):
                 n = len(running)
                 if n == 0:
                     return
-                # Dynamic winner detection: profitable strategies with enough history get 2x
+                # Build real per-strategy stats from live executor memory (DB is always stale —
+                # the GET /strategies endpoint merges paper stats in-memory but never commits)
+                _live_stats: dict = {}
+                for _t in executor.get_trade_history():
+                    _sname = _t.get("strategy", "")
+                    if not _sname:
+                        continue
+                    if _sname not in _live_stats:
+                        _live_stats[_sname] = {"pnl": 0.0, "trades": 0, "wins": 0}
+                    if _t.get("action") == "exit":
+                        _live_stats[_sname]["trades"] += 1
+                        _live_stats[_sname]["pnl"] += _t.get("pnl", 0.0)
+                        if (_t.get("pnl") or 0.0) > 0:
+                            _live_stats[_sname]["wins"] += 1
+
+                # Flush live stats to DB so other queries (and next compound run) see real numbers
+                for _cinst in running:
+                    if _cinst.name in _live_stats:
+                        _s = _live_stats[_cinst.name]
+                        _cinst.total_trades = _s["trades"]
+                        _cinst.winning_trades = _s["wins"]
+                        _cinst.total_pnl = round(_s["pnl"], 4)
+
+                # Dynamic winner detection from live stats
                 _STATIC_WINNERS = {'vwap-btc', 'rsi-btc', 'pivot-btc', 'turtle-btc'}
                 _WINNER_MIN_TRADES = 3
                 dynamic_winners = {
                     r.name for r in running
-                    if (r.total_pnl or 0) > 0 and (r.total_trades or 0) >= _WINNER_MIN_TRADES
+                    if _live_stats.get(r.name, {}).get("pnl", 0.0) > 0
+                    and _live_stats.get(r.name, {}).get("trades", 0) >= _WINNER_MIN_TRADES
                 }
                 _WINNER_SET = dynamic_winners if dynamic_winners else _STATIC_WINNERS
                 total_weight = sum(2 if r.name in _WINNER_SET else 1 for r in running)
