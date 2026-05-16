@@ -255,8 +255,8 @@ class TestPaperExecutorPosition:
         signal = Signal(signal_type=SignalType.LONG, symbol="BTC", size_usd=1000.0, reason="test")
         await executor.execute_signal(signal, strategy)
         value = await executor.get_account_value()
-        # Should be close to initial balance (minus small commission)
-        assert abs(value - 10000.0) < 10.0
+        # Should be close to initial balance (minus commission: 3.5% of $1000 = $35)
+        assert abs(value - 10000.0) < 40.0
 
 
 class TestPaperExecutorHistory:
@@ -402,3 +402,37 @@ class TestPaperExecutorOrphanFlush:
         results = await executor.close_by_strategy("nonexistent")
         assert results == []
         assert len(executor._positions) == 0
+
+
+class TestCompoundSizing:
+    """Verify compound position sizing grows with balance."""
+
+    @pytest.mark.asyncio
+    async def test_compound_mult_at_par(self, executor, strategy):
+        """At initial balance, compound_mult=1.0 → size unchanged."""
+        signal = Signal(signal_type=SignalType.LONG, symbol="BTC", size_usd=1000.0, reason="test")
+        result = await executor.execute_signal(signal, strategy)
+        assert result.success is True
+        pos = executor._positions["test-paper:BTC"]
+        # size_usd should equal 1000 * (10000/10000) = 1000
+        assert abs(pos.size_usd - 1000.0) < 1.0
+
+    @pytest.mark.asyncio
+    async def test_compound_mult_scales_with_profit(self, executor, strategy):
+        """When balance is 20% above initial, size should be 20% larger."""
+        executor.balance = 12000.0  # 20% profit
+        signal = Signal(signal_type=SignalType.LONG, symbol="BTC", size_usd=1000.0, reason="test")
+        result = await executor.execute_signal(signal, strategy)
+        assert result.success is True
+        pos = executor._positions["test-paper:BTC"]
+        assert abs(pos.size_usd - 1200.0) < 1.0  # 1000 * 1.2
+
+    @pytest.mark.asyncio
+    async def test_compound_mult_capped_at_3x(self, executor, strategy):
+        """Compound mult caps at 3× regardless of balance growth."""
+        executor.balance = 50000.0  # 5× initial — should cap at 3×
+        signal = Signal(signal_type=SignalType.LONG, symbol="BTC", size_usd=1000.0, reason="test")
+        result = await executor.execute_signal(signal, strategy)
+        assert result.success is True
+        pos = executor._positions["test-paper:BTC"]
+        assert abs(pos.size_usd - 3000.0) < 1.0  # capped at 3×

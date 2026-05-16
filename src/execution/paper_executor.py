@@ -297,6 +297,10 @@ class PaperTradingExecutor:
             )
 
             size_usd = signal.size_usd or config.size_usd
+            # Compound sizing: grow proportionally on profit, cap at 3×; never shrink below base
+            if self.initial_balance > 0:
+                compound_mult = min(max(self.balance / self.initial_balance, 1.0), 3.0)
+                size_usd = size_usd * compound_mult
             size_usd = min(size_usd, self.max_position_usd)
 
             # Check balance
