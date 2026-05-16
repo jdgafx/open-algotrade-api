@@ -460,8 +460,14 @@ async def lifespan(app: FastAPI):
                 n = len(running)
                 if n == 0:
                     return
-                # Performance-weighted sizing: proven winners get 2x base allocation
-                _WINNER_SET = {'vwap-btc', 'rsi-btc', 'pivot-btc', 'turtle-btc'}
+                # Dynamic winner detection: profitable strategies with enough history get 2x
+                _STATIC_WINNERS = {'vwap-btc', 'rsi-btc', 'pivot-btc', 'turtle-btc'}
+                _WINNER_MIN_TRADES = 3
+                dynamic_winners = {
+                    r.name for r in running
+                    if (r.total_pnl or 0) > 0 and (r.total_trades or 0) >= _WINNER_MIN_TRADES
+                }
+                _WINNER_SET = dynamic_winners if dynamic_winners else _STATIC_WINNERS
                 total_weight = sum(2 if r.name in _WINNER_SET else 1 for r in running)
                 base_unit = investable / max(total_weight, 1)
                 for _cinst in running:
@@ -476,8 +482,8 @@ async def lifespan(app: FastAPI):
                 winner_size = min(round(base_unit * 2, 2), 1500.0)
                 other_size = min(round(base_unit, 2), 1500.0)
                 logger.info(
-                    "Compounder: balance=$%.2f | investable=$%.2f | winners=$%.2f | others=$%.2f | n=%d",
-                    balance, investable, winner_size, other_size, n,
+                    "Compounder: balance=$%.2f | investable=$%.2f | winners=$%.2f | others=$%.2f | n=%d | winner_set=%s",
+                    balance, investable, winner_size, other_size, n, sorted(_WINNER_SET),
                 )
             finally:
                 _cdb.close()
