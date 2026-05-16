@@ -347,16 +347,21 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(_paper_state_saver())
 
     # ── Winner High-Frequency + Leverage Boost (applied each startup) ──
-    # BTC: vwap +$3.12 | rsi +$3.09 | macd +$1.89 | pivot +$9.75
-    # ETH/SOL: adx-eth +$15.15/trade (best efficiency) | macd-sol +$8.47/trade
+    # Proven live: vwap +$3.12 | rsi +$3.09 | macd +$1.89 | pivot +$9.75
+    # ETH/SOL live: adx-eth +$15.15/trade | macd-sol +$8.47/trade
+    # MoonDev backtest: liqadx 494% Sharpe 2.81 | flip-flop 529% WR 81%
     _BTC_WINNERS = {
-        "vwap-btc":    {"leverage": 20, "size_usd": 500, "cooldown_seconds": 120, "max_trades_per_hour": 6},
-        "rsi-btc":     {"leverage": 15, "size_usd": 500, "cooldown_seconds": 300, "max_trades_per_hour": 4},
-        "macd-btc":    {"leverage": 10, "size_usd": 500, "cooldown_seconds": 240, "max_trades_per_hour": 4},
-        "pivot-btc":   {"leverage": 10, "size_usd": 500, "cooldown_seconds": 180, "max_trades_per_hour": 5},
-        "adx-eth":     {"leverage": 12, "size_usd": 500, "cooldown_seconds": 180, "max_trades_per_hour": 5},
-        "macd-sol":    {"leverage": 8,  "size_usd": 500, "cooldown_seconds": 240, "max_trades_per_hour": 4},
-        "turtle-btc":  {"leverage": 8,  "size_usd": 500, "cooldown_seconds": 300, "max_trades_per_hour": 3},
+        "vwap-btc":     {"leverage": 20, "size_usd": 500, "cooldown_seconds": 120, "max_trades_per_hour": 6},
+        "rsi-btc":      {"leverage": 15, "size_usd": 500, "cooldown_seconds": 300, "max_trades_per_hour": 4},
+        "macd-btc":     {"leverage": 10, "size_usd": 500, "cooldown_seconds": 240, "max_trades_per_hour": 4},
+        "pivot-btc":    {"leverage": 10, "size_usd": 500, "cooldown_seconds": 180, "max_trades_per_hour": 5},
+        "adx-eth":      {"leverage": 12, "size_usd": 500, "cooldown_seconds": 180, "max_trades_per_hour": 5},
+        "macd-sol":     {"leverage": 8,  "size_usd": 500, "cooldown_seconds": 240, "max_trades_per_hour": 4},
+        "turtle-btc":   {"leverage": 8,  "size_usd": 500, "cooldown_seconds": 300, "max_trades_per_hour": 3},
+        "liqadx-btc":   {"leverage": 10, "size_usd": 500, "cooldown_seconds": 300, "max_trades_per_hour": 3},
+        "liqadx-eth":   {"leverage": 10, "size_usd": 500, "cooldown_seconds": 300, "max_trades_per_hour": 3},
+        "flip-flop-btc":{"leverage": 10, "size_usd": 500, "cooldown_seconds": 300, "max_trades_per_hour": 3},
+        "flip-flop-eth":{"leverage": 8,  "size_usd": 500, "cooldown_seconds": 300, "max_trades_per_hour": 3},
     }
     try:
         from .database import SessionLocal as _BoostSL
@@ -494,6 +499,8 @@ async def lifespan(app: FastAPI):
                 _STATIC_WINNERS = {
                     'vwap-btc', 'rsi-btc', 'pivot-btc', 'turtle-btc',
                     'adx-eth', 'macd-btc', 'macd-sol',
+                    'liqadx-btc', 'liqadx-eth',       # MoonDev: 494% return, Sharpe 2.81
+                    'flip-flop-btc', 'flip-flop-eth',  # MoonDev: 529% return, WR 81%
                 }
                 _WINNER_MIN_TRADES = 1
                 dynamic_winners = {
