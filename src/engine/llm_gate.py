@@ -16,7 +16,7 @@ import httpx
 logger = logging.getLogger(__name__)
 
 _OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-_DEFAULT_MODEL = "deepseek/deepseek-v4-flash"  # cheapest capable: $0.112/M in, newer than V3.2
+_DEFAULT_MODEL = "deepseek/deepseek-v4-flash:free"  # free tier: $0/M in+out, 1M ctx, 284B MoE
 _FALLBACK_MODEL = "google/gemini-2.5-flash-lite"  # fast cheap fallback on timeout
 
 _SYSTEM_PROMPT = (
