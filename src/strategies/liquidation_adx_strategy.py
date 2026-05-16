@@ -73,12 +73,14 @@ def _adx_di(df: pd.DataFrame, period: int) -> tuple[np.ndarray, np.ndarray, np.n
     dp_rma = _wilder_rma(dm_plus, period)
     dm_rma = _wilder_rma(dm_minus, period)
 
-    di_plus = np.where(tr_rma > 0, 100 * dp_rma / tr_rma, 0.0)
-    di_minus = np.where(tr_rma > 0, 100 * dm_rma / tr_rma, 0.0)
+    tr_safe = np.where(tr_rma > 0, tr_rma, 1.0)
+    di_plus = np.where(tr_rma > 0, 100 * dp_rma / tr_safe, 0.0)
+    di_minus = np.where(tr_rma > 0, 100 * dm_rma / tr_safe, 0.0)
 
+    sum_di = di_plus + di_minus
     dx = np.where(
-        (di_plus + di_minus) > 0,
-        100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0.0,
+        sum_di > 0,
+        100 * np.abs(di_plus - di_minus) / np.where(sum_di > 0, sum_di, 1.0), 0.0,
     )
     adx = _wilder_rma(dx, period)
     return adx, di_plus, di_minus
@@ -93,7 +95,8 @@ def _rsi(close: np.ndarray, period: int) -> np.ndarray:
     loss = np.maximum(-delta, 0.0)
     avg_gain = _wilder_rma(gain, period)
     avg_loss = _wilder_rma(loss, period)
-    rs = np.where(avg_loss > 0, avg_gain / avg_loss, 100.0)
+    avg_loss_safe = np.where(avg_loss > 0, avg_loss, 1.0)
+    rs = np.where(avg_loss > 0, avg_gain / avg_loss_safe, 100.0)
     return 100.0 - 100.0 / (1.0 + rs)
 
 
