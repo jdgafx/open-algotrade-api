@@ -163,7 +163,7 @@ async def lifespan(app: FastAPI):
                 executor=executor,
                 regime_detector=regime_detector,
                 liquidation_guard=liquidation_guard,
-                max_global_trades_per_hour=20,
+                max_global_trades_per_hour=100,
                 daily_loss_limit_pct=2.0,
                 max_portfolio_exposure_pct=80.0,
             )
