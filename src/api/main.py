@@ -244,6 +244,10 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("Could not initialize FundingMonitor: %s", e)
 
+    if orchestrator is not None and liquidation_tracker is not None:
+        orchestrator.liquidation_tracker = liquidation_tracker
+        logger.info("LiquidationTracker injected into orchestrator (chaos gate active)")
+
     # Attach all to app.state
     app.state.orchestrator = orchestrator
     app.state.risk_controller = risk_controller

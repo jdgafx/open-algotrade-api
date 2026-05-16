@@ -54,6 +54,7 @@ class StrategyOrchestrator:
         liquidation_guard: Optional[LiquidationGuard] = None,
         risk_controller=None,
         funding_monitor=None,
+        liquidation_tracker=None,
         # MoonDev profitability params
         max_global_trades_per_hour: int = 20,
         daily_loss_limit_pct: float = 2.0,
@@ -65,6 +66,7 @@ class StrategyOrchestrator:
         self.liquidation_guard = liquidation_guard
         self.risk_controller = risk_controller
         self.funding_monitor = funding_monitor
+        self.liquidation_tracker = liquidation_tracker
         self._strategies: Dict[str, BaseStrategy] = {}
         self._strategy_types: Dict[str, str] = {}  # name -> strategy_type
         self._tasks: Dict[str, asyncio.Task] = {}
@@ -409,6 +411,21 @@ class StrategyOrchestrator:
                                 )
                                 await asyncio.sleep(sleep_seconds)
                                 continue
+
+                        # ── Gate 4.4: Liquidation Chaos Gate ──
+                        # MoonDev: >$500K liquidated in 10 min = skip all entries
+                        if self.liquidation_tracker:
+                            try:
+                                liq_10m = self.liquidation_tracker.get_liquidation_volume(10)
+                                if liq_10m > 500_000:
+                                    logger.info(
+                                        "CHAOS GATE BLOCKED | %s | %s | liq_10m=$%.0f",
+                                        name, signal.signal_type.value, liq_10m,
+                                    )
+                                    await asyncio.sleep(sleep_seconds)
+                                    continue
+                            except Exception as _chaos_err:
+                                logger.warning("Chaos gate error (skipping): %s", _chaos_err)
 
                         # ── Gate 4.5: LLM Advisory Gate ──
                         try:
