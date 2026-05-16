@@ -16,8 +16,8 @@ import httpx
 logger = logging.getLogger(__name__)
 
 _OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-_DEFAULT_MODEL = "deepseek/deepseek-v3.2"
-_FALLBACK_MODEL = "google/gemini-2.5-flash"  # fast fallback when DeepSeek TTFT spikes
+_DEFAULT_MODEL = "deepseek/deepseek-v4-flash"  # cheapest capable: $0.112/M in, newer than V3.2
+_FALLBACK_MODEL = "google/gemini-2.5-flash-lite"  # fast cheap fallback on timeout
 
 _SYSTEM_PROMPT = (
     "You are a crypto trading signal evaluator for a Hyperliquid algorithmic trading system. "
