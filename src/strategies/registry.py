@@ -110,6 +110,7 @@ def _register_all():
     from .day_of_week_strategy import DayOfWeekBiasStrategy
     from .donchian_strategy import DonchianChannelStrategy
     from .liquidation_revisit_strategy import LiquidationRevisitStrategy
+    from .gap_up_momentum_strategy import GapUpMomentumStrategy
 
     # ═══════════════════════════════════════════════════════════════════
     # TIER A — Battle-tested HL native strategies
@@ -624,6 +625,28 @@ def _register_all():
             "min_signal_strength": 0.62,
         },
         category="liquidation", risk_level="medium",
+    )
+    register_strategy(
+        "gap_up_momentum", GapUpMomentumStrategy, StrategyTier.A,
+        "MoonDev gap-up winner of 72-test sweep — UO+ADX+MFI confirmation (Calmar 7.6, PF 2.43)",
+        "BTC", "1h",
+        {
+            "gap_threshold_pct": 0.005,
+            "uo_period_short": 7,
+            "uo_period_med": 14,
+            "uo_period_long": 28,
+            "uo_oversold": 25,
+            "adx_period": 14,
+            "adx_threshold": 30,
+            "mfi_period": 14,
+            "mfi_oversold": 35,
+            "take_profit_pct": 5.0,
+            "stop_loss_pct": 2.0,
+            "hold_cap_bars": 10,
+            "min_hold_bars": 1, "cooldown_seconds": 300, "max_trades_per_hour": 1,
+            "min_signal_strength": 0.60,
+        },
+        category="momentum", risk_level="medium",
     )
 
 
