@@ -340,6 +340,49 @@ async def lifespan(app: FastAPI):
     if paper_mode and executor is not None:
         asyncio.create_task(_paper_state_saver())
 
+    # ── BTC Winner High-Frequency + Leverage Boost (applied each startup) ──
+    # conspop-btc: +$45.92 historical, vwap-btc: +$27.69, rsi-btc: +$4.22
+    _BTC_WINNERS = {
+        "conspop-btc": {"leverage": 5, "size_usd": 200, "cooldown_seconds": 120, "max_trades_per_hour": 6},
+        "vwap-btc":    {"leverage": 5, "size_usd": 150, "cooldown_seconds": 120, "max_trades_per_hour": 6},
+        "rsi-btc":     {"leverage": 5, "size_usd": 150, "cooldown_seconds": 300, "max_trades_per_hour": 4},
+    }
+    try:
+        from .database import SessionLocal as _BoostSL
+        from sqlalchemy.orm.attributes import flag_modified as _flag_modified
+        _boost_db = _BoostSL()
+        try:
+            for _wname, _wcfg in _BTC_WINNERS.items():
+                _winst = _boost_db.query(models.StrategyInstance).filter(
+                    models.StrategyInstance.name == _wname
+                ).first()
+                if _winst:
+                    _winst.leverage = _wcfg["leverage"]
+                    _winst.size_usd = _wcfg["size_usd"]
+                    _winst.params = {
+                        **(_winst.params or {}),
+                        "cooldown_seconds": _wcfg["cooldown_seconds"],
+                        "max_trades_per_hour": _wcfg["max_trades_per_hour"],
+                    }
+                    _flag_modified(_winst, "params")
+                    if orchestrator:
+                        _wstrat = orchestrator.get_strategy(_wname)
+                        if _wstrat:
+                            _wstrat.config.leverage = _wcfg["leverage"]
+                            _wstrat.config.size_usd = _wcfg["size_usd"]
+                            _wstrat.config.params["cooldown_seconds"] = _wcfg["cooldown_seconds"]
+                            _wstrat.config.params["max_trades_per_hour"] = _wcfg["max_trades_per_hour"]
+                    logger.info(
+                        "Winner boost: %s | size=$%d | lev=%dx | cooldown=%ds | max_hr=%d",
+                        _wname, _wcfg["size_usd"], _wcfg["leverage"],
+                        _wcfg["cooldown_seconds"], _wcfg["max_trades_per_hour"],
+                    )
+            _boost_db.commit()
+        finally:
+            _boost_db.close()
+    except Exception as _boost_err:
+        logger.warning("Winner boost failed: %s", _boost_err)
+
     # ── Auto-start risk controller (Layer 0 seatbelt — always on) ──
     if risk_controller is not None:
         try:
@@ -389,9 +432,59 @@ async def lifespan(app: FastAPI):
             id=f"rbi_{stype}",
             replace_existing=True,
         )
+
+    # ── Compounding controller: reinvest 90% of profits every 30 min ──
+    _INITIAL_BALANCE = float(os.getenv("PAPER_BALANCE", "10000"))
+    _COMPOUND_RESERVE_PCT = 0.10  # keep 10% of profits as reserve
+
+    async def _compound_job():
+        try:
+            if not paper_mode or executor is None:
+                return
+            balance = executor.balance
+            profits = balance - _INITIAL_BALANCE
+            if profits <= 0:
+                logger.debug("Compounder: no profits yet (balance=%.2f)", balance)
+                return
+            investable = _INITIAL_BALANCE + profits * (1.0 - _COMPOUND_RESERVE_PCT)
+            from .database import SessionLocal as _CSL
+            _cdb = _CSL()
+            try:
+                running = _cdb.query(models.StrategyInstance).filter(
+                    models.StrategyInstance.status == "running"
+                ).all()
+                n = len(running)
+                if n == 0:
+                    return
+                new_size = min(round(investable / n, 2), 500.0)
+                for _cinst in running:
+                    _cinst.size_usd = new_size
+                    if orchestrator:
+                        _cstrat = orchestrator.get_strategy(_cinst.name)
+                        if _cstrat:
+                            _cstrat.config.size_usd = new_size
+                _cdb.commit()
+                logger.info(
+                    "Compounder: balance=$%.2f | profits=$%.2f | investable=$%.2f"
+                    " | size/strategy=$%.2f | n=%d",
+                    balance, profits, investable, new_size, n,
+                )
+            finally:
+                _cdb.close()
+        except Exception as _ce:
+            logger.error("Compound job error: %s", _ce)
+
+    _scheduler.add_job(
+        _compound_job, "interval", minutes=30,
+        id="compounder",
+        replace_existing=True,
+    )
+
     _scheduler.start()
     app.state.rbi_scheduler = _scheduler
-    logger.info("RBI scheduler started with %d jobs", len(_RBI_SCHEDULE))
+    app.state.compound_initial_balance = _INITIAL_BALANCE
+    app.state.compound_reserve_pct = _COMPOUND_RESERVE_PCT
+    logger.info("RBI scheduler started with %d jobs + compounder", len(_RBI_SCHEDULE))
 
     yield
 
@@ -751,6 +844,33 @@ async def set_trading_mode(request: Request):
         "mode": new_mode,
         "previous_mode": old_mode,
         "message": f"Trading mode switched to {new_mode}. All strategies stopped — restart them to trade in {new_mode} mode.",
+    }
+
+
+# ──────────────────────────────────────────────
+# Compounding Controller Status
+# ──────────────────────────────────────────────
+
+@app.get("/compound/status")
+def get_compound_status(request: Request):
+    """Current compounding state: equity, profits, reinvestment rate, next rebalance size."""
+    _exec = getattr(request.app.state, "executor", None)
+    _paper = getattr(request.app.state, "paper_mode", False)
+    initial = getattr(request.app.state, "compound_initial_balance", float(os.getenv("PAPER_BALANCE", "10000")))
+    reserve_pct = getattr(request.app.state, "compound_reserve_pct", 0.10)
+
+    balance = _exec.balance if (_paper and _exec is not None) else initial
+    profits = max(0.0, balance - initial)
+    investable = initial + profits * (1.0 - reserve_pct)
+
+    return {
+        "balance": round(balance, 2),
+        "initial_balance": initial,
+        "profits": round(profits, 2),
+        "reserve_pct": round(reserve_pct * 100, 1),
+        "investable": round(investable, 2),
+        "compound_active": profits > 0,
+        "rebalance_interval_minutes": 30,
     }
 
 
