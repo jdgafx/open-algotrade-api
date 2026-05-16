@@ -111,6 +111,7 @@ def _register_all():
     from .donchian_strategy import DonchianChannelStrategy
     from .liquidation_revisit_strategy import LiquidationRevisitStrategy
     from .gap_up_momentum_strategy import GapUpMomentumStrategy
+    from .consecutive_down_strategy import ConsecutiveDownStrategy
 
     # ═══════════════════════════════════════════════════════════════════
     # TIER A — Battle-tested HL native strategies
@@ -647,6 +648,23 @@ def _register_all():
             "min_signal_strength": 0.60,
         },
         category="momentum", risk_level="medium",
+    )
+    register_strategy(
+        "consecutive_down", ConsecutiveDownStrategy, StrategyTier.A,
+        "MoonDev consecutive-down reversal — N red bars exhaustion → LONG bounce (high frequency)",
+        "BTC", "1h",
+        {
+            "n_down_bars": 4,
+            "use_vwap_filter": True,
+            "rsi_period": 14,
+            "rsi_max": 45,
+            "take_profit_pct": 2.5,
+            "stop_loss_pct": 1.5,
+            "hold_cap_bars": 8,
+            "min_hold_bars": 1, "cooldown_seconds": 300, "max_trades_per_hour": 2,
+            "min_signal_strength": 0.58,
+        },
+        category="mean_reversion", risk_level="low",
     )
 
 
