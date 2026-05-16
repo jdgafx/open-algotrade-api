@@ -24,6 +24,10 @@ logger = logging.getLogger(__name__)
 
 class FlipFlopStrategy(BaseStrategy):
 
+    def __init__(self, config: "StrategyConfig") -> None:
+        super().__init__(config)
+        self._entered_direction: int = 0  # 0=none, 1=long, -1=short
+
     @staticmethod
     def _supertrend(df: pd.DataFrame, period: int, multiplier: float) -> pd.DataFrame:
         n = len(df)
@@ -94,39 +98,42 @@ class FlipFlopStrategy(BaseStrategy):
             return None
 
         curr_dir = int(df["st_direction"].iloc[-1])
-        prev_dir = int(df["st_direction"].iloc[-2])
+        if curr_dir == 0:
+            return None
 
-        if curr_dir == prev_dir or curr_dir == 0:
+        # Re-enter if direction changed since last entry OR no position yet.
+        # This makes the strategy truly always-in-market: after a safety stop,
+        # it re-enters on the next bar in whatever direction ST shows.
+        if curr_dir == self._entered_direction:
             return None
 
         price = float(df["close"].iloc[-1])
         st_line = float(df["st_line"].iloc[-1])
 
-        if curr_dir == 1 and prev_dir == -1:
-            logger.info("[FlipFlop] ST flipped UP at %.4f (ST=%.4f)", price, st_line)
+        if curr_dir == 1:
+            self._entered_direction = 1
+            logger.info("[FlipFlop] LONG at %.4f (ST=%.4f)", price, st_line)
             return Signal(
                 signal_type=SignalType.LONG,
                 symbol=self.config.symbol,
                 price=price,
                 size_usd=self.config.size_usd,
                 strength=0.85,
-                reason=f"FlipFlop LONG: SuperTrend flipped UP at {price:.4f}",
+                reason=f"FlipFlop LONG: ST UP at {price:.4f}",
                 metadata={"st_direction": curr_dir, "st_line": st_line},
             )
 
-        if curr_dir == -1 and prev_dir == 1:
-            logger.info("[FlipFlop] ST flipped DOWN at %.4f (ST=%.4f)", price, st_line)
-            return Signal(
-                signal_type=SignalType.SHORT,
-                symbol=self.config.symbol,
-                price=price,
-                size_usd=self.config.size_usd,
-                strength=0.85,
-                reason=f"FlipFlop SHORT: SuperTrend flipped DOWN at {price:.4f}",
-                metadata={"st_direction": curr_dir, "st_line": st_line},
-            )
-
-        return None
+        self._entered_direction = -1
+        logger.info("[FlipFlop] SHORT at %.4f (ST=%.4f)", price, st_line)
+        return Signal(
+            signal_type=SignalType.SHORT,
+            symbol=self.config.symbol,
+            price=price,
+            size_usd=self.config.size_usd,
+            strength=0.85,
+            reason=f"FlipFlop SHORT: ST DOWN at {price:.4f}",
+            metadata={"st_direction": curr_dir, "st_line": st_line},
+        )
 
     async def should_exit(
         self, data: pd.DataFrame, position: Dict[str, Any]
@@ -155,8 +162,9 @@ class FlipFlopStrategy(BaseStrategy):
                 reason=f"FlipFlop exit SHORT: ST flipped UP at {price:.4f}",
             )
 
-        # Safety net stops
+        # Safety net stops — reset direction so we can re-enter on the next bar
         if pnl_pct >= self.config.target_pct:
+            self._entered_direction = 0
             close_type = SignalType.CLOSE_LONG if is_long else SignalType.CLOSE_SHORT
             return Signal(
                 signal_type=close_type,
@@ -164,6 +172,7 @@ class FlipFlopStrategy(BaseStrategy):
                 reason=f"FlipFlop target: {pnl_pct:.1f}%",
             )
         if pnl_pct <= self.config.max_loss_pct:
+            self._entered_direction = 0
             close_type = SignalType.CLOSE_LONG if is_long else SignalType.CLOSE_SHORT
             return Signal(
                 signal_type=close_type,

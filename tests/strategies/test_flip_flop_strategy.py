@@ -19,6 +19,7 @@ def _make_strategy(params: dict | None = None) -> FlipFlopStrategy:
     s.config.size_usd = 100.0
     s.config.target_pct = 9.0
     s.config.max_loss_pct = -8.0
+    s._entered_direction = 0
     return s
 
 
@@ -87,18 +88,33 @@ def test_no_entry_when_insufficient_data():
     assert result is None
 
 
-def test_no_entry_when_trend_unchanged():
+def test_no_reentry_when_already_in_same_direction():
+    """Already entered in the current ST direction — no duplicate entry."""
     s = _make_strategy({"atr_period": 5, "multiplier": 2.0})
-    # Long steady uptrend — no flip occurs
-    closes = list(range(50, 80))
+    closes = list(range(50, 80))  # steady uptrend
     df = _make_ohlcv(closes)
-    # Force stable direction by reading actual ST
     st = FlipFlopStrategy._supertrend(df, 5, 2.0)
-    curr = int(st["st_direction"].iloc[-1])
-    prev = int(st["st_direction"].iloc[-2])
-    if curr == prev:
+    curr_dir = int(st["st_direction"].iloc[-1])
+    # Simulate: we already entered in this direction
+    s._entered_direction = curr_dir
+    result = _run(s.should_enter(df))
+    assert result is None
+
+
+def test_initial_entry_on_clear_direction():
+    """First call with no prior position enters based on current ST direction."""
+    s = _make_strategy({"atr_period": 5, "multiplier": 2.0})
+    closes = list(range(50, 80))  # steady uptrend
+    df = _make_ohlcv(closes)
+    st = FlipFlopStrategy._supertrend(df, 5, 2.0)
+    curr_dir = int(st["st_direction"].iloc[-1])
+    if curr_dir != 0:  # direction is established
         result = _run(s.should_enter(df))
-        assert result is None
+        assert result is not None
+        if curr_dir == 1:
+            assert result.signal_type == SignalType.LONG
+        else:
+            assert result.signal_type == SignalType.SHORT
 
 
 def test_long_entry_on_up_flip():
