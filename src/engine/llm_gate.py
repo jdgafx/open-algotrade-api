@@ -24,7 +24,11 @@ _SYSTEM_PROMPT = (
     "Given a trade signal context and optional past trade history, evaluate whether to proceed. "
     "Respond ONLY with valid JSON: "
     '{"proceed": true|false, "confidence": 0.0-1.0, "reason": "one sentence"} '
-    "Be conservative. Reject signals that go counter to the stated market regime."
+    "Be conservative. Key rules: "
+    "1) Reject signals that go counter to the stated market regime. "
+    "2) If funding_bias=long_crowded and signal=LONG, reduce confidence (crowd is already positioned). "
+    "3) If funding_bias=short_crowded and signal=SHORT, reduce confidence. "
+    "4) Contrarian trades against extreme funding have an edge — slightly favour them."
 )
 
 
@@ -37,7 +41,9 @@ class TradeContext:
     regime: str
     signal_strength: float
     recent_pnl: list      # last 5 trade PnLs
-    memory_context: str = ""  # recalled similar trades from Supermemory
+    memory_context: str = ""    # recalled similar trades from Supermemory
+    funding_rate: Optional[float] = None   # annualized; positive = longs pay shorts
+    funding_bias: str = "neutral"          # neutral | long_crowded | short_crowded
 
 
 @dataclass
@@ -107,11 +113,17 @@ class LLMGate:
         if self._mode == self.MODE_OFF or context.signal_strength < 0.5:
             return GateVerdict(proceed=True, confidence=1.0, reason="gate_off")
 
+        funding_str = ""
+        if context.funding_rate is not None:
+            funding_str = (
+                f", Funding rate (annualized): {context.funding_rate:.2%}"
+                f", Funding bias: {context.funding_bias}"
+            )
         prompt = (
             f"Strategy: {context.strategy}, Signal: {context.signal}, "
             f"Symbol: {context.symbol}, Price: {context.price:.2f}, "
             f"Regime: {context.regime}, Signal strength: {context.signal_strength:.2f}, "
-            f"Recent PnL (last 5): {context.recent_pnl}"
+            f"Recent PnL (last 5): {context.recent_pnl}{funding_str}"
         )
         if context.memory_context:
             prompt += f"\n\nPast similar trades from memory:\n{context.memory_context}"

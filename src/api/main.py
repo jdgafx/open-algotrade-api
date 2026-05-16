@@ -239,6 +239,8 @@ async def lifespan(app: FastAPI):
         )
         funding_monitor = FundingMonitor(base_url=hl_info_url, auto_start=True)
         logger.info("FundingMonitor initialized | url=%s", hl_info_url)
+        if orchestrator is not None:
+            orchestrator.funding_monitor = funding_monitor
     except Exception as e:
         logger.warning("Could not initialize FundingMonitor: %s", e)
 

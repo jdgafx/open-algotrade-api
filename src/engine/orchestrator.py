@@ -21,6 +21,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
+from src.engine.llm_gate import TradeContext, llm_gate
 from src.execution.hl_executor import HyperliquidVaultExecutor
 from src.lib.nice_funcs import HyperliquidClient
 from src.services.liquidation_guard import LiquidationGuard
@@ -52,6 +53,7 @@ class StrategyOrchestrator:
         regime_detector=None,
         liquidation_guard: Optional[LiquidationGuard] = None,
         risk_controller=None,
+        funding_monitor=None,
         # MoonDev profitability params
         max_global_trades_per_hour: int = 20,
         daily_loss_limit_pct: float = 2.0,
@@ -62,6 +64,7 @@ class StrategyOrchestrator:
         self.regime_detector = regime_detector
         self.liquidation_guard = liquidation_guard
         self.risk_controller = risk_controller
+        self.funding_monitor = funding_monitor
         self._strategies: Dict[str, BaseStrategy] = {}
         self._strategy_types: Dict[str, str] = {}  # name -> strategy_type
         self._tasks: Dict[str, asyncio.Task] = {}
@@ -406,6 +409,50 @@ class StrategyOrchestrator:
                                 )
                                 await asyncio.sleep(sleep_seconds)
                                 continue
+
+                        # ── Gate 4.5: LLM Advisory Gate ──
+                        try:
+                            regime_info = (
+                                self.regime_detector.get_current_regime(symbol)
+                                if self.regime_detector else {}
+                            )
+                            regime_label = (regime_info or {}).get("regime", "unknown")
+                            recent_pnl = [
+                                round(t["pnl"], 2)
+                                for t in self.executor.get_trade_history()
+                                if t.get("action") == "exit"
+                            ][-5:]
+                            funding_rate = None
+                            funding_bias = "neutral"
+                            if self.funding_monitor:
+                                funding_rate = self.funding_monitor.get_funding_rate(symbol)
+                                funding_bias = self.funding_monitor.get_funding_bias(symbol)
+                            gate_price = (
+                                signal.price or
+                                (float(data["close"].iloc[-1]) if not data.empty else 0.0)
+                            )
+                            gate_ctx = TradeContext(
+                                strategy=name,
+                                signal=signal.signal_type.value.upper(),
+                                symbol=symbol,
+                                price=gate_price,
+                                regime=regime_label,
+                                signal_strength=signal.strength,
+                                recent_pnl=recent_pnl,
+                                funding_rate=funding_rate,
+                                funding_bias=funding_bias,
+                            )
+                            verdict = await llm_gate.evaluate(gate_ctx)
+                            if not verdict.proceed:
+                                logger.info(
+                                    "LLM GATE BLOCKED | %s | %s | conf=%.2f | %s",
+                                    name, signal.signal_type.value,
+                                    verdict.confidence, verdict.reason,
+                                )
+                                await asyncio.sleep(sleep_seconds)
+                                continue
+                        except Exception as _llm_err:
+                            logger.warning("LLM gate error (skipping gate): %s", _llm_err)
 
                     # Execute the signal
                     result = await self.executor.execute_signal(signal, strategy)
