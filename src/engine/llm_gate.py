@@ -1,8 +1,8 @@
 """
 LLM advisory gate for trade signals.
 
-Uses OpenRouter (cheap inference) with DeepSeek as default model.
-Falls back to Anthropic Haiku if OPENROUTER_API_KEY is absent.
+Uses OpenRouter with Gemini 2.5 Flash as default (best financial reasoning, 1M ctx).
+Falls back to Gemini 2.5 Flash Lite on timeout. Anthropic Haiku if no OpenRouter key.
 Enriches prompts with recalled Supermemory trade history.
 """
 import asyncio
@@ -17,8 +17,8 @@ import httpx
 logger = logging.getLogger(__name__)
 
 _OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-_DEFAULT_MODEL = "deepseek/deepseek-v4-flash:free"  # free tier: $0/M in+out, 1M ctx, 284B MoE
-_FALLBACK_MODEL = "google/gemini-2.5-flash-lite"  # fast cheap fallback on timeout
+_DEFAULT_MODEL = "google/gemini-2.5-flash"  # $0.30/Mtok in, best financial reasoning, 1M ctx
+_FALLBACK_MODEL = "google/gemini-2.5-flash-lite"  # $0.10/Mtok, fast fallback on timeout
 _SUPERMEMORY_SEARCH_URL = "https://api.supermemory.ai/v3/search"
 _SUPERMEMORY_ADD_URL = "https://api.supermemory.ai/v3/documents"
 
