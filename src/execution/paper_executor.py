@@ -434,6 +434,22 @@ class PaperTradingExecutor:
             # Remove position
             del self._positions[pos_key]
 
+            # Fire-and-forget: persist trade outcome to Supermemory for self-tuning
+            try:
+                import asyncio as _aio
+                from src.services.trade_memory import store_trade as _store
+                _aio.create_task(_store(
+                    strategy=config.name,
+                    symbol=symbol,
+                    signal=pos.side.upper(),
+                    pnl=pnl_on_margin,
+                    regime="unknown",
+                    params=config.params,
+                    price=fill_price,
+                ))
+            except Exception:
+                pass
+
             order_result = PaperOrderResult(
                 success=True,
                 oid=self._trade_counter,
