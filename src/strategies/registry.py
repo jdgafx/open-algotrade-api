@@ -102,6 +102,7 @@ def _register_all():
     from .rsi_vwap_strategy import RSIVWAPStrategy
     from .solana_sniper_strategy import SolanaSniperStrategy
     from .liquidation_dip_strategy import LiquidationDipStrategy
+    from .liquidation_adx_strategy import LiquidationAdxStrategy
     from .closed_market_overnight_strategy import ClosedMarketOvernightStrategy
 
     # ═══════════════════════════════════════════════════════════════════
@@ -491,6 +492,24 @@ def _register_all():
             "time_limit_hours": 24,
             "min_hold_bars": 3, "cooldown_seconds": 120, "max_trades_per_hour": 5,
             "min_signal_strength": 0.60,
+        },
+        category="liquidation", risk_level="high",
+    )
+    register_strategy(
+        "liquidation_adx", LiquidationAdxStrategy, StrategyTier.A,
+        "MoonDev liquidation-triggered ADX+RSI divergence (494% return, Sharpe 2.81, DD 6.67%)",
+        "BTC", "1h",
+        {
+            "adx_period": 14,
+            "adx_threshold": 25.0,
+            "exit_threshold": 18.0,
+            "rsi_period": 14,
+            "divergence_lookback": 8,
+            "vol_spike_mult": 2.5,
+            "vol_lookback": 20,
+            "max_arm_bars": 6,
+            "min_hold_bars": 2, "cooldown_seconds": 300, "max_trades_per_hour": 3,
+            "min_signal_strength": 0.55,
         },
         category="liquidation", risk_level="high",
     )
