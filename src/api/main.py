@@ -343,9 +343,9 @@ async def lifespan(app: FastAPI):
     # ── BTC Winner High-Frequency + Leverage Boost (applied each startup) ──
     # conspop-btc: +$45.92 historical, vwap-btc: +$27.69, rsi-btc: +$4.22
     _BTC_WINNERS = {
-        "conspop-btc": {"leverage": 5, "size_usd": 200, "cooldown_seconds": 120, "max_trades_per_hour": 6},
-        "vwap-btc":    {"leverage": 5, "size_usd": 150, "cooldown_seconds": 120, "max_trades_per_hour": 6},
-        "rsi-btc":     {"leverage": 5, "size_usd": 150, "cooldown_seconds": 300, "max_trades_per_hour": 4},
+        "conspop-btc": {"leverage": 25, "size_usd": 200, "cooldown_seconds": 120, "max_trades_per_hour": 6},
+        "vwap-btc":    {"leverage": 20, "size_usd": 150, "cooldown_seconds": 120, "max_trades_per_hour": 6},
+        "rsi-btc":     {"leverage": 15, "size_usd": 150, "cooldown_seconds": 300, "max_trades_per_hour": 4},
     }
     try:
         from .database import SessionLocal as _BoostSL
@@ -434,19 +434,16 @@ async def lifespan(app: FastAPI):
         )
 
     # ── Compounding controller: reinvest 90% of profits every 30 min ──
+    _COMPOUND_BASE = 100.0          # treat $100 as starting capital — everything above is investable
+    _COMPOUND_RESERVE_PCT = 0.10    # keep 10% of total balance as reserve
     _INITIAL_BALANCE = float(os.getenv("PAPER_BALANCE", "10000"))
-    _COMPOUND_RESERVE_PCT = 0.10  # keep 10% of profits as reserve
 
     async def _compound_job():
         try:
             if not paper_mode or executor is None:
                 return
             balance = executor.balance
-            profits = balance - _INITIAL_BALANCE
-            if profits <= 0:
-                logger.debug("Compounder: no profits yet (balance=%.2f)", balance)
-                return
-            investable = _INITIAL_BALANCE + profits * (1.0 - _COMPOUND_RESERVE_PCT)
+            investable = max(_COMPOUND_BASE, balance * (1.0 - _COMPOUND_RESERVE_PCT))
             from .database import SessionLocal as _CSL
             _cdb = _CSL()
             try:
@@ -465,19 +462,20 @@ async def lifespan(app: FastAPI):
                             _cstrat.config.size_usd = new_size
                 _cdb.commit()
                 logger.info(
-                    "Compounder: balance=$%.2f | profits=$%.2f | investable=$%.2f"
-                    " | size/strategy=$%.2f | n=%d",
-                    balance, profits, investable, new_size, n,
+                    "Compounder: balance=$%.2f | investable=$%.2f | size/strategy=$%.2f | n=%d",
+                    balance, investable, new_size, n,
                 )
             finally:
                 _cdb.close()
         except Exception as _ce:
             logger.error("Compound job error: %s", _ce)
 
+    from datetime import datetime as _dt
     _scheduler.add_job(
         _compound_job, "interval", minutes=30,
         id="compounder",
         replace_existing=True,
+        next_run_time=_dt.now(),
     )
 
     _scheduler.start()
@@ -858,18 +856,18 @@ def get_compound_status(request: Request):
     _paper = getattr(request.app.state, "paper_mode", False)
     initial = getattr(request.app.state, "compound_initial_balance", float(os.getenv("PAPER_BALANCE", "10000")))
     reserve_pct = getattr(request.app.state, "compound_reserve_pct", 0.10)
+    compound_base = 100.0
 
     balance = _exec.balance if (_paper and _exec is not None) else initial
-    profits = max(0.0, balance - initial)
-    investable = initial + profits * (1.0 - reserve_pct)
+    investable = max(compound_base, balance * (1.0 - reserve_pct))
 
     return {
         "balance": round(balance, 2),
         "initial_balance": initial,
-        "profits": round(profits, 2),
+        "compound_base": compound_base,
         "reserve_pct": round(reserve_pct * 100, 1),
         "investable": round(investable, 2),
-        "compound_active": profits > 0,
+        "compound_active": True,
         "rebalance_interval_minutes": 30,
     }
 
