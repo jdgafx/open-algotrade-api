@@ -46,71 +46,97 @@ _ALL_STRATEGIES = [
     "nadaraya_watson", "supply_demand_zone", "grid_fibonacci",
     "vwap_bot", "funding_arb", "market_maker", "pivot_lines",
     "correlation", "quarter_theory", "solana_sniper", "liquidation_dip",
+    # Strategies added after initial map — keep in sync with registry
+    "liquidation_adx", "liquidation_momentum", "liquidation_revisit",
+    "flip_flop", "gap_up_momentum", "capitulation_reversal",
+    "timeinality", "consecutive_down", "day_of_week_bias",
+    "donchian_channel", "closed_market_overnight",
 ]
 
 REGIME_STRATEGY_MAP = {
     MarketRegime.TRENDING_UP: [
         # Trend-following thrives here
         "turtle", "sma_crossover", "macd", "ichimoku", "adx",
-        "ema_bollinger", "vwma", "sma_adx_bb_vol",
+        "ema_bollinger", "vwma", "sma_adx_bb_vol", "donchian_channel",
         # Momentum + volatility plays
         "consolidation_pop", "elliott_wave", "elliott_pivot",
-        # Mean-reversion still fires at extremes within a trend
+        "gap_up_momentum", "consecutive_down",
+        # Liquidation-event strategies — fire on vol spikes within trends
+        "liquidation_adx", "liquidation_momentum", "liquidation_revisit", "liquidation_dip",
+        # Reversal/mean-reversion at trend extremes
         "mean_reversion", "rsi", "bollinger", "rsi_vwap",
         "nadaraya_watson", "supply_demand_zone", "grid_fibonacci",
-        # Market-neutral always allowed
+        "flip_flop", "capitulation_reversal",
+        # Market-neutral / time-based (always allowed)
         "vwap_bot", "funding_arb", "market_maker", "pivot_lines",
-        "correlation", "quarter_theory", "liquidation_dip",
+        "correlation", "quarter_theory", "timeinality",
+        "day_of_week_bias", "closed_market_overnight",
     ],
     MarketRegime.TRENDING_DOWN: [
         # Trend-following works short
         "turtle", "sma_crossover", "macd", "ichimoku", "adx",
-        "ema_bollinger", "vwma", "sma_adx_bb_vol",
+        "ema_bollinger", "vwma", "sma_adx_bb_vol", "donchian_channel",
         # Momentum plays
         "consolidation_pop", "elliott_wave", "elliott_pivot",
-        # Mean-reversion at extremes
+        "consecutive_down",
+        # Liquidation cascades common in down-trends
+        "liquidation_adx", "liquidation_momentum", "liquidation_revisit", "liquidation_dip",
+        # Reversal / capitulation catching
         "mean_reversion", "rsi", "bollinger", "rsi_vwap",
         "nadaraya_watson", "supply_demand_zone", "grid_fibonacci",
-        # Market-neutral always allowed
+        "flip_flop", "capitulation_reversal",
+        # Market-neutral / time-based (always allowed)
         "vwap_bot", "funding_arb", "market_maker", "pivot_lines",
-        "correlation", "quarter_theory", "liquidation_dip",
+        "correlation", "quarter_theory", "timeinality",
+        "day_of_week_bias", "closed_market_overnight",
     ],
     MarketRegime.MEAN_REVERTING: [
         # Mean reversion strategies thrive here
         "mean_reversion", "rsi", "bollinger", "rsi_vwap",
         "nadaraya_watson", "supply_demand_zone", "grid_fibonacci",
-        # Consolidation pop: tight ranges ARE mean-reverting conditions — buy the dip, sell the rip
-        "consolidation_pop",
-        # Trend-following still useful (catches regime breakouts)
+        "flip_flop", "capitulation_reversal",
+        # Consolidation pop: tight ranges ARE mean-reverting conditions
+        "consolidation_pop", "consecutive_down",
+        # Trend-following catches regime breakouts
         "turtle", "sma_crossover", "macd", "ichimoku", "adx",
-        "ema_bollinger", "vwma", "sma_adx_bb_vol",
-        # Market-neutral always allowed
+        "ema_bollinger", "vwma", "sma_adx_bb_vol", "donchian_channel",
+        # Liquidation dips in ranging markets are mean-reversion opportunities
+        "liquidation_adx", "liquidation_dip", "liquidation_revisit",
+        # Market-neutral / time-based (always allowed)
         "vwap_bot", "funding_arb", "market_maker", "pivot_lines",
-        "correlation", "quarter_theory",
+        "correlation", "quarter_theory", "timeinality",
+        "day_of_week_bias", "closed_market_overnight",
     ],
     MarketRegime.HIGH_VOLATILITY: [
         # Volatility strategies
         "consolidation_pop", "grid_fibonacci",
         "elliott_wave", "elliott_pivot",
-        # Trend-following also works in vol (big directional moves)
+        # Liquidation events cluster in high-vol — prime territory
+        "liquidation_adx", "liquidation_momentum", "liquidation_revisit", "liquidation_dip",
+        # Gap and momentum
+        "gap_up_momentum", "consecutive_down", "capitulation_reversal",
+        # Trend-following works in vol (big directional moves)
         "turtle", "sma_crossover", "macd", "ichimoku", "adx",
-        "ema_bollinger", "vwma", "sma_adx_bb_vol",
+        "ema_bollinger", "vwma", "sma_adx_bb_vol", "donchian_channel",
         # RSI/mean-rev at extremes during vol spikes
         "mean_reversion", "rsi", "bollinger", "rsi_vwap",
-        "nadaraya_watson", "quarter_theory",
-        # Market-neutral always allowed
+        "nadaraya_watson", "quarter_theory", "flip_flop",
+        # Market-neutral / time-based (always allowed)
         "vwap_bot", "funding_arb", "market_maker",
-        "correlation", "pivot_lines", "liquidation_dip",
+        "correlation", "pivot_lines", "timeinality",
+        "day_of_week_bias", "closed_market_overnight",
     ],
     MarketRegime.LOW_VOLATILITY: [
         # Mean reversion + range strategies
         "mean_reversion", "rsi", "bollinger", "rsi_vwap",
         "nadaraya_watson", "supply_demand_zone", "grid_fibonacci",
+        "flip_flop", "capitulation_reversal",
         # Consolidation pop: compressed low-vol ranges precede the breakout it trades
-        "consolidation_pop",
-        # Market-neutral always allowed
+        "consolidation_pop", "consecutive_down",
+        # Market-neutral / time-based (always allowed)
         "vwap_bot", "funding_arb", "market_maker", "pivot_lines",
-        "correlation", "quarter_theory",
+        "correlation", "quarter_theory", "timeinality",
+        "day_of_week_bias", "closed_market_overnight",
     ],
     MarketRegime.UNKNOWN: _ALL_STRATEGIES,  # Unknown regime = allow all
 }
