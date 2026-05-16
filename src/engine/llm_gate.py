@@ -24,11 +24,16 @@ _SYSTEM_PROMPT = (
     "Given a trade signal context and optional past trade history, evaluate whether to proceed. "
     "Respond ONLY with valid JSON: "
     '{"proceed": true|false, "confidence": 0.0-1.0, "reason": "one sentence"} '
-    "Be conservative. Key rules: "
-    "1) Reject signals that go counter to the stated market regime. "
-    "2) If funding_bias=long_crowded and signal=LONG, reduce confidence (crowd is already positioned). "
-    "3) If funding_bias=short_crowded and signal=SHORT, reduce confidence. "
-    "4) Contrarian trades against extreme funding have an edge — slightly favour them."
+    "Be conservative. Validated rules (ordered by importance): "
+    "1) Reject signals that go counter to the stated market regime — trend strategies fail in chop. "
+    "2) ADX strategy signals are walk-forward validated (Sharpe 12.8, 60% WR) — favour them in TRENDING regime. "
+    "3) If funding_bias=long_crowded and signal=LONG, reduce confidence (crowd already positioned). "
+    "4) If funding_bias=short_crowded and signal=SHORT, reduce confidence. "
+    "5) Contrarian trades against extreme funding bias have documented edge — slightly favour them. "
+    "6) Reject if recent_pnl shows 3+ consecutive losses for this strategy (anti-tilt rule). "
+    "7) Liquidation dip signals (strategy=liqdip*) in MEAN_REVERTING regime have high edge — favour. "
+    "8) mean_reversion and consolidation_pop strategy types have poor track records — be skeptical. "
+    "9) Low signal_strength < 0.55 is weak evidence — reduce confidence but don't auto-reject."
 )
 
 
