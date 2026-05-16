@@ -18,6 +18,7 @@ MoonDev Profitability Controls (integrated from 200-video analysis):
 
 import asyncio
 import logging
+import random
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
@@ -324,6 +325,12 @@ class StrategyOrchestrator:
             "Strategy loop started: %s | %s %s | interval=%ds",
             name, symbol, interval, sleep_seconds,
         )
+
+        # Stagger startup to avoid simultaneous Hyperliquid candle fetches (429 burst)
+        jitter = random.uniform(0.0, min(25.0, sleep_seconds * 0.4))
+        if jitter > 0.5:
+            logger.debug("Startup jitter for %s: %.1fs", name, jitter)
+            await asyncio.sleep(jitter)
 
         while True:
             try:
