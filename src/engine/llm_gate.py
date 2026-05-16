@@ -5,6 +5,7 @@ Uses OpenRouter (cheap inference) with DeepSeek as default model.
 Falls back to Anthropic Haiku if OPENROUTER_API_KEY is absent.
 Enriches prompts with recalled Supermemory trade history.
 """
+import asyncio
 import json
 import logging
 import os
@@ -18,6 +19,8 @@ logger = logging.getLogger(__name__)
 _OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 _DEFAULT_MODEL = "deepseek/deepseek-v4-flash:free"  # free tier: $0/M in+out, 1M ctx, 284B MoE
 _FALLBACK_MODEL = "google/gemini-2.5-flash-lite"  # fast cheap fallback on timeout
+_SUPERMEMORY_SEARCH_URL = "https://api.supermemory.ai/v3/search"
+_SUPERMEMORY_ADD_URL = "https://api.supermemory.ai/v3/documents"
 
 _SYSTEM_PROMPT = (
     "You are a crypto trading signal evaluator for a Hyperliquid algorithmic trading system. "
@@ -104,6 +107,57 @@ async def _call_anthropic_fallback(prompt: str) -> dict:
     return json.loads(response.content[0].text)
 
 
+async def _recall_similar_trades(strategy: str, signal: str, symbol: str) -> str:
+    """Search supermemory for past trades matching this strategy+signal+symbol combo."""
+    api_key = os.getenv("SUPERMEMORY_API_KEY", "")
+    if not api_key:
+        return ""
+    query = f"strategy={strategy} signal={signal} symbol={symbol} trade outcome"
+    try:
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            r = await client.post(
+                _SUPERMEMORY_SEARCH_URL,
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json={"q": query, "limit": 3},
+            )
+            if r.status_code != 200:
+                return ""
+            results = r.json().get("results", [])
+            if not results:
+                return ""
+            snippets = [res.get("content", "")[:300] for res in results if res.get("content")]
+            return "\n---\n".join(snippets[:3])
+    except Exception as e:
+        logger.debug("Supermemory recall skipped: %s", e)
+        return ""
+
+
+async def _save_trade_outcome(strategy: str, signal: str, symbol: str, proceed: bool, pnl: float) -> None:
+    """Persist a completed gate evaluation + outcome to supermemory for future recall."""
+    api_key = os.getenv("SUPERMEMORY_API_KEY", "")
+    if not api_key:
+        return
+    outcome_str = f"+${pnl:.2f}" if pnl >= 0 else f"-${abs(pnl):.2f}"
+    gate_str = "ALLOWED" if proceed else "BLOCKED"
+    content = (
+        f"LLM gate trade outcome: strategy={strategy} signal={signal} symbol={symbol} "
+        f"gate={gate_str} pnl={outcome_str}. "
+        f"{'Gate was correct (blocked a loser).' if not proceed and pnl < 0 else ''}"
+        f"{'Gate was wrong (blocked a winner).' if not proceed and pnl > 0 else ''}"
+        f"{'Trade allowed, profitable.' if proceed and pnl > 0 else ''}"
+        f"{'Trade allowed, was a loss.' if proceed and pnl < 0 else ''}"
+    )
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            await client.post(
+                _SUPERMEMORY_ADD_URL,
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json={"content": content, "metadata": {"tags": ["open-algotrade-3", "llm-gate", strategy]}},
+            )
+    except Exception as e:
+        logger.debug("Supermemory save skipped: %s", e)
+
+
 class LLMGate:
     MODE_OFF = "off"
     MODE_SOFT = "soft"
@@ -117,6 +171,12 @@ class LLMGate:
     async def evaluate(self, context: TradeContext) -> GateVerdict:
         if self._mode == self.MODE_OFF or context.signal_strength < 0.5:
             return GateVerdict(proceed=True, confidence=1.0, reason="gate_off")
+
+        # Recall similar past trades if not already provided
+        if not context.memory_context:
+            context.memory_context = await _recall_similar_trades(
+                context.strategy, context.signal, context.symbol
+            )
 
         funding_str = ""
         if context.funding_rate is not None:
@@ -160,10 +220,18 @@ class LLMGate:
         return GateVerdict(proceed=True, confidence=confidence, reason=f"soft:{reason}")
 
     def record_outcome(self, strategy: str, signal: str, pnl: float) -> None:
+        matched_proceed = True
         for rec in reversed(self._evals):
             if rec.strategy == strategy and rec.signal == signal and rec.outcome is None:
                 rec.outcome = pnl
+                matched_proceed = rec.proceed
                 break
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                loop.create_task(_save_trade_outcome(strategy, signal, "", matched_proceed, pnl))
+        except Exception:
+            pass
 
     def get_stats(self) -> dict:
         total = len(self._evals)
