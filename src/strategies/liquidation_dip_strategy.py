@@ -121,6 +121,36 @@ class LiquidationDipStrategy(BaseStrategy):
         if price > self._bounce_high:
             self._bounce_high = price
 
+        # ── Proximity Entry (MoonDev Edge A) ──
+        # Fire when price approaches within proximity_pct of liq level on second dip.
+        # MoonDev: entering 1-2% from a short liquidation cluster → 49%/week documented.
+        proximity_pct = p.get("proximity_pct", 0.02)
+        if not self._ready_for_dip:
+            prox_upper = self._liq_low_price * (1.0 + proximity_pct)
+            prox_lower = self._liq_low_price * 0.99  # must stay above liq level to avoid catching the cascade itself
+            if prox_lower <= price <= prox_upper:
+                prox_ratio = (prox_upper - price) / max(prox_upper - prox_lower, 1e-9)
+                strength = 0.55 + min(prox_ratio, 1.0) * 0.20
+                entry_price = price
+                liq_level = self._liq_low_price
+                logger.info(
+                    "[LIQ DIP] PROXIMITY ENTRY | $%.2f within %.0f%% of liq level $%.2f | strength=%.2f",
+                    price, proximity_pct * 100, liq_level, strength,
+                )
+                self._reset_state()
+                return Signal(
+                    signal_type=SignalType.LONG,
+                    symbol=self.config.symbol,
+                    price=entry_price,
+                    size_usd=self.config.size_usd,
+                    strength=strength,
+                    reason=(
+                        f"Liq Proximity: ${price:.2f} within {proximity_pct*100:.0f}% "
+                        f"of liq level ${liq_level:.2f}"
+                    ),
+                    metadata={"liq_level": liq_level, "mode": "proximity"},
+                )
+
         # Step 3: Watch for the REVISIT (second dip back to liq level)
         revisit_zone = self._liq_low_price * (1 + dip_tolerance_pct)
 

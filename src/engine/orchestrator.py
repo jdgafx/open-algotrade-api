@@ -412,15 +412,20 @@ class StrategyOrchestrator:
                                 await asyncio.sleep(sleep_seconds)
                                 continue
 
-                        # ── Gate 4.4: Liquidation Chaos Gate ──
-                        # MoonDev: >$500K liquidated in 10 min = skip all entries
-                        if self.liquidation_tracker:
+                        # ── Gate 4.4: Chaos Gate (volatility-spike proxy) ──
+                        # MoonDev: skip entries during liquidation cascades. Proxy:
+                        # current candle range > 3× 20-period avg = cascade signature.
+                        # (No live liquidation event feed — OHLCV spike is always available.)
+                        if len(data) >= 20:
                             try:
-                                liq_10m = self.liquidation_tracker.get_liquidation_volume(10)
-                                if liq_10m > 500_000:
+                                ranges = data["high"] - data["low"]
+                                avg_range = float(ranges.iloc[:-1].tail(20).mean())
+                                curr_range = float(ranges.iloc[-1])
+                                if avg_range > 0 and curr_range > 3.0 * avg_range:
                                     logger.info(
-                                        "CHAOS GATE BLOCKED | %s | %s | liq_10m=$%.0f",
-                                        name, signal.signal_type.value, liq_10m,
+                                        "CHAOS GATE BLOCKED | %s | %s | range=%.5f avg=%.5f (%.1fx spike)",
+                                        name, signal.signal_type.value, curr_range, avg_range,
+                                        curr_range / avg_range,
                                     )
                                     await asyncio.sleep(sleep_seconds)
                                     continue
