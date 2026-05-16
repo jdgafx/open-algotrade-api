@@ -491,30 +491,39 @@ async def lifespan(app: FastAPI):
                         _cinst.total_pnl = round(_s["pnl"], 4)
 
                 # Dynamic winner detection from live stats
-                _STATIC_WINNERS = {'vwap-btc', 'rsi-btc', 'pivot-btc', 'turtle-btc'}
-                _WINNER_MIN_TRADES = 1  # lowered from 3: any profitable closed trade qualifies
+                _STATIC_WINNERS = {
+                    'vwap-btc', 'rsi-btc', 'pivot-btc', 'turtle-btc',
+                    'adx-eth', 'macd-btc', 'macd-sol',
+                }
+                _WINNER_MIN_TRADES = 1
                 dynamic_winners = {
                     r.name for r in running
                     if _live_stats.get(r.name, {}).get("pnl", 0.0) > 0
                     and _live_stats.get(r.name, {}).get("trades", 0) >= _WINNER_MIN_TRADES
                 }
                 _WINNER_SET = dynamic_winners if dynamic_winners else _STATIC_WINNERS
-                total_weight = sum(2 if r.name in _WINNER_SET else 1 for r in running)
-                base_unit = investable / max(total_weight, 1)
+
+                # Winners-first: concentrate investable on proven winners,
+                # non-winners stay at $100 for signal discovery.
+                _winners_running = [r for r in running if r.name in _WINNER_SET]
+                _winner_unit = min(
+                    round(investable / max(len(_winners_running), 1), 2), 1500.0
+                ) if _winners_running else 100.0
+                _OTHER_SIZE = 100.0
+
                 for _cinst in running:
-                    weight = 2 if _cinst.name in _WINNER_SET else 1
-                    new_size = min(round(base_unit * weight, 2), 1500.0)
+                    new_size = _winner_unit if _cinst.name in _WINNER_SET else _OTHER_SIZE
                     _cinst.size_usd = new_size
                     if orchestrator:
                         _cstrat = orchestrator.get_strategy(_cinst.name)
                         if _cstrat:
                             _cstrat.config.size_usd = new_size
                 _cdb.commit()
-                winner_size = min(round(base_unit * 2, 2), 1500.0)
-                other_size = min(round(base_unit, 2), 1500.0)
+                winner_size = _winner_unit
+                other_size = _OTHER_SIZE
                 logger.info(
-                    "Compounder: balance=$%.2f | investable=$%.2f | winners=$%.2f | others=$%.2f | n=%d | winner_set=%s",
-                    balance, investable, winner_size, other_size, n, sorted(_WINNER_SET),
+                    "Compounder: balance=$%.2f | investable=$%.2f | winners=$%.2f | others=$%.2f | n_winners=%d/%d | winner_set=%s",
+                    balance, investable, winner_size, other_size, len(_winners_running), n, sorted(_WINNER_SET),
                 )
             finally:
                 _cdb.close()
