@@ -346,12 +346,17 @@ async def lifespan(app: FastAPI):
     if paper_mode and executor is not None:
         asyncio.create_task(_paper_state_saver())
 
-    # ── BTC Winner High-Frequency + Leverage Boost (applied each startup) ──
-    # vwap-btc: +$3.12 proven winner | rsi-btc: +$3.09 proven winner
-    # conspop-btc removed: stopped strategy, boost was dead code
+    # ── Winner High-Frequency + Leverage Boost (applied each startup) ──
+    # BTC: vwap +$3.12 | rsi +$3.09 | macd +$1.89 | pivot +$9.75
+    # ETH/SOL: adx-eth +$15.15/trade (best efficiency) | macd-sol +$8.47/trade
     _BTC_WINNERS = {
         "vwap-btc":    {"leverage": 20, "size_usd": 500, "cooldown_seconds": 120, "max_trades_per_hour": 6},
         "rsi-btc":     {"leverage": 15, "size_usd": 500, "cooldown_seconds": 300, "max_trades_per_hour": 4},
+        "macd-btc":    {"leverage": 10, "size_usd": 500, "cooldown_seconds": 240, "max_trades_per_hour": 4},
+        "pivot-btc":   {"leverage": 10, "size_usd": 500, "cooldown_seconds": 180, "max_trades_per_hour": 5},
+        "adx-eth":     {"leverage": 12, "size_usd": 500, "cooldown_seconds": 180, "max_trades_per_hour": 5},
+        "macd-sol":    {"leverage": 8,  "size_usd": 500, "cooldown_seconds": 240, "max_trades_per_hour": 4},
+        "turtle-btc":  {"leverage": 8,  "size_usd": 500, "cooldown_seconds": 300, "max_trades_per_hour": 3},
     }
     try:
         from .database import SessionLocal as _BoostSL
@@ -487,7 +492,7 @@ async def lifespan(app: FastAPI):
 
                 # Dynamic winner detection from live stats
                 _STATIC_WINNERS = {'vwap-btc', 'rsi-btc', 'pivot-btc', 'turtle-btc'}
-                _WINNER_MIN_TRADES = 3
+                _WINNER_MIN_TRADES = 1  # lowered from 3: any profitable closed trade qualifies
                 dynamic_winners = {
                     r.name for r in running
                     if _live_stats.get(r.name, {}).get("pnl", 0.0) > 0
@@ -518,7 +523,7 @@ async def lifespan(app: FastAPI):
 
     from datetime import datetime as _dt
     _scheduler.add_job(
-        _compound_job, "interval", minutes=30,
+        _compound_job, "interval", minutes=15,
         id="compounder",
         replace_existing=True,
         next_run_time=_dt.now(),
@@ -914,7 +919,7 @@ def get_compound_status(request: Request):
         "reserve_pct": round(reserve_pct * 100, 1),
         "investable": round(investable, 2),
         "compound_active": True,
-        "rebalance_interval_minutes": 30,
+        "rebalance_interval_minutes": 15,
     }
 
 
