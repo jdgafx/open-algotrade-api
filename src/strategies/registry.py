@@ -72,6 +72,7 @@ def list_strategies() -> List[dict]:
 
 def _register_all():
     """Import and register all built-in strategies."""
+    from .flip_flop_strategy import FlipFlopStrategy
     from .turtle_hl_strategy import TurtleHLStrategy
     from .bollinger_strategy import BollingerStrategy
     from .sdz_strategy import SupplyDemandZoneStrategy
@@ -463,6 +464,17 @@ def _register_all():
             "min_signal_strength": 0.65,
         },
         category="momentum", risk_level="high",
+    )
+    register_strategy(
+        "flip_flop", FlipFlopStrategy, StrategyTier.A,
+        "SuperTrend flip-flop: always-in-market long↔short on trend breaks (529% return, WR 81%, Sortino 7.7)",
+        "BTC", "1h",
+        {
+            "atr_period": 10, "multiplier": 3.0,
+            "cooldown_seconds": 0, "max_trades_per_hour": 24,
+            "min_signal_strength": 0.80,
+        },
+        category="trend", risk_level="medium",
     )
     register_strategy(
         "liquidation_dip", LiquidationDipStrategy, StrategyTier.A,
