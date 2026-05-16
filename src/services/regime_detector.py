@@ -79,6 +79,8 @@ REGIME_STRATEGY_MAP = {
         # Mean reversion strategies thrive here
         "mean_reversion", "rsi", "bollinger", "rsi_vwap",
         "nadaraya_watson", "supply_demand_zone", "grid_fibonacci",
+        # Consolidation pop: tight ranges ARE mean-reverting conditions — buy the dip, sell the rip
+        "consolidation_pop",
         # Trend-following still useful (catches regime breakouts)
         "turtle", "sma_crossover", "macd", "ichimoku", "adx",
         "ema_bollinger", "vwma", "sma_adx_bb_vol",
@@ -104,6 +106,8 @@ REGIME_STRATEGY_MAP = {
         # Mean reversion + range strategies
         "mean_reversion", "rsi", "bollinger", "rsi_vwap",
         "nadaraya_watson", "supply_demand_zone", "grid_fibonacci",
+        # Consolidation pop: compressed low-vol ranges precede the breakout it trades
+        "consolidation_pop",
         # Market-neutral always allowed
         "vwap_bot", "funding_arb", "market_maker", "pivot_lines",
         "correlation", "quarter_theory",
