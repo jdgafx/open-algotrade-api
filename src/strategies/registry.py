@@ -105,6 +105,7 @@ def _register_all():
     from .liquidation_adx_strategy import LiquidationAdxStrategy
     from .liquidation_momentum_strategy import LiquidationMomentumStrategy
     from .closed_market_overnight_strategy import ClosedMarketOvernightStrategy
+    from .timeinality_strategy import TimeinailityStrategy
 
     # ═══════════════════════════════════════════════════════════════════
     # TIER A — Battle-tested HL native strategies
@@ -529,6 +530,22 @@ def _register_all():
             "min_signal_strength": 0.5,
         },
         category="liquidation", risk_level="high",
+    )
+    register_strategy(
+        "timeinality", TimeinailityStrategy, StrategyTier.A,
+        "MoonDev Timeinality — short-only time-of-day/day-of-week bias (257% return, 71% WR, DD 23%)",
+        "SUI", "1h",
+        {
+            "bear_hours": [2, 3, 4, 5, 6, 14, 15],
+            "bear_days": [0, 6],
+            "require_bearish_candle": True,
+            "take_profit_pct": 1.5,
+            "stop_loss_pct": 0.8,
+            "hold_cap_bars": 4,
+            "min_hold_bars": 1, "cooldown_seconds": 300, "max_trades_per_hour": 2,
+            "min_signal_strength": 0.55,
+        },
+        category="time_bias", risk_level="medium",
     )
 
 
