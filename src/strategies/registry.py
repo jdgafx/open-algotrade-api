@@ -107,6 +107,7 @@ def _register_all():
     from .closed_market_overnight_strategy import ClosedMarketOvernightStrategy
     from .timeinality_strategy import TimeinailityStrategy
     from .capitulation_reversal_strategy import CapitulationReversalStrategy
+    from .day_of_week_strategy import DayOfWeekBiasStrategy
 
     # ═══════════════════════════════════════════════════════════════════
     # TIER A — Battle-tested HL native strategies
@@ -567,6 +568,24 @@ def _register_all():
             "min_signal_strength": 0.60,
         },
         category="mean_reversion", risk_level="medium",
+    )
+    register_strategy(
+        "day_of_week_bias", DayOfWeekBiasStrategy, StrategyTier.A,
+        "MoonDev day-of-week bias — LONG only on Wed/Thu (83% WR Thursdays, Sharpe 3.1)",
+        "BTC", "1h",
+        {
+            "trade_days": [2, 3],
+            "rsi_period": 14,
+            "rsi_min": 45,
+            "sma_period": 20,
+            "require_bullish_candle": True,
+            "take_profit_pct": 2.0,
+            "stop_loss_pct": 1.5,
+            "hold_cap_bars": 6,
+            "min_hold_bars": 1, "cooldown_seconds": 300, "max_trades_per_hour": 1,
+            "min_signal_strength": 0.55,
+        },
+        category="time_bias", risk_level="low",
     )
 
 
