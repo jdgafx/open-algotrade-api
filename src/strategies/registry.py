@@ -103,6 +103,7 @@ def _register_all():
     from .solana_sniper_strategy import SolanaSniperStrategy
     from .liquidation_dip_strategy import LiquidationDipStrategy
     from .liquidation_adx_strategy import LiquidationAdxStrategy
+    from .liquidation_momentum_strategy import LiquidationMomentumStrategy
     from .closed_market_overnight_strategy import ClosedMarketOvernightStrategy
 
     # ═══════════════════════════════════════════════════════════════════
@@ -510,6 +511,22 @@ def _register_all():
             "max_arm_bars": 6,
             "min_hold_bars": 2, "cooldown_seconds": 300, "max_trades_per_hour": 3,
             "min_signal_strength": 0.55,
+        },
+        category="liquidation", risk_level="high",
+    )
+    register_strategy(
+        "liquidation_momentum", LiquidationMomentumStrategy, StrategyTier.A,
+        "MoonDev pure liquidation momentum — ride the cascade direction (500% opt, Sortino 5.8, DD 12%)",
+        "BTC", "15m",
+        {
+            "vol_spike_mult": 2.5,
+            "vol_lookback": 20,
+            "momentum_candle_pct": 0.003,
+            "hold_cap_bars": 8,
+            "take_profit_pct": 2.0,
+            "stop_loss_pct": 1.2,
+            "min_hold_bars": 1, "cooldown_seconds": 120, "max_trades_per_hour": 4,
+            "min_signal_strength": 0.5,
         },
         category="liquidation", risk_level="high",
     )
