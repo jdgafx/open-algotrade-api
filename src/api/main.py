@@ -156,18 +156,21 @@ async def lifespan(app: FastAPI):
     try:
         from src.engine.orchestrator import StrategyOrchestrator
         from src.services.liquidation_guard import LiquidationGuard
+        from src.services.hlp_gate import HLPSentimentGate
         if client and executor:
             liquidation_guard = LiquidationGuard()
+            hlp_gate = HLPSentimentGate()
             orchestrator = StrategyOrchestrator(
                 client=client,
                 executor=executor,
                 regime_detector=regime_detector,
                 liquidation_guard=liquidation_guard,
+                hlp_gate=hlp_gate,
                 max_global_trades_per_hour=100,
                 daily_loss_limit_pct=2.0,
                 max_portfolio_exposure_pct=80.0,
             )
-            logger.info("StrategyOrchestrator initialized | mode=%s | regime_gate=ON | liq_guard=ON", trading_mode.upper())
+            logger.info("StrategyOrchestrator initialized | mode=%s | regime_gate=ON | liq_guard=ON | hlp_gate=ON", trading_mode.upper())
     except Exception as e:
         logger.warning("Could not initialize StrategyOrchestrator: %s", e)
 

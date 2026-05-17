@@ -25,6 +25,7 @@ from typing import Dict, List, Optional
 from src.engine.llm_gate import TradeContext, llm_gate
 from src.execution.hl_executor import HyperliquidVaultExecutor
 from src.lib.nice_funcs import HyperliquidClient
+from src.services.hlp_gate import HLPSentimentGate
 from src.services.liquidation_guard import LiquidationGuard
 from src.strategies.base_strategy import BaseStrategy, StrategyConfig, StrategyTier
 from src.strategies.registry import create_strategy, get_strategy_class
@@ -53,6 +54,7 @@ class StrategyOrchestrator:
         executor: HyperliquidVaultExecutor,
         regime_detector=None,
         liquidation_guard: Optional[LiquidationGuard] = None,
+        hlp_gate: Optional[HLPSentimentGate] = None,
         risk_controller=None,
         funding_monitor=None,
         liquidation_tracker=None,
@@ -65,6 +67,7 @@ class StrategyOrchestrator:
         self.executor = executor
         self.regime_detector = regime_detector
         self.liquidation_guard = liquidation_guard
+        self.hlp_gate = hlp_gate
         self.risk_controller = risk_controller
         self.funding_monitor = funding_monitor
         self.liquidation_tracker = liquidation_tracker
@@ -482,6 +485,23 @@ class StrategyOrchestrator:
                                 continue
                         except Exception as _llm_err:
                             logger.warning("LLM gate error (skipping gate): %s", _llm_err)
+
+                        # ── Gate 4.6: HLP Sentiment Gate ──
+                        # MoonDev Edge B: fade HLP when it has a concentrated losing position.
+                        if is_entry and self.hlp_gate:
+                            try:
+                                hlp_blocked, hlp_reason = await self.hlp_gate.should_block(
+                                    symbol, signal.signal_type.value == "long"
+                                )
+                                if hlp_blocked:
+                                    logger.info(
+                                        "HLP GATE BLOCKED | %s | %s | %s",
+                                        name, signal.signal_type.value, hlp_reason,
+                                    )
+                                    await asyncio.sleep(sleep_seconds)
+                                    continue
+                            except Exception as _hlp_err:
+                                logger.warning("HLP gate error (skipping): %s", _hlp_err)
 
                     # Execute the signal
                     result = await self.executor.execute_signal(signal, strategy)
