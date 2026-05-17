@@ -351,17 +351,17 @@ async def lifespan(app: FastAPI):
     # ETH/SOL live: adx-eth +$15.15/trade | macd-sol +$8.47/trade
     # MoonDev backtest: liqadx 494% Sharpe 2.81 | flip-flop 529% WR 81%
     _BTC_WINNERS = {
-        "vwap-btc":     {"leverage": 20, "size_usd": 500, "cooldown_seconds": 120, "max_trades_per_hour": 6},
-        "rsi-btc":      {"leverage": 15, "size_usd": 500, "cooldown_seconds": 300, "max_trades_per_hour": 4},
-        "macd-btc":     {"leverage": 10, "size_usd": 500, "cooldown_seconds": 240, "max_trades_per_hour": 4},
-        "pivot-btc":    {"leverage": 10, "size_usd": 500, "cooldown_seconds": 180, "max_trades_per_hour": 5},
-        "adx-eth":      {"leverage": 12, "size_usd": 500, "cooldown_seconds": 180, "max_trades_per_hour": 5},
-        "macd-sol":     {"leverage": 8,  "size_usd": 500, "cooldown_seconds": 240, "max_trades_per_hour": 4},
-        "turtle-btc":   {"leverage": 8,  "size_usd": 500, "cooldown_seconds": 300, "max_trades_per_hour": 3},
-        "liqadx-btc":   {"leverage": 10, "size_usd": 500, "cooldown_seconds": 300, "max_trades_per_hour": 3},
-        "liqadx-eth":   {"leverage": 10, "size_usd": 500, "cooldown_seconds": 300, "max_trades_per_hour": 3},
-        "flip-flop-btc":{"leverage": 10, "size_usd": 500, "cooldown_seconds": 300, "max_trades_per_hour": 3},
-        "flip-flop-eth":{"leverage": 8,  "size_usd": 500, "cooldown_seconds": 300, "max_trades_per_hour": 3},
+        "vwap-btc":     {"leverage": 3, "size_usd": 100, "cooldown_seconds": 120, "max_trades_per_hour": 6},
+        "rsi-btc":      {"leverage": 3, "size_usd": 100, "cooldown_seconds": 300, "max_trades_per_hour": 4},
+        "macd-btc":     {"leverage": 3, "size_usd": 100, "cooldown_seconds": 240, "max_trades_per_hour": 4},
+        "pivot-btc":    {"leverage": 3, "size_usd": 100, "cooldown_seconds": 180, "max_trades_per_hour": 5},
+        "adx-eth":      {"leverage": 3, "size_usd": 100, "cooldown_seconds": 180, "max_trades_per_hour": 5},
+        "macd-sol":     {"leverage": 3, "size_usd": 100, "cooldown_seconds": 240, "max_trades_per_hour": 4},
+        "turtle-btc":   {"leverage": 3, "size_usd": 100, "cooldown_seconds": 300, "max_trades_per_hour": 3},
+        "liqadx-btc":   {"leverage": 4, "size_usd": 100, "cooldown_seconds": 300, "max_trades_per_hour": 3},
+        "liqadx-eth":   {"leverage": 4, "size_usd": 100, "cooldown_seconds": 300, "max_trades_per_hour": 3},
+        "flip-flop-btc":{"leverage": 4, "size_usd": 100, "cooldown_seconds": 300, "max_trades_per_hour": 3},
+        "flip-flop-eth":{"leverage": 3, "size_usd": 100, "cooldown_seconds": 300, "max_trades_per_hour": 3},
     }
     try:
         from .database import SessionLocal as _BoostSL
