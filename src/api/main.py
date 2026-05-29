@@ -25,6 +25,7 @@ from .auth import get_password_hash, verify_password, create_access_token, requi
 # module just needs to be loaded so its Column definitions execute. Adding
 # `# noqa: F401` to keep linters quiet.
 from src.services import rbi_models  # noqa: F401
+from src.services.confidence_ladder import edge_confidence
 
 models.Base.metadata.create_all(bind=engine)
 
@@ -497,6 +498,9 @@ async def lifespan(app: FastAPI):
                         _cinst.total_trades = _s["trades"]
                         _cinst.winning_trades = _s["wins"]
                         _cinst.total_pnl = round(_s["pnl"], 4)
+                        if hasattr(executor, "_live_edge_stats"):
+                            _wr, _payoff, _n = executor._live_edge_stats(_cinst.name)
+                            _cinst.edge_confidence_score = edge_confidence(_n, _wr, _payoff)
 
                 # Dynamic winner detection from live stats
                 _STATIC_WINNERS = {

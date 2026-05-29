@@ -121,6 +121,8 @@ class StrategyInstance(Base):
     losing_trades = Column(Integer, default=0)
     total_pnl = Column(Float, default=0.0)
     max_drawdown = Column(Float, default=0.0)
+    # MIGRATION: ALTER TABLE strategy_instances ADD COLUMN edge_confidence_score FLOAT DEFAULT 0.0;
+    edge_confidence_score = Column(Float, default=0.0)
     iterations = Column(Integer, default=0)
     errors = Column(Integer, default=0)
     last_signal = Column(String, nullable=True)

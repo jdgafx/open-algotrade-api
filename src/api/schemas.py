@@ -191,6 +191,7 @@ class StrategyInstanceOut(BaseModel):
     losing_trades: int
     total_pnl: float
     max_drawdown: float
+    edge_confidence_score: float = 0.0
     iterations: int
     errors: int
     last_signal: Optional[str] = None
@@ -426,6 +427,7 @@ class StrategyPerformanceItem(BaseModel):
     max_drawdown: float
     avg_trade_pnl: float
     profit_factor: float
+    edge_confidence_score: float = 0.0
 
 
 class AggregatePerformanceResponse(BaseModel):
