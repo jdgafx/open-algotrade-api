@@ -404,35 +404,58 @@ class TestPaperExecutorOrphanFlush:
         assert len(executor._positions) == 0
 
 
+def _seed_full_confidence(executor, strategy_name, n=30, pnl=50.0):
+    """Seed n winning exit trades so the strategy reaches FULL tier (kelly_mult=1.0)."""
+    from src.execution.paper_executor import PaperTrade
+    for _ in range(n):
+        executor._trades.append(PaperTrade(
+            id=0, symbol="BTC", side="long", action="exit",
+            price=100.0, size=1.0, size_usd=50.0,
+            pnl=pnl, pnl_pct=pnl / 50.0 * 100,
+            reason="seed", strategy_name=strategy_name,
+        ))
+
+
 class TestCompoundSizing:
-    """Verify compound position sizing grows with balance."""
+    """Verify compound position sizing grows with balance.
+
+    Each test seeds >=30 winning trades for the strategy so the confidence
+    ladder enters FULL tier (kelly_mult=1.0).  This isolates compound_mult
+    behaviour from the observation-tier 10% floor applied to fresh strategies.
+    """
 
     @pytest.mark.asyncio
     async def test_compound_mult_at_par(self, executor, strategy):
-        """At initial balance, compound_mult=1.0 → size unchanged."""
+        """At initial balance, compound_mult=1.0 → size unchanged (after full confidence)."""
+        _seed_full_confidence(executor, "test-paper")
         signal = Signal(signal_type=SignalType.LONG, symbol="BTC", size_usd=1000.0, reason="test")
         result = await executor.execute_signal(signal, strategy)
         assert result.success is True
         pos = executor._positions["test-paper:BTC"]
-        # size_usd should equal 1000 * (10000/10000) = 1000
+        # observation tier: fresh strategy enters at 1x + 10% size until it earns confidence
+        # size_usd should equal 1000 * compound_mult(1.0) * kelly_mult(1.0) = 1000
         assert abs(pos.size_usd - 1000.0) < 1.0
 
     @pytest.mark.asyncio
     async def test_compound_mult_scales_with_profit(self, executor, strategy):
-        """When balance is 20% above initial, size should be 20% larger."""
+        """When balance is 20% above initial, size should be 20% larger (after full confidence)."""
+        _seed_full_confidence(executor, "test-paper")
         executor.balance = 12000.0  # 20% profit
         signal = Signal(signal_type=SignalType.LONG, symbol="BTC", size_usd=1000.0, reason="test")
         result = await executor.execute_signal(signal, strategy)
         assert result.success is True
         pos = executor._positions["test-paper:BTC"]
-        assert abs(pos.size_usd - 1200.0) < 1.0  # 1000 * 1.2
+        # observation tier: fresh strategy enters at 1x + 10% size until it earns confidence
+        assert abs(pos.size_usd - 1200.0) < 1.0  # 1000 * 1.2 * kelly_mult(1.0)
 
     @pytest.mark.asyncio
     async def test_compound_mult_capped_at_3x(self, executor, strategy):
-        """Compound mult caps at 3× regardless of balance growth."""
+        """Compound mult caps at 3× regardless of balance growth (after full confidence)."""
+        _seed_full_confidence(executor, "test-paper")
         executor.balance = 50000.0  # 5× initial — should cap at 3×
         signal = Signal(signal_type=SignalType.LONG, symbol="BTC", size_usd=1000.0, reason="test")
         result = await executor.execute_signal(signal, strategy)
         assert result.success is True
         pos = executor._positions["test-paper:BTC"]
-        assert abs(pos.size_usd - 3000.0) < 1.0  # capped at 3×
+        # observation tier: fresh strategy enters at 1x + 10% size until it earns confidence
+        assert abs(pos.size_usd - 3000.0) < 1.0  # capped at 3× * kelly_mult(1.0)

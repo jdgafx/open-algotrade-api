@@ -25,6 +25,8 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
+from src.services.confidence_ladder import ladder_leverage
+from src.services.kelly import half_kelly_fraction
 from src.strategies.base_strategy import (
     BaseStrategy,
     Signal,
@@ -283,6 +285,21 @@ class PaperTradingExecutor:
                 success=False, error=f"Unknown signal type: {signal.signal_type}"
             )
 
+    def _live_edge_stats(self, strategy_name: str) -> tuple[float, float, int]:
+        """Return (win_rate, payoff_ratio, n_trades) from this strategy's CLOSED trades."""
+        pnls = [t.pnl for t in self._trades
+                if t.strategy_name == strategy_name and t.action == "exit"]
+        n = len(pnls)
+        if n == 0:
+            return 0.0, 0.0, 0
+        wins = [p for p in pnls if p > 0]
+        losses = [-p for p in pnls if p < 0]
+        win_rate = len(wins) / n
+        avg_win = sum(wins) / len(wins) if wins else 0.0
+        avg_loss = sum(losses) / len(losses) if losses else 0.0
+        payoff = (avg_win / avg_loss) if avg_loss > 0 else (avg_win if avg_win > 0 else 0.0)
+        return win_rate, payoff, n
+
     async def _execute_entry(
         self, signal: Signal, strategy: BaseStrategy
     ) -> ExecutionResult:
@@ -303,8 +320,17 @@ class PaperTradingExecutor:
                 size_usd = size_usd * compound_mult
             size_usd = min(size_usd, self.max_position_usd)
 
+            # Confidence-scaled leverage + half-Kelly sizing from live edge (docs/adr/0001).
+            # Fresh/edgeless strategies trade at observation size (10%) and 1x leverage;
+            # leverage + size ramp up only as live edge confidence accrues.
+            win_rate, payoff, n_trades = self._live_edge_stats(config.name)
+            effective_leverage = ladder_leverage(symbol, n_trades, win_rate, payoff)
+            hk = half_kelly_fraction(win_rate, payoff)
+            kelly_mult = max(0.10, min(hk / 0.25, 1.0)) if hk > 0 else 0.10
+            size_usd = size_usd * kelly_mult
+
             # Check balance
-            margin_required = size_usd / config.leverage if config.leverage > 1 else size_usd
+            margin_required = size_usd / effective_leverage if effective_leverage > 1 else size_usd
             if margin_required > self.balance:
                 return ExecutionResult(
                     success=False,
@@ -329,7 +355,7 @@ class PaperTradingExecutor:
                 size=signed_size,
                 entry_price=fill_price,
                 entry_time=datetime.now(timezone.utc),
-                leverage=config.leverage,
+                leverage=effective_leverage,
                 size_usd=size_usd,
                 strategy_name=config.name,
             )
