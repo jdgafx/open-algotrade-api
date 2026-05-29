@@ -362,6 +362,17 @@ class StrategyOrchestrator:
                 # Get current position (keyed per strategy for isolation)
                 position = await self.executor.get_position(symbol, strategy_name=name)
 
+                # ── Ruin Guard (reflex layer): force-close a position drifting into liquidation ──
+                if position is not None and hasattr(self.executor, "check_position_ruin"):
+                    should_close, dist_pct = await self.executor.check_position_ruin(symbol, name)
+                    if should_close:
+                        logger.critical(
+                            "[RUIN-GUARD] %s %s within %.2f%% of liquidation — force-closing",
+                            name, symbol, dist_pct)
+                        await self.executor.close_by_strategy(name)
+                        await asyncio.sleep(sleep_seconds)
+                        continue
+
                 # Run strategy iteration (includes per-strategy anti-overtrading)
                 signal = await strategy.run_iteration(data, position)
 

@@ -774,6 +774,31 @@ class PaperTradingExecutor:
                 return ExecutionResult(success=True, realized_pnl=pnl)
         return None
 
+    async def check_position_ruin(self, symbol: str, strategy_name: str,
+                                  safety_buffer_pct: float = 1.0) -> tuple[bool, float]:
+        """Reflex-layer guard: return (should_force_close, distance_to_liquidation_pct).
+
+        Runs every monitoring iteration. If the current mid is within safety_buffer_pct
+        of the estimated liquidation price, the position must be flattened BEFORE a faster
+        wick liquidates it. Decoupled from (and faster than) the tuning loop."""
+        from src.services.liquidation_guard import LiquidationGuard
+        pos = self._positions.get(f"{strategy_name}:{symbol}")
+        if pos is None:
+            return False, 100.0
+        mid = await asyncio.to_thread(self._fetch_mid_price, symbol)
+        if not mid or mid <= 0:
+            return False, 100.0
+        margin = pos.size_usd / pos.leverage if pos.leverage > 1 else pos.size_usd
+        liq_price = LiquidationGuard.calculate_liquidation_price(
+            entry_price=pos.entry_price, position_size=abs(pos.size), margin=margin,
+            leverage=pos.leverage, is_long=(pos.side == "long"), symbol=symbol,
+        )
+        if pos.side == "long":
+            distance_pct = (mid - liq_price) / mid * 100.0
+        else:
+            distance_pct = (liq_price - mid) / mid * 100.0
+        return (distance_pct <= safety_buffer_pct), distance_pct
+
     def get_active_positions(self) -> Dict[str, Dict]:
         """Get active paper positions as dict keyed by symbol."""
         return {
