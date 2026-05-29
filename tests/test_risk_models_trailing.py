@@ -7,6 +7,21 @@ def test_riskconfig_trailing_and_floor_defaults():
     assert cfg.absolute_floor_usd == 50.0
 
 
+def test_riskconfig_ruin_guard_buffer_default_and_bounds():
+    import pytest
+    from pydantic import ValidationError
+
+    cfg = RiskConfig()
+    assert cfg.ruin_guard_buffer_pct == 1.0
+    # Bounds: ge=0.1, le=10.0
+    assert RiskConfig(ruin_guard_buffer_pct=0.1).ruin_guard_buffer_pct == 0.1
+    assert RiskConfig(ruin_guard_buffer_pct=10.0).ruin_guard_buffer_pct == 10.0
+    with pytest.raises(ValidationError):
+        RiskConfig(ruin_guard_buffer_pct=0.0)
+    with pytest.raises(ValidationError):
+        RiskConfig(ruin_guard_buffer_pct=10.1)
+
+
 def test_risksnapshot_exposes_peak_and_trailing():
     snap = RiskSnapshot(status=RiskStatus.MONITORING, account_value=150.0,
                         running_peak_equity=200.0, trailing_drawdown_from_peak_pct=25.0)

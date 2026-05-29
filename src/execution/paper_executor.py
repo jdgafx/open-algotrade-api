@@ -27,6 +27,7 @@ import requests
 
 from src.services.confidence_ladder import STRONG_EDGE_HK, ladder_leverage
 from src.services.kelly import half_kelly_fraction
+from src.services.liquidation_guard import LiquidationGuard
 from src.strategies.base_strategy import (
     BaseStrategy,
     Signal,
@@ -36,6 +37,8 @@ from src.strategies.base_strategy import (
 logger = logging.getLogger(__name__)
 
 _OBSERVATION_FLOOR = 0.10  # fresh/edgeless strategies size at 10% until confidence accrues
+
+DEFAULT_RUIN_GUARD_BUFFER_PCT = 1.0  # force-close ~1 wick before liquidation; overridable via RiskConfig.ruin_guard_buffer_pct
 
 
 @dataclass
@@ -542,6 +545,7 @@ class PaperTradingExecutor:
                 "symbol": symbol,
                 "size": pos.size,
                 "entry_px": pos.entry_price,
+                "mark_price": mid,  # current mid — reused by the Ruin Guard to avoid a 2nd fetch
                 "pnl_perc": pnl_pct,
                 "unrealized_pnl": unrealized_pnl,
                 "is_long": pos.side == "long",
@@ -552,6 +556,7 @@ class PaperTradingExecutor:
                 "symbol": symbol,
                 "size": pos.size,
                 "entry_px": pos.entry_price,
+                "mark_price": None,  # price fetch failed; Ruin Guard will fetch on its own
                 "pnl_perc": 0,
                 "unrealized_pnl": 0,
                 "is_long": pos.side == "long",
@@ -775,17 +780,21 @@ class PaperTradingExecutor:
         return None
 
     async def check_position_ruin(self, symbol: str, strategy_name: str,
-                                  safety_buffer_pct: float = 1.0) -> tuple[bool, float]:
+                                  safety_buffer_pct: float = DEFAULT_RUIN_GUARD_BUFFER_PCT,
+                                  mid: Optional[float] = None) -> tuple[bool, float]:
         """Reflex-layer guard: return (should_force_close, distance_to_liquidation_pct).
 
         Runs every monitoring iteration. If the current mid is within safety_buffer_pct
         of the estimated liquidation price, the position must be flattened BEFORE a faster
-        wick liquidates it. Decoupled from (and faster than) the tuning loop."""
-        from src.services.liquidation_guard import LiquidationGuard
+        wick liquidates it. Decoupled from (and faster than) the tuning loop.
+
+        ``mid`` may be supplied by the caller (e.g. the orchestrator already fetched it
+        via get_position) to avoid a redundant price fetch; if None it is fetched here."""
         pos = self._positions.get(f"{strategy_name}:{symbol}")
         if pos is None:
             return False, 100.0
-        mid = await asyncio.to_thread(self._fetch_mid_price, symbol)
+        if mid is None:
+            mid = await asyncio.to_thread(self._fetch_mid_price, symbol)
         if not mid or mid <= 0:
             return False, 100.0
         margin = pos.size_usd / pos.leverage if pos.leverage > 1 else pos.size_usd

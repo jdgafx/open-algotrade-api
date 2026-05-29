@@ -152,6 +152,11 @@ class RiskConfig(BaseModel):
         description="Hard give-up floor: flatten + lock out if account value drops to/below this $ amount. Set to 0 to disable.",
     )
 
+    ruin_guard_buffer_pct: float = Field(
+        default=1.0, ge=0.1, le=10.0,
+        description="Per-position Ruin Guard: force-close when distance-to-liquidation drops below this %% (1%% ≈ one wick from liquidation).",
+    )
+
 
 class RiskEvent(BaseModel):
     """A single risk event logged by the controller."""

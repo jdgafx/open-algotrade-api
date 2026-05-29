@@ -24,6 +24,7 @@ from typing import Dict, List, Optional
 
 from src.engine.llm_gate import TradeContext, llm_gate
 from src.execution.hl_executor import HyperliquidVaultExecutor
+from src.execution.paper_executor import DEFAULT_RUIN_GUARD_BUFFER_PCT
 from src.lib.nice_funcs import HyperliquidClient
 from src.services.hlp_gate import HLPSentimentGate
 from src.services.liquidation_guard import LiquidationGuard
@@ -363,8 +364,21 @@ class StrategyOrchestrator:
                 position = await self.executor.get_position(symbol, strategy_name=name)
 
                 # ── Ruin Guard (reflex layer): force-close a position drifting into liquidation ──
+                # hasattr guard is intentional: the live hl_executor doesn't implement the
+                # per-position ruin guard yet (later phase), so this is paper-only for now.
                 if position is not None and hasattr(self.executor, "check_position_ruin"):
-                    should_close, dist_pct = await self.executor.check_position_ruin(symbol, name)
+                    # Buffer comes from RiskConfig when a risk controller is wired; otherwise
+                    # check_position_ruin falls back to DEFAULT_RUIN_GUARD_BUFFER_PCT.
+                    buffer_pct = (
+                        self.risk_controller.config.ruin_guard_buffer_pct
+                        if self.risk_controller is not None
+                        and getattr(self.risk_controller, "config", None) is not None
+                        else DEFAULT_RUIN_GUARD_BUFFER_PCT
+                    )
+                    # Reuse the mid get_position already fetched (avoids a 2nd price fetch).
+                    known_mid = position.get("mark_price") if isinstance(position, dict) else None
+                    should_close, dist_pct = await self.executor.check_position_ruin(
+                        symbol, name, safety_buffer_pct=buffer_pct, mid=known_mid)
                     if should_close:
                         logger.critical(
                             "[RUIN-GUARD] %s %s within %.2f%% of liquidation — force-closing",
