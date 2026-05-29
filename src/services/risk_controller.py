@@ -662,6 +662,42 @@ class RiskController:
                 details={"lockout_until": self._lockout_until.isoformat()},
             )
 
+    async def _check_trailing_drawdown_from_peak(self, account_value: float) -> None:
+        """Account-level halt measured from the running equity PEAK (not start-of-day),
+        so compounded gains are protected as the account climbs. Flattens all positions
+        and blocks new entries when drawdown from peak exceeds the configured threshold."""
+        if account_value > self.running_peak_equity:
+            self.running_peak_equity = account_value
+            return
+        if self.running_peak_equity <= 0:
+            return
+        dd_pct = (self.running_peak_equity - account_value) / self.running_peak_equity * 100.0
+        if dd_pct >= self.config.trailing_drawdown_from_peak_pct and not self._trailing_drawdown_halt:
+            self._trailing_drawdown_halt = True
+            self._new_entries_blocked = True
+            await self.executor.emergency_close_all()
+            self._log_event(
+                RiskEventType.TRAILING_DRAWDOWN_HALT,
+                RiskSeverity.CRITICAL,
+                f"Account halt: {dd_pct:.1f}% drawdown from ${self.running_peak_equity:.2f} peak "
+                f"(threshold {self.config.trailing_drawdown_from_peak_pct:.0f}%). Flattened all positions.",
+            )
+
+    async def _check_absolute_floor(self, account_value: float) -> None:
+        """Hard give-up floor: flatten + block new entries below an absolute $ value.
+        Distinct from the percentage tiers — the 'I refuse to lose more than this many
+        real dollars' stop."""
+        if account_value <= self.config.absolute_floor_usd and not self._absolute_floor_halt:
+            self._absolute_floor_halt = True
+            self._new_entries_blocked = True
+            await self.executor.emergency_close_all()
+            self._log_event(
+                RiskEventType.ABSOLUTE_FLOOR_HALT,
+                RiskSeverity.CRITICAL,
+                f"Absolute floor hit: account ${account_value:.2f} <= floor "
+                f"${self.config.absolute_floor_usd:.2f}. Flattened and locked out; manual review required.",
+            )
+
     async def _close_position_by_symbol(self, symbol: str) -> None:
         """Close all positions for a symbol. Routes to paper executor or live kill_switch."""
         if hasattr(self.executor, "close_by_symbol"):
