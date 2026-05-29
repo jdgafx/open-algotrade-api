@@ -16,6 +16,7 @@ _DEFAULT_MAX_LEVERAGE = 5
 
 OBSERVATION_MAX_TRADES = 10
 FULL_MIN_TRADES = 30
+STRONG_EDGE_HK = 0.25  # half-Kelly fraction representing a strong, bankable edge
 
 
 def edge_confidence(total_trades: int, win_rate: float, payoff_ratio: float) -> float:
@@ -28,7 +29,7 @@ def edge_confidence(total_trades: int, win_rate: float, payoff_ratio: float) -> 
     if hk <= 0:
         return 0.0
     sample_factor = min(total_trades / float(FULL_MIN_TRADES), 1.0)  # 0..1 at 30 trades
-    edge_factor = min(hk / 0.25, 1.0)                                # 0..1 (0.25 hk == strong)
+    edge_factor = min(hk / STRONG_EDGE_HK, 1.0)                      # 0..1 (STRONG_EDGE_HK == strong)
     return round(sample_factor * edge_factor, 6)
 
 

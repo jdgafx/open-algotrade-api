@@ -25,7 +25,7 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
-from src.services.confidence_ladder import ladder_leverage
+from src.services.confidence_ladder import STRONG_EDGE_HK, ladder_leverage
 from src.services.kelly import half_kelly_fraction
 from src.strategies.base_strategy import (
     BaseStrategy,
@@ -34,6 +34,8 @@ from src.strategies.base_strategy import (
 )
 
 logger = logging.getLogger(__name__)
+
+_OBSERVATION_FLOOR = 0.10  # fresh/edgeless strategies size at 10% until confidence accrues
 
 
 @dataclass
@@ -297,7 +299,8 @@ class PaperTradingExecutor:
         win_rate = len(wins) / n
         avg_win = sum(wins) / len(wins) if wins else 0.0
         avg_loss = sum(losses) / len(losses) if losses else 0.0
-        payoff = (avg_win / avg_loss) if avg_loss > 0 else (avg_win if avg_win > 0 else 0.0)
+        _NO_LOSS_PAYOFF = 10.0  # no losses observed -> capped high payoff ratio so Kelly ~ win_rate (not a raw $ amount)
+        payoff = (avg_win / avg_loss) if avg_loss > 0 else (_NO_LOSS_PAYOFF if avg_win > 0 else 0.0)
         return win_rate, payoff, n
 
     async def _execute_entry(
@@ -326,7 +329,7 @@ class PaperTradingExecutor:
             win_rate, payoff, n_trades = self._live_edge_stats(config.name)
             effective_leverage = ladder_leverage(symbol, n_trades, win_rate, payoff)
             hk = half_kelly_fraction(win_rate, payoff)
-            kelly_mult = max(0.10, min(hk / 0.25, 1.0)) if hk > 0 else 0.10
+            kelly_mult = max(_OBSERVATION_FLOOR, min(hk / STRONG_EDGE_HK, 1.0)) if hk > 0 else _OBSERVATION_FLOOR
             size_usd = size_usd * kelly_mult
 
             # Check balance
