@@ -13,7 +13,7 @@ from src.engine.rbi_pipeline import RBIPipeline
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/optimize/rbi", tags=["rbi-optimizer"])
 
-_optimizer = OptimizationEngine()
+_optimizer = OptimizationEngine(commission_pct=0.14)  # 2x 0.07% research default; promote only on worst-case slippage
 _pipelines: dict[str, RBIPipeline] = {}
 
 BACKEND_BASE = "http://localhost:8000"

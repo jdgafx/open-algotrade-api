@@ -1,7 +1,8 @@
 import asyncio
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 from src.engine.rbi_pipeline import RBIPipeline, PromotionEvent
+from src.engine.optimizer import OptimizationEngine
 
 
 def _mock_strategy(active_positions=0, params=None):
@@ -15,7 +16,7 @@ def _mock_strategy(active_positions=0, params=None):
 def pipeline():
     get_fn = AsyncMock(return_value=_mock_strategy())
     patch_fn = AsyncMock(return_value={})
-    optimizer = MagicMock()
+    optimizer = OptimizationEngine()  # real engine so _passes_promotion_gate runs
     return RBIPipeline(get_strategy_fn=get_fn, patch_strategy_fn=patch_fn, optimizer=optimizer)
 
 
@@ -45,10 +46,11 @@ async def test_skips_when_no_passing_candidates(pipeline):
 @pytest.mark.asyncio
 async def test_promotes_when_candidate_passes(pipeline):
     from src.engine.optimizer import OptimizationResult
+    # meets promotion gate: 30 trades, sharpe>=1.0, pf>=1.5, wr>=40, dd<=10
     passing = OptimizationResult(
-        params={"zscore_entry": 2.0}, in_sample_sharpe=1.2, out_sample_sharpe=0.9,
+        params={"zscore_entry": 2.0}, in_sample_sharpe=1.2, out_sample_sharpe=1.1,
         out_sample_profit_factor=1.5, out_sample_win_rate=48.0,
-        out_sample_total_trades=22, out_sample_max_drawdown=8.0,
+        out_sample_total_trades=30, out_sample_max_drawdown=8.0,
         composite_score=0.72, passed_walkforward=True,
     )
     pipeline._optimizer.optimize = AsyncMock(return_value=[passing])
@@ -61,10 +63,11 @@ async def test_promotes_when_candidate_passes(pipeline):
 @pytest.mark.asyncio
 async def test_rollback_returns_previous_params(pipeline):
     from src.engine.optimizer import OptimizationResult
+    # meets promotion gate: 30 trades, sharpe>=1.0, pf>=1.5, wr>=40, dd<=10
     passing = OptimizationResult(
-        params={"zscore_entry": 2.0}, in_sample_sharpe=1.2, out_sample_sharpe=0.9,
+        params={"zscore_entry": 2.0}, in_sample_sharpe=1.2, out_sample_sharpe=1.1,
         out_sample_profit_factor=1.5, out_sample_win_rate=48.0,
-        out_sample_total_trades=22, out_sample_max_drawdown=8.0,
+        out_sample_total_trades=30, out_sample_max_drawdown=8.0,
         composite_score=0.72, passed_walkforward=True,
     )
     pipeline._optimizer.optimize = AsyncMock(return_value=[passing])

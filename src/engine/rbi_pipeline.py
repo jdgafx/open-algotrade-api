@@ -30,7 +30,7 @@ class RBIPipeline:
     ):
         self._get_strategy_fn = get_strategy_fn
         self._patch_strategy_fn = patch_strategy_fn
-        self._optimizer = optimizer or OptimizationEngine()
+        self._optimizer = optimizer or OptimizationEngine(commission_pct=0.14)  # 2x the 0.07% research default — worst-case slippage so we never promote on rosy costs
         self._history: list[PromotionEvent] = []
         self._previous_params: dict[str, dict] = {}
 
@@ -60,7 +60,7 @@ class RBIPipeline:
             timeframe=timeframe, lookback_days=lookback_days, n_trials=n_trials,
         )
 
-        passing = [c for c in candidates if c.passed_walkforward]
+        passing = [c for c in candidates if self._optimizer._passes_promotion_gate(c)]
         if not passing:
             return PromotionEvent(
                 strategy_type=strategy_type, strategy_id=strategy_id, timestamp=ts,
@@ -75,7 +75,7 @@ class RBIPipeline:
 
         event = PromotionEvent(
             strategy_type=strategy_type, strategy_id=strategy_id, timestamp=ts,
-            promoted=True, reason="walk_forward_passed",
+            promoted=True, reason="promotion_gate_passed",
             before_params=current_params, after_params=best.params,
             before_metrics={},
             after_metrics={
