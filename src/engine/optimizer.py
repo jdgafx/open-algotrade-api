@@ -34,6 +34,13 @@ class OptimizationEngine:
     MIN_OOS_TRADES = 5
     MAX_OOS_DRAWDOWN = 15.0
 
+    # --- Promotion-to-live gate (strict; distinct from the research screen above) ---
+    PROMOTION_MIN_OOS_TRADES = 30
+    PROMOTION_MIN_PROFIT_FACTOR = 1.5
+    PROMOTION_MIN_WIN_RATE = 40.0      # percent
+    PROMOTION_MAX_DRAWDOWN = 10.0      # percent; tighter than research MAX_OOS_DRAWDOWN=15.0
+    PROMOTION_MIN_SHARPE = 1.0
+
     def __init__(self, initial_capital: float = 10000.0, commission_pct: float = 0.07):
         self._initial_capital = initial_capital
         self._commission_pct = commission_pct
@@ -110,6 +117,21 @@ class OptimizationEngine:
             and oos_result.win_rate >= self.MIN_OOS_WIN_RATE
             and oos_result.total_trades >= self.MIN_OOS_TRADES
             and oos_result.max_drawdown_pct <= self.MAX_OOS_DRAWDOWN
+        )
+
+    def _passes_promotion_gate(self, result: "OptimizationResult") -> bool:
+        """Strict gate a strategy must clear before it earns LIVE leverage.
+
+        Distinct from _passes_walkforward (permissive research screen). Promotion
+        requires a statistically meaningful sample so Kelly sizing is not estimated
+        off noise. Operates on an OptimizationResult (out_sample_* fields).
+        """
+        return (
+            result.out_sample_total_trades >= self.PROMOTION_MIN_OOS_TRADES
+            and result.out_sample_profit_factor >= self.PROMOTION_MIN_PROFIT_FACTOR
+            and result.out_sample_win_rate >= self.PROMOTION_MIN_WIN_RATE
+            and result.out_sample_max_drawdown <= self.PROMOTION_MAX_DRAWDOWN
+            and result.out_sample_sharpe >= self.PROMOTION_MIN_SHARPE
         )
 
     async def _run_backtest(self, strategy_type, symbol, timeframe, data, params):
