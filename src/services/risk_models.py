@@ -149,7 +149,7 @@ class RiskConfig(BaseModel):
     )
     absolute_floor_usd: float = Field(
         default=50.0, ge=0.0,
-        description="Hard give-up floor: flatten + lock out if account value drops to/below this $ amount.",
+        description="Hard give-up floor: flatten + lock out if account value drops to/below this $ amount. Set to 0 to disable.",
     )
 
 

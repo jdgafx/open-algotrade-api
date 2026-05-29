@@ -129,6 +129,7 @@ class RiskController:
         # Initialize start-of-day equity
         try:
             self._start_of_day_equity = await self.executor.get_account_value()
+            self.running_peak_equity = self._start_of_day_equity  # seed peak so the ruin guard + snapshot are meaningful before cycle 1
         except Exception as e:
             logger.warning("Could not get initial account value: %s", e)
             self._start_of_day_equity = 0.0
@@ -207,6 +208,8 @@ class RiskController:
             weekly_pnl_pct=0.0,
             monthly_pnl_pct=0.0,
             new_entries_blocked=self._new_entries_blocked,
+            running_peak_equity=self.running_peak_equity,
+            trailing_drawdown_from_peak_pct=0.0,
         )
 
     def get_events(self, limit: int = 100) -> List[RiskEvent]:
@@ -350,6 +353,10 @@ class RiskController:
             weekly_pnl_pct=round(weekly_pnl_pct, 2),
             monthly_pnl_pct=round(monthly_pnl_pct, 2),
             new_entries_blocked=self._new_entries_blocked,
+            running_peak_equity=self.running_peak_equity,
+            trailing_drawdown_from_peak_pct=round(
+                (self.running_peak_equity - account_value) / self.running_peak_equity * 100.0
+                if self.running_peak_equity > 0 else 0.0, 2),
         )
         self._last_snapshot = snapshot
         await self._broadcast(snapshot)
@@ -694,6 +701,8 @@ class RiskController:
         """Hard give-up floor: flatten + block new entries below an absolute $ value.
         Distinct from the percentage tiers — the 'I refuse to lose more than this many
         real dollars' stop."""
+        if self.config.absolute_floor_usd <= 0:
+            return
         if account_value <= self.config.absolute_floor_usd and not self._absolute_floor_halt:
             self._absolute_floor_halt = True
             self._new_entries_blocked = True

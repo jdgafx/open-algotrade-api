@@ -25,6 +25,9 @@ async def test_peak_updates_then_trailing_halt_fires():
     await rc._check_trailing_drawdown_from_peak(300.0)
     assert rc.running_peak_equity == 300.0
     assert rc._trailing_drawdown_halt is False
+    await rc._check_trailing_drawdown_from_peak(280.0)  # below peak, shallow -> no halt
+    assert rc.running_peak_equity == 300.0  # peak ratchets, never goes down
+    assert rc._trailing_drawdown_halt is False
     await rc._check_trailing_drawdown_from_peak(192.0)  # 36% below peak
     assert rc._trailing_drawdown_halt is True
     executor.emergency_close_all.assert_awaited_once()
