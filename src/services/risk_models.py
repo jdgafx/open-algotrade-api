@@ -33,6 +33,8 @@ class RiskEventType(str, Enum):
     TIER3_CLOSE_ALL = "TIER3_CLOSE_ALL"
     WEEKLY_SHUTDOWN = "WEEKLY_SHUTDOWN"
     MONTHLY_SHUTDOWN = "MONTHLY_SHUTDOWN"
+    TRAILING_DRAWDOWN_HALT = "TRAILING_DRAWDOWN_HALT"
+    ABSOLUTE_FLOOR_HALT = "ABSOLUTE_FLOOR_HALT"
 
 
 class RiskSeverity(str, Enum):
@@ -141,6 +143,15 @@ class RiskConfig(BaseModel):
         description="Monthly max drawdown — full shutdown, manual review needed",
     )
 
+    trailing_drawdown_from_peak_pct: float = Field(
+        default=35.0, ge=0.1, le=100.0,
+        description="Account-level halt: flatten + stop new entries if equity falls this % below its running peak.",
+    )
+    absolute_floor_usd: float = Field(
+        default=50.0, ge=0.0,
+        description="Hard give-up floor: flatten + lock out if account value drops to/below this $ amount.",
+    )
+
 
 class RiskEvent(BaseModel):
     """A single risk event logged by the controller."""
@@ -176,6 +187,9 @@ class RiskSnapshot(BaseModel):
     weekly_pnl_pct: float = 0.0
     monthly_pnl_pct: float = 0.0
     new_entries_blocked: bool = False
+    # Account-level ruin guard state
+    running_peak_equity: float = 0.0
+    trailing_drawdown_from_peak_pct: float = 0.0
 
 
 class RiskStatusResponse(BaseModel):

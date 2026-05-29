@@ -88,6 +88,11 @@ class RiskController:
         self._week_start: Optional[datetime] = None
         self._month_start: Optional[datetime] = None
 
+        # Account-level ruin guard state
+        self.running_peak_equity: float = 0.0
+        self._trailing_drawdown_halt: bool = False
+        self._absolute_floor_halt: bool = False
+
         logger.info("RiskController initialized | config=%s", self.config.model_dump())
 
     @property
