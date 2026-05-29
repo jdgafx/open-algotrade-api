@@ -382,6 +382,10 @@ class RiskController:
                 account_value, daily_pnl, daily_pnl_pct, positions
             )
 
+        # 1b. ACCOUNT-LEVEL RUIN GUARDS (trailing peak + absolute floor)
+        await self._check_trailing_drawdown_from_peak(account_value)
+        await self._check_absolute_floor(account_value)
+
         # 2. Per-position checks — handle both live and paper executor field names
         for pos in positions:
             symbol = pos.get("coin") or pos.get("symbol", "")
@@ -423,10 +427,13 @@ class RiskController:
         """Check if the risk controller allows opening new positions.
 
         Returns False when:
+        - Account-level ruin guards have fired (trailing peak / absolute floor)
         - Tier >= 2 (new entries blocked due to drawdown cascade)
         - Locked out (anti-tilt or weekly/monthly shutdown)
         - Emergency status (all positions being closed)
         """
+        if self._trailing_drawdown_halt or self._absolute_floor_halt:
+            return False
         if self._new_entries_blocked:
             return False
         if self._tier_state >= 2:
