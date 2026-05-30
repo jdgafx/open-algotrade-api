@@ -454,13 +454,17 @@ async def lifespan(app: FastAPI):
     # Falls back to the hardcoded _RBI_SCHEDULE if no running instances exist.
     _supported_types: set[str] = set(PARAM_SPACES.keys())
     from .database import SessionLocal as _RBI_SL
-    _rbi_db = _RBI_SL()
     try:
-        _running_instances = _rbi_db.query(models.StrategyInstance).filter(
-            models.StrategyInstance.status == "running"
-        ).all()
-    finally:
-        _rbi_db.close()
+        _rbi_db = _RBI_SL()
+        try:
+            _running_instances = _rbi_db.query(models.StrategyInstance).filter(
+                models.StrategyInstance.status == "running"
+            ).all()
+        finally:
+            _rbi_db.close()
+    except Exception as _dbe:
+        logger.warning("RBI scheduler: DB query failed (%s); using hardcoded schedule", _dbe)
+        _running_instances = []
 
     if _running_instances:
         _job_specs = build_rbi_job_specs(_running_instances, _supported_types)
@@ -490,7 +494,10 @@ async def lifespan(app: FastAPI):
                 id=f"rbi_{stype}",
                 replace_existing=True,
             )
-        logger.info("RBI scheduler: empty DB — fell back to %d hardcoded jobs", len(_RBI_SCHEDULE))
+        logger.info(
+            "RBI scheduler: empty DB — fell back to %d hardcoded jobs",
+            len([s for s, *_ in _RBI_SCHEDULE if s in _supported_types]),
+        )
 
     # ── Compounding controller: reinvest 90% of profits every 30 min ──
     _COMPOUND_BASE = 100.0          # treat $100 as starting capital — everything above is investable
