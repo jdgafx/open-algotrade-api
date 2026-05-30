@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 from src.engine.llm_gate import TradeContext, llm_gate
+from src.services.adaptation import adaptation_multiplier
 from src.execution.hl_executor import HyperliquidVaultExecutor
 from src.execution.paper_executor import DEFAULT_RUIN_GUARD_BUFFER_PCT
 from src.lib.nice_funcs import HyperliquidClient
@@ -122,6 +123,29 @@ class StrategyOrchestrator:
             del self._strategies[name]
         self._strategy_types.pop(name, None)
         logger.info("Removed strategy: %s", name)
+
+    def _compute_entry_adaptation(self, name: str, symbol: str, side: str) -> float:
+        """Realtime adaptation multiplier for a new entry (ADR-0002). None-safe → 1.0."""
+        if self.regime_detector is None:
+            return 1.0
+        regime_info = self.regime_detector.get_current_regime(symbol) or {}
+        current_regime = regime_info.get("regime")
+        favorable_types = set(regime_info.get("recommended_strategies") or [])
+        atr_pct = None
+        try:
+            vol = self.regime_detector.get_volatility_status() or {}
+            atr_pct = (vol.get(symbol) or {}).get("atr_pct")
+        except Exception:
+            atr_pct = None
+        funding_bias = None
+        if self.funding_monitor is not None:
+            try:
+                funding_bias = self.funding_monitor.get_funding_bias(symbol)
+            except Exception:
+                funding_bias = None
+        strategy_type = self._strategy_types.get(name, "")
+        return adaptation_multiplier(strategy_type, side, atr_pct, current_regime,
+                                     favorable_types, funding_bias)
 
     async def start_strategy(self, name: str):
         """Start a single strategy's run loop."""
@@ -527,6 +551,11 @@ class StrategyOrchestrator:
                                     continue
                             except Exception as _hlp_err:
                                 logger.warning("HLP gate error (skipping): %s", _hlp_err)
+
+                    # ── ADR-0002: attach realtime adaptation multiplier for entries ──
+                    if is_entry:
+                        signal.metadata["adaptation_multiplier"] = self._compute_entry_adaptation(
+                            name, symbol, signal.signal_type.value)
 
                     # Execute the signal
                     result = await self.executor.execute_signal(signal, strategy)
