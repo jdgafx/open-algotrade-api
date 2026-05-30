@@ -25,7 +25,7 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
-from src.services.confidence_ladder import STRONG_EDGE_HK, ladder_leverage
+from src.services.confidence_ladder import STRONG_EDGE_HK, ladder_leverage, HL_MAX_LEVERAGE
 from src.services.kelly import half_kelly_fraction
 from src.services.liquidation_guard import LiquidationGuard
 from src.strategies.base_strategy import (
@@ -330,6 +330,15 @@ class PaperTradingExecutor:
             # leverage + size ramp up only as live edge confidence accrues.
             win_rate, payoff, n_trades = self._live_edge_stats(config.name)
             effective_leverage = ladder_leverage(symbol, n_trades, win_rate, payoff)
+
+            # Realtime adaptation (ADR-0002): scale ladder leverage by the per-entry multiplier
+            # the orchestrator computed from live regime/vol/funding. Default 1.0 if absent —
+            # so existing callers that don't set it are unaffected.
+            _meta = getattr(signal, "metadata", None) or {}
+            _adapt = float(_meta.get("adaptation_multiplier", 1.0))
+            _lev_cap = HL_MAX_LEVERAGE.get(symbol.upper(), 5)
+            effective_leverage = max(1, min(int(round(effective_leverage * _adapt)), _lev_cap))
+
             hk = half_kelly_fraction(win_rate, payoff)
             kelly_mult = max(_OBSERVATION_FLOOR, min(hk / STRONG_EDGE_HK, 1.0)) if hk > 0 else _OBSERVATION_FLOOR
             size_usd = size_usd * kelly_mult
