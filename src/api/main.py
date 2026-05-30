@@ -26,6 +26,8 @@ from .auth import get_password_hash, verify_password, create_access_token, requi
 # `# noqa: F401` to keep linters quiet.
 from src.services import rbi_models  # noqa: F401
 from src.services.confidence_ladder import edge_confidence
+from src.engine.rbi_schedule import build_rbi_job_specs
+from src.engine.param_spaces import PARAM_SPACES
 
 models.Base.metadata.create_all(bind=engine)
 
@@ -441,20 +443,54 @@ async def lifespan(app: FastAPI):
         try:
             event = await pipeline.run_cycle(
                 strategy_type=strategy_type, strategy_id=strategy_id,
-                symbol=symbol, timeframe=timeframe, lookback_days=14, n_trials=50,
+                symbol=symbol, timeframe=timeframe, lookback_days=90, n_trials=100,
             )
             if event.promoted:
                 logger.info("Scheduler RBI promoted %s: %s", strategy_type, event.after_metrics)
         except Exception as e:
             logger.error("Scheduled RBI cycle failed for %s: %s", strategy_type, e)
 
-    for stype, sid, sym, tf, hours in _RBI_SCHEDULE:
-        _scheduler.add_job(
-            _rbi_job, "interval", hours=hours,
-            args=[stype, sid, sym, tf],
-            id=f"rbi_{stype}",
-            replace_existing=True,
-        )
+    # Build DB-derived schedule, filtered to optimizer-supported strategy types.
+    # Falls back to the hardcoded _RBI_SCHEDULE if no running instances exist.
+    _supported_types: set[str] = set(PARAM_SPACES.keys())
+    from .database import SessionLocal as _RBI_SL
+    _rbi_db = _RBI_SL()
+    try:
+        _running_instances = _rbi_db.query(models.StrategyInstance).filter(
+            models.StrategyInstance.status == "running"
+        ).all()
+    finally:
+        _rbi_db.close()
+
+    if _running_instances:
+        _job_specs = build_rbi_job_specs(_running_instances, _supported_types)
+        _skipped = [i.strategy_type for i in _running_instances if i.strategy_type not in _supported_types]
+        if _skipped:
+            logger.warning("RBI scheduler: skipping unsupported strategy types (not in param_spaces): %s", sorted(set(_skipped)))
+        for _spec in _job_specs:
+            _scheduler.add_job(
+                _rbi_job, "interval", hours=_spec["hours"],
+                args=[_spec["strategy_type"], _spec["strategy_id"], _spec["symbol"], _spec["timeframe"]],
+                id=f"rbi_{_spec['strategy_type']}_{_spec['strategy_id']}",
+                replace_existing=True,
+            )
+        logger.info("RBI scheduler: %d DB-derived jobs scheduled (supported types: %s)", len(_job_specs), sorted(_supported_types))
+    else:
+        # Fallback: no running instances — use hardcoded schedule so behaviour
+        # doesn't regress on an empty DB.
+        _fallback_skipped = [stype for stype, *_ in _RBI_SCHEDULE if stype not in _supported_types]
+        if _fallback_skipped:
+            logger.warning("RBI scheduler (fallback): skipping unsupported types: %s", sorted(set(_fallback_skipped)))
+        for stype, sid, sym, tf, hours in _RBI_SCHEDULE:
+            if stype not in _supported_types:
+                continue
+            _scheduler.add_job(
+                _rbi_job, "interval", hours=hours,
+                args=[stype, sid, sym, tf],
+                id=f"rbi_{stype}",
+                replace_existing=True,
+            )
+        logger.info("RBI scheduler: empty DB — fell back to %d hardcoded jobs", len(_RBI_SCHEDULE))
 
     # ── Compounding controller: reinvest 90% of profits every 30 min ──
     _COMPOUND_BASE = 100.0          # treat $100 as starting capital — everything above is investable
@@ -556,7 +592,7 @@ async def lifespan(app: FastAPI):
     app.state.rbi_scheduler = _scheduler
     app.state.compound_initial_balance = _INITIAL_BALANCE
     app.state.compound_reserve_pct = _COMPOUND_RESERVE_PCT
-    logger.info("RBI scheduler started with %d jobs + compounder", len(_RBI_SCHEDULE))
+    logger.info("RBI scheduler started with %d jobs + compounder", len(_scheduler.get_jobs()) - 1)
 
     yield
 
