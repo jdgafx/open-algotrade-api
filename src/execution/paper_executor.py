@@ -324,7 +324,6 @@ class PaperTradingExecutor:
             if self.initial_balance > 0:
                 compound_mult = min(max(self.balance / self.initial_balance, 1.0), 3.0)
                 size_usd = size_usd * compound_mult
-            size_usd = min(size_usd, self.max_position_usd)
 
             # Confidence-scaled leverage + half-Kelly sizing from live edge (docs/adr/0001).
             # Fresh/edgeless strategies trade at observation size (10%) and 1x leverage;
@@ -335,7 +334,12 @@ class PaperTradingExecutor:
             kelly_mult = max(_OBSERVATION_FLOOR, min(hk / STRONG_EDGE_HK, 1.0)) if hk > 0 else _OBSERVATION_FLOOR
             size_usd = size_usd * kelly_mult
 
-            # Check balance
+            # Leverage scales the notional (how leverage amplifies exposure).
+            # Apply AFTER compound+kelly so the cap bounds TRUE leveraged exposure.
+            size_usd = size_usd * effective_leverage
+            size_usd = min(size_usd, self.max_position_usd)  # cap TRUE notional exposure
+
+            # Margin = notional / leverage; this is what we need in the account
             margin_required = size_usd / effective_leverage if effective_leverage > 1 else size_usd
             if margin_required > self.balance:
                 return ExecutionResult(
@@ -432,24 +436,23 @@ class PaperTradingExecutor:
             exit_usd = abs_size * fill_price
             commission = exit_usd * self.commission_pct
 
-            # Calculate PnL
+            # Calculate PnL — leverage is already reflected in abs_size (via leveraged notional
+            # at entry), so do NOT multiply again. One count only.
             if pos.side == "long":
-                pnl = (fill_price - pos.entry_price) * abs_size
+                realized_pnl = (fill_price - pos.entry_price) * abs_size
             else:
-                pnl = (pos.entry_price - fill_price) * abs_size
+                realized_pnl = (pos.entry_price - fill_price) * abs_size
 
-            # Apply leverage to PnL
-            pnl_on_margin = pnl * pos.leverage if pos.leverage > 1 else pnl
-            pnl_pct = (pnl / (pos.entry_price * abs_size)) * 100
+            pnl_pct = (realized_pnl / (pos.entry_price * abs_size)) * 100
 
-            self.balance += pnl_on_margin - commission
+            self.balance += realized_pnl - commission
 
             # Track peak for drawdown
             if self.balance > self.peak_balance:
                 self.peak_balance = self.balance
 
             # Record trade
-            strategy.record_trade(pnl_on_margin)
+            strategy.record_trade(realized_pnl)
 
             self._trade_counter += 1
             trade = PaperTrade(
@@ -460,7 +463,7 @@ class PaperTradingExecutor:
                 price=fill_price,
                 size=abs_size,
                 size_usd=exit_usd,
-                pnl=pnl_on_margin,
+                pnl=realized_pnl,
                 pnl_pct=pnl_pct,
                 reason=signal.reason,
                 strategy_name=config.name,
@@ -478,7 +481,7 @@ class PaperTradingExecutor:
                     strategy=config.name,
                     symbol=symbol,
                     signal=pos.side.upper(),
-                    pnl=pnl_on_margin,
+                    pnl=realized_pnl,
                     regime="unknown",
                     params=config.params,
                     price=fill_price,
@@ -494,7 +497,7 @@ class PaperTradingExecutor:
             result = ExecutionResult(
                 success=True,
                 order_result=order_result,
-                realized_pnl=pnl_on_margin,
+                realized_pnl=realized_pnl,
             )
             self._execution_history.append(result)
 
@@ -505,7 +508,7 @@ class PaperTradingExecutor:
                 symbol,
                 abs_size,
                 fill_price,
-                pnl_on_margin,
+                realized_pnl,
                 pnl_pct,
                 self.balance,
             )
@@ -626,27 +629,27 @@ class PaperTradingExecutor:
                 fill_price = await asyncio.to_thread(self._get_fill_price, pos.symbol, is_buy)
                 abs_size = abs(pos.size)
                 if pos.side == "long":
-                    pnl = (fill_price - pos.entry_price) * abs_size
+                    realized_pnl = (fill_price - pos.entry_price) * abs_size
                 else:
-                    pnl = (pos.entry_price - fill_price) * abs_size
-                pnl_on_margin = pnl * pos.leverage if pos.leverage > 1 else pnl
+                    realized_pnl = (pos.entry_price - fill_price) * abs_size
+                # leverage already reflected in abs_size; do NOT multiply again
                 commission = abs_size * fill_price * self.commission_pct
-                self.balance += pnl_on_margin - commission
+                self.balance += realized_pnl - commission
                 if self.balance > self.peak_balance:
                     self.peak_balance = self.balance
-                pnl_pct = (pnl / (pos.entry_price * abs_size)) * 100 if abs_size > 0 else 0
+                pnl_pct = (realized_pnl / (pos.entry_price * abs_size)) * 100 if abs_size > 0 else 0
                 self._trade_counter += 1
                 trade = PaperTrade(
                     id=self._trade_counter, symbol=symbol, side=pos.side,
                     action="exit", price=fill_price, size=abs_size,
-                    size_usd=abs_size * fill_price, pnl=pnl_on_margin,
+                    size_usd=abs_size * fill_price, pnl=realized_pnl,
                     pnl_pct=pnl_pct, reason="risk_stop",
                     strategy_name=pos.strategy_name,
                 )
                 self._trades.append(trade)
                 del self._positions[pos_key]
-                results.append(ExecutionResult(success=True, realized_pnl=pnl_on_margin))
-                logger.info("[PAPER] Risk close | %s | pnl=$%.2f (%.2f%%)", symbol, pnl_on_margin, pnl_pct)
+                results.append(ExecutionResult(success=True, realized_pnl=realized_pnl))
+                logger.info("[PAPER] Risk close | %s | pnl=$%.2f (%.2f%%)", symbol, realized_pnl, pnl_pct)
             except Exception as e:
                 logger.error("[PAPER] close_by_symbol error | %s | %s", symbol, e)
                 results.append(ExecutionResult(success=False, error=str(e)))
@@ -672,29 +675,29 @@ class PaperTradingExecutor:
                 fill_price = await asyncio.to_thread(self._get_fill_price, pos.symbol, is_buy)
                 abs_size = abs(pos.size)
                 if pos.side == "long":
-                    pnl = (fill_price - pos.entry_price) * abs_size
+                    realized_pnl = (fill_price - pos.entry_price) * abs_size
                 else:
-                    pnl = (pos.entry_price - fill_price) * abs_size
-                pnl_on_margin = pnl * pos.leverage if pos.leverage > 1 else pnl
+                    realized_pnl = (pos.entry_price - fill_price) * abs_size
+                # leverage already reflected in abs_size; do NOT multiply again
                 commission = abs_size * fill_price * self.commission_pct
-                self.balance += pnl_on_margin - commission
+                self.balance += realized_pnl - commission
                 if self.balance > self.peak_balance:
                     self.peak_balance = self.balance
-                pnl_pct = (pnl / (pos.entry_price * abs_size)) * 100 if abs_size > 0 else 0
+                pnl_pct = (realized_pnl / (pos.entry_price * abs_size)) * 100 if abs_size > 0 else 0
                 self._trade_counter += 1
                 trade = PaperTrade(
                     id=self._trade_counter, symbol=pos.symbol, side=pos.side,
                     action="exit", price=fill_price, size=abs_size,
-                    size_usd=abs_size * fill_price, pnl=pnl_on_margin,
+                    size_usd=abs_size * fill_price, pnl=realized_pnl,
                     pnl_pct=pnl_pct, reason="strategy_disabled",
                     strategy_name=pos.strategy_name,
                 )
                 self._trades.append(trade)
                 del self._positions[pos_key]
-                results.append(ExecutionResult(success=True, realized_pnl=pnl_on_margin))
+                results.append(ExecutionResult(success=True, realized_pnl=realized_pnl))
                 logger.info(
                     "[PAPER] Orphan close | %s | %s | pnl=$%.2f (%.2f%%)",
-                    strategy_name, pos.symbol, pnl_on_margin, pnl_pct,
+                    strategy_name, pos.symbol, realized_pnl, pnl_pct,
                 )
             except Exception as e:
                 logger.error("[PAPER] close_by_strategy error | %s | %s | %s", strategy_name, pos.symbol, e)
@@ -715,14 +718,14 @@ class PaperTradingExecutor:
                 abs_size = abs(pos.size)
 
                 if pos.side == "long":
-                    pnl = (fill_price - pos.entry_price) * abs_size
+                    realized_pnl = (fill_price - pos.entry_price) * abs_size
                 else:
-                    pnl = (pos.entry_price - fill_price) * abs_size
+                    realized_pnl = (pos.entry_price - fill_price) * abs_size
 
-                pnl_on_margin = pnl * pos.leverage if pos.leverage > 1 else pnl
+                # leverage already reflected in abs_size; do NOT multiply again
                 commission = abs_size * fill_price * self.commission_pct
-                pnl_pct = (pnl / (pos.entry_price * abs_size)) * 100 if abs_size > 0 else 0
-                self.balance += pnl_on_margin - commission
+                pnl_pct = (realized_pnl / (pos.entry_price * abs_size)) * 100 if abs_size > 0 else 0
+                self.balance += realized_pnl - commission
                 if self.balance > self.peak_balance:
                     self.peak_balance = self.balance
 
@@ -730,15 +733,15 @@ class PaperTradingExecutor:
                 trade = PaperTrade(
                     id=self._trade_counter, symbol=pos.symbol, side=pos.side,
                     action="exit", price=fill_price, size=abs_size,
-                    size_usd=abs_size * fill_price, pnl=pnl_on_margin,
+                    size_usd=abs_size * fill_price, pnl=realized_pnl,
                     pnl_pct=pnl_pct, reason="emergency_close",
                     strategy_name=pos.strategy_name,
                 )
                 self._trades.append(trade)
                 del self._positions[pos_key]
 
-                results.append(ExecutionResult(success=True, realized_pnl=pnl_on_margin))
-                logger.info("[PAPER] Emergency close | %s | pnl=$%.2f (%.2f%%)", pos.symbol, pnl_on_margin, pnl_pct)
+                results.append(ExecutionResult(success=True, realized_pnl=realized_pnl))
+                logger.info("[PAPER] Emergency close | %s | pnl=$%.2f (%.2f%%)", pos.symbol, realized_pnl, pnl_pct)
             except Exception as e:
                 results.append(ExecutionResult(success=False, error=str(e)))
         return results
