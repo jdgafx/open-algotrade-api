@@ -1742,9 +1742,21 @@ def get_strategy_instance(name: str, request: Request, db: Session = Depends(get
 
 @app.patch("/strategies/{name}", response_model=schemas.StrategyInstanceOut)
 def update_strategy_instance(
-    name: str, data: schemas.StrategyInstanceUpdate, db: Session = Depends(get_db)
+    request: Request,
+    name: str,
+    data: schemas.StrategyInstanceUpdate,
+    db: Session = Depends(get_db),
 ):
-    """Update a strategy instance's configuration."""
+    """Update a strategy instance's configuration.
+
+    The DB row is the source of truth, but a running strategy holds its config
+    in-memory, so a DB-only write never reaches the live process. After persisting
+    we hot-apply the same change to the orchestrator's live strategy object via
+    ``update_live_params`` (open-position safety: exit-threshold tightening is
+    deferred while a position is open). The applied/deferred/restart_required
+    breakdown is returned in ``live_update``. Manual edits and RBI promotion both
+    flow through this endpoint, so both reach the live process.
+    """
     instance = db.query(models.StrategyInstance).filter(
         models.StrategyInstance.name == name
     ).first()
@@ -1763,6 +1775,17 @@ def update_strategy_instance(
 
     db.commit()
     db.refresh(instance)
+
+    # Hot-apply to the live running strategy so the change reaches the process,
+    # not just the DB row. Never let a live-apply failure undo the persisted write.
+    orchestrator = getattr(request.app.state, "orchestrator", None)
+    live_update = None
+    if orchestrator is not None:
+        try:
+            live_update = orchestrator.update_live_params(name, update_data)
+        except Exception as e:
+            logger.warning("Live-apply of PATCH to %s failed (DB write kept): %s", name, e)
+    instance.live_update = live_update
     return instance
 
 

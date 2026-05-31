@@ -180,6 +180,90 @@ class TestStrategyCRUD:
         resp = client.patch("/strategies/no-such", json={"size_usd": 100.0})
         assert resp.status_code == 404
 
+    def test_patch_hot_applies_to_running_strategy(self, client, make_strategy_config):
+        """Wiring tracer: PATCHing a *running* strategy must reach the live in-memory
+        config (not just the DB row) and the response reports what was hot-applied.
+        Closes the DB-only write-back gap."""
+        from unittest.mock import MagicMock
+
+        from src.engine.orchestrator import StrategyOrchestrator
+
+        client.post("/strategies", json={
+            "name": "hot-test", "strategy_type": "rsi", "size_usd": 100.0,
+        })
+
+        orch = StrategyOrchestrator(client=MagicMock(), executor=MagicMock())
+        orch.executor._positions = {}
+        cfg = make_strategy_config(name="hot-test", size_usd=100.0)
+        strat = MagicMock()
+        strat.config = cfg
+        orch._strategies["hot-test"] = strat
+        client.app.state.orchestrator = orch
+
+        resp = client.patch("/strategies/hot-test", json={"size_usd": 250.0})
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["size_usd"] == 250.0                      # DB row updated (existing behavior)
+        assert cfg.size_usd == 250.0                          # LIVE in-memory config updated (new)
+        assert "size_usd" in data["live_update"]["applied"]   # API reports the hot-apply
+
+    def test_patch_defers_exit_threshold_while_position_open(self, client, make_strategy_config):
+        """Safety: tightening max_loss_pct via PATCH while a position is open must DEFER
+        the live change (DB still updated) so should_exit can't force-close the open leg."""
+        from unittest.mock import MagicMock
+
+        from src.engine.orchestrator import StrategyOrchestrator
+
+        client.post("/strategies", json={
+            "name": "open-pos", "strategy_type": "rsi", "max_loss_pct": -8.0,
+        })
+
+        orch = StrategyOrchestrator(client=MagicMock(), executor=MagicMock())
+        cfg = make_strategy_config(name="open-pos", max_loss_pct=-8.0)
+        strat = MagicMock()
+        strat.config = cfg
+        orch._strategies["open-pos"] = strat
+        pos = MagicMock()
+        pos.strategy_name = "open-pos"
+        orch.executor._positions = {"open-pos:BTC": pos}
+        client.app.state.orchestrator = orch
+
+        resp = client.patch("/strategies/open-pos", json={"max_loss_pct": -3.0})
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["max_loss_pct"] == -3.0                        # DB row updated
+        assert cfg.max_loss_pct == -8.0                            # LIVE config unchanged (deferred)
+        assert "max_loss_pct" in data["live_update"]["deferred"]
+
+    def test_patch_reports_restart_required_fields(self, client, make_strategy_config):
+        """Loop-local fields (interval_seconds/symbol/timeframe) are persisted but
+        reported as restart_required rather than silently hot-applied."""
+        from unittest.mock import MagicMock
+
+        from src.engine.orchestrator import StrategyOrchestrator
+
+        client.post("/strategies", json={
+            "name": "restarty", "strategy_type": "rsi", "interval_seconds": 30,
+        })
+
+        orch = StrategyOrchestrator(client=MagicMock(), executor=MagicMock())
+        orch.executor._positions = {}
+        cfg = make_strategy_config(name="restarty", interval_seconds=30)
+        strat = MagicMock()
+        strat.config = cfg
+        orch._strategies["restarty"] = strat
+        client.app.state.orchestrator = orch
+
+        resp = client.patch("/strategies/restarty", json={"interval_seconds": 60})
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["interval_seconds"] == 60                                  # DB updated
+        assert cfg.interval_seconds == 30                                      # live unchanged
+        assert "interval_seconds" in data["live_update"]["restart_required"]
+
     def test_delete_strategy(self, client):
         client.post("/strategies", json={
             "name": "delete-test",

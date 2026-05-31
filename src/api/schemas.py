@@ -200,6 +200,9 @@ class StrategyInstanceOut(BaseModel):
     error_message: Optional[str] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
+    # Populated by PATCH when the change was hot-applied to a running strategy:
+    # {applied, deferred, restart_required, running}. None on create/read.
+    live_update: Optional[Dict[str, Any]] = None
 
     class Config:
         from_attributes = True
