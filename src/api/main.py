@@ -555,12 +555,12 @@ async def lifespan(app: FastAPI):
                             _wr, _payoff, _n = executor._live_edge_stats(_cinst.name)
                             _cinst.edge_confidence_score = edge_confidence(_n, _wr, _payoff)
 
-                # Dynamic winner detection from live stats
+                # Dynamic winner detection from live stats.
+                # Static fallback is intentionally minimal — only strategies with confirmed live
+                # positive PnL qualify. Stale "hopeful" entries cause the compounder to
+                # allocate capital to losers after restarts.
                 _STATIC_WINNERS = {
-                    'vwap-btc', 'rsi-btc', 'pivot-btc', 'turtle-btc',
-                    'adx-eth', 'macd-btc', 'macd-sol',
-                    'liqadx-btc', 'liqadx-eth',       # MoonDev: 494% return, Sharpe 2.81
-                    'flip-flop-btc', 'flip-flop-eth',  # MoonDev: 529% return, WR 81%
+                    'flip-flop-btc',  # only confirmed live winner (+$16.66, trend asymmetry)
                 }
                 _WINNER_MIN_TRADES = 1
                 dynamic_winners = {
@@ -570,11 +570,12 @@ async def lifespan(app: FastAPI):
                 }
                 _WINNER_SET = dynamic_winners if dynamic_winners else _STATIC_WINNERS
 
-                # Winners-first: concentrate investable on proven winners,
-                # non-winners stay at $100 for signal discovery.
+                # Winners-first: concentrate ALL investable capital on proven winners.
+                # No per-winner cap — more capital on confirmed edges is faster compounding.
+                # Non-winners get $100 minimum for signal discovery only.
                 _winners_running = [r for r in running if r.name in _WINNER_SET]
-                _winner_unit = min(
-                    round(investable / max(len(_winners_running), 1), 2), 3000.0
+                _winner_unit = (
+                    round(investable / max(len(_winners_running), 1), 2)
                 ) if _winners_running else 100.0
                 _OTHER_SIZE = 100.0
 
