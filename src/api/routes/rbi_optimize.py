@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import traceback
 from dataclasses import asdict
 from typing import Any, Optional
 
@@ -84,8 +85,10 @@ async def _run_trigger_background(strategy_type: str, strategy_id: int, symbol: 
         result["status"] = "completed"
         logger.info("RBI background trigger done: %s promoted=%s", strategy_type, event.promoted)
     except Exception as e:
-        result = {"status": "error", "strategy_type": strategy_type, "detail": str(e)}
-        logger.error("RBI background trigger failed for %s: %s", strategy_type, e)
+        tb = traceback.format_exc()
+        detail = str(e) or repr(e)
+        result = {"status": "error", "strategy_type": strategy_type, "detail": detail, "traceback": tb}
+        logger.error("RBI background trigger failed for %s: %s\n%s", strategy_type, detail, tb)
     finally:
         _trigger_running.discard(strategy_type)
     _trigger_results[strategy_type] = result
