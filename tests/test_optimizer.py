@@ -57,8 +57,11 @@ def test_passes_walkforward_fails_low_win_rate(engine):
 
 
 def test_passes_walkforward_fails_too_few_trades(engine):
+    # MIN_OOS_TRADES is the permissive research screen (currently 5); the strict
+    # promotion gate is PROMOTION_MIN_OOS_TRADES (30). Use a count below the screen
+    # so this asserts the too-few-trades rejection specifically.
     result = MagicMock(
-        profit_factor=1.5, win_rate=45.0, total_trades=10, max_drawdown_pct=8.0, sharpe_ratio=0.8,
+        profit_factor=1.5, win_rate=45.0, total_trades=4, max_drawdown_pct=8.0, sharpe_ratio=0.8,
     )
     assert engine._passes_walkforward(result) is False
 

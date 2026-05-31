@@ -115,6 +115,33 @@ class BaseStrategy(ABC):
         """Analyze market data + current position, return exit signal or None."""
         ...
 
+    def _risk_reflex_exit(self, position: Dict[str, Any]) -> Optional[Signal]:
+        """State-independent stop-loss / take-profit from the live position's PnL and
+        this config's ``max_loss_pct`` / ``target_pct``.
+
+        Strategies that track entry state internally (e.g. ``_entry_bar``) and early-return
+        None from ``should_exit`` should call this FIRST, so an open position is still
+        protected when that internal state is unavailable — most importantly after a process
+        restart, where the strategy has no record of the entry but the executor still holds a
+        real position. Returns a CLOSE signal, or None when within the configured band.
+        """
+        pnl_perc = position.get("pnl_perc")
+        if pnl_perc is None:
+            return None
+        is_long = position.get("is_long", position.get("size", 0) > 0)
+        close_type = SignalType.CLOSE_LONG if is_long else SignalType.CLOSE_SHORT
+        if pnl_perc <= self.config.max_loss_pct:
+            return Signal(
+                signal_type=close_type, symbol=self.config.symbol,
+                reason=f"max-loss reflex {pnl_perc:.1f}% <= {self.config.max_loss_pct:.1f}%",
+            )
+        if pnl_perc >= self.config.target_pct:
+            return Signal(
+                signal_type=close_type, symbol=self.config.symbol,
+                reason=f"target reflex {pnl_perc:.1f}% >= {self.config.target_pct:.1f}%",
+            )
+        return None
+
     async def on_start(self) -> None:
         self.state.is_running = True
         self.state.start_time = datetime.now(timezone.utc)

@@ -175,6 +175,21 @@ class StrategyOrchestrator:
             return True  # unknown structure → conservative: treat as open, defer tightening
         return any(getattr(p, "strategy_name", None) == name for p in positions.values())
 
+    @staticmethod
+    def _hard_stop_triggered(position, config) -> bool:
+        """True iff the live position is at/beyond its configured ``max_loss_pct``.
+
+        Execution-layer capital floor, enforced in the run loop independent of the
+        strategy's own ``should_exit`` — backstops a strategy whose ``should_exit``
+        raised (``run_iteration`` swallows the exception and emits no signal) or whose
+        internal entry tracking desynced. Tolerant of a missing/None pnl or a non-dict
+        position (answers False — never force-close on unknown PnL).
+        """
+        if not isinstance(position, dict):
+            return False
+        pnl_perc = position.get("pnl_perc")
+        return pnl_perc is not None and pnl_perc <= config.max_loss_pct
+
     def update_live_params(self, name: str, fields: Dict, *, force: bool = False) -> Dict:
         """Apply config changes to a LIVE running strategy in-memory — no restart, no DB.
 
@@ -501,6 +516,18 @@ class StrategyOrchestrator:
                         await self.executor.close_by_strategy(name)
                         await asyncio.sleep(sleep_seconds)
                         continue
+
+                # ── Hard stop (reflex layer): force-close at/beyond configured max_loss,
+                # independent of strategy.should_exit. Backstops a should_exit that raised
+                # (run_iteration swallows it) or a strategy whose entry tracking desynced
+                # (e.g. after a restart), so an open position is always protected. ──
+                if self._hard_stop_triggered(position, strategy.config):
+                    logger.critical(
+                        "[HARD-STOP] %s %s pnl=%.2f%% <= max_loss=%.2f%% — force-closing",
+                        name, symbol, position.get("pnl_perc"), strategy.config.max_loss_pct)
+                    await self.executor.close_by_strategy(name)
+                    await asyncio.sleep(sleep_seconds)
+                    continue
 
                 # Run strategy iteration (includes per-strategy anti-overtrading)
                 signal = await strategy.run_iteration(data, position)

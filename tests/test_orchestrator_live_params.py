@@ -159,3 +159,19 @@ def test_has_open_position_detects_by_strategy_name(make_strategy_config):
     }
     assert orch.has_open_position("adx-eth") is True
     assert orch.has_open_position("nope") is False
+
+
+def test_hard_stop_triggered_at_or_beyond_max_loss(make_strategy_config):
+    """Execution-layer hard stop: True only when the live position's PnL is at/beyond
+    the configured max_loss. Backstops a strategy whose should_exit errored or whose
+    entry tracking desynced. Tolerant of missing/None pnl and non-dict positions."""
+    orch = _make_orch()
+    cfg = make_strategy_config(max_loss_pct=-10.0)
+
+    assert orch._hard_stop_triggered({"pnl_perc": -11.0}, cfg) is True   # beyond
+    assert orch._hard_stop_triggered({"pnl_perc": -10.0}, cfg) is True   # exactly at
+    assert orch._hard_stop_triggered({"pnl_perc": -9.0}, cfg) is False   # within band
+    assert orch._hard_stop_triggered({"pnl_perc": 5.0}, cfg) is False    # winning
+    assert orch._hard_stop_triggered({"pnl_perc": None}, cfg) is False   # unknown pnl
+    assert orch._hard_stop_triggered({}, cfg) is False                   # no pnl key
+    assert orch._hard_stop_triggered(None, cfg) is False                 # no position

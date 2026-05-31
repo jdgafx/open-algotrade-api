@@ -84,7 +84,11 @@ def test_memory_context_included_in_prompt():
         return {"proceed": True, "confidence": 0.9, "reason": "aligned"}
 
     import asyncio
-    with patch("src.engine.llm_gate._call_openrouter", new=fake_call):
+    # evaluate() reads OPENROUTER_API_KEY at call-time to choose the OpenRouter path
+    # over the Anthropic fallback, so the key must be set around the call (not only
+    # around construction) for the patched _call_openrouter to be exercised.
+    with patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-test"}), \
+            patch("src.engine.llm_gate._call_openrouter", new=fake_call):
         asyncio.run(gate.evaluate(ctx))
 
     assert "Past similar trades" in captured_prompt["prompt"]

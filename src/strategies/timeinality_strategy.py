@@ -91,6 +91,11 @@ class TimeinailityStrategy(BaseStrategy):
         )
 
     async def should_exit(self, data: pd.DataFrame, position: Dict[str, Any]) -> Optional[Signal]:
+        # State-independent risk reflex first: honor max_loss / target from the live
+        # position even if entry tracking is unavailable (e.g. after a restart).
+        reflex = self._risk_reflex_exit(position)
+        if reflex is not None:
+            return reflex
         if self._entry_bar is None:
             return None
 
