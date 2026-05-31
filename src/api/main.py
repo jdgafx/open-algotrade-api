@@ -574,7 +574,7 @@ async def lifespan(app: FastAPI):
                 # non-winners stay at $100 for signal discovery.
                 _winners_running = [r for r in running if r.name in _WINNER_SET]
                 _winner_unit = min(
-                    round(investable / max(len(_winners_running), 1), 2), 1500.0
+                    round(investable / max(len(_winners_running), 1), 2), 3000.0
                 ) if _winners_running else 100.0
                 _OTHER_SIZE = 100.0
 
