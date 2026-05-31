@@ -31,6 +31,16 @@ from src.engine.param_spaces import PARAM_SPACES
 
 models.Base.metadata.create_all(bind=engine)
 
+# Inline migration: add columns introduced after the initial schema was created.
+# create_all() skips existing tables, so new Column()s on old tables never land
+# without an explicit ALTER TABLE.
+from sqlalchemy import text as _sql_text  # noqa: E402
+with engine.connect() as _conn:
+    _cols = {row[1] for row in _conn.execute(_sql_text("PRAGMA table_info(strategy_instances)"))}
+    if "edge_confidence_score" not in _cols:
+        _conn.execute(_sql_text("ALTER TABLE strategy_instances ADD COLUMN edge_confidence_score FLOAT DEFAULT 0.0"))
+        _conn.commit()
+
 logger = logging.getLogger(__name__)
 
 

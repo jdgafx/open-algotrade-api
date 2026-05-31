@@ -1,0 +1,8 @@
+.claude-flow/
+.omc/
+TIMELINE.md
+agentdb.rvf.lock
+*.lock
+.env
+tests/
+*.db
