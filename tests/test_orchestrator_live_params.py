@@ -115,6 +115,23 @@ def test_restart_required_fields_reported_not_applied(make_strategy_config):
     assert result["applied"] == []
 
 
+def test_enabled_change_reports_restart_required(make_strategy_config):
+    """The run loop never re-reads config.enabled (only the start gate does), so a
+    live flip cannot stop a running strategy. It must be reported restart_required,
+    not claimed applied — the API must not tell an operator a strategy is disabled
+    while it keeps trading. (Urgent halt is POST /strategies/{name}/stop.)"""
+    orch = _make_orch()
+    cfg = make_strategy_config(name="rsi-btc")
+    _add_running(orch, "rsi-btc", cfg)
+    assert cfg.enabled is True
+
+    result = orch.update_live_params("rsi-btc", {"enabled": False})
+
+    assert cfg.enabled is True                          # NOT mutated live
+    assert "enabled" in result["restart_required"]
+    assert "enabled" not in result["applied"]
+
+
 def test_params_are_merged_not_replaced(make_strategy_config):
     """params is shallow-merged into the existing config.params (RBI write-back shape)."""
     orch = _make_orch()

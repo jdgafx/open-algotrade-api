@@ -36,15 +36,19 @@ logger = logging.getLogger(__name__)
 
 
 # ── Live-tuning field classes (which config changes can hot-apply to a running strategy) ──
-# Forward-looking fields only affect the NEXT entry's sizing/leverage, never an open
-# position, so they are always safe to apply live.
-HOT_FORWARD_FIELDS = frozenset({"leverage", "size_usd", "enabled", "lookback_days"})
+# Forward-looking fields are re-read from config on every iteration / at the next entry,
+# so they affect only the NEXT entry's sizing/leverage, never an open position — always
+# safe to apply live.
+HOT_FORWARD_FIELDS = frozenset({"leverage", "size_usd", "lookback_days"})
 # Exit-threshold fields are read by should_exit() on the next bar, so tightening one
 # while a position is open can instantly force-close it — defer until flat (or force).
 EXIT_THRESHOLD_FIELDS = frozenset({"target_pct", "max_loss_pct"})
-# These are captured loop-local at strategy-loop start, so a live mutation has no
-# effect until the strategy is restarted.
-RESTART_REQUIRED_FIELDS = frozenset({"symbol", "timeframe", "interval_seconds"})
+# Fields the running loop does not honor live: symbol/timeframe/interval_seconds are
+# captured loop-local at strategy-loop start, and `enabled` is read only by the start
+# gate (start_all), never re-checked inside _run_strategy_loop. A live mutation has no
+# effect until restart, so report it rather than claim a (false) live apply. Urgent
+# halt of a running strategy is POST /strategies/{name}/stop, not enabled=false.
+RESTART_REQUIRED_FIELDS = frozenset({"symbol", "timeframe", "interval_seconds", "enabled"})
 
 
 class StrategyOrchestrator:
@@ -179,13 +183,15 @@ class StrategyOrchestrator:
         reach the running process (closing the "DB-only write-back" gap).
 
         Field handling:
-          - HOT_FORWARD_FIELDS (leverage/size_usd/enabled/lookback_days): applied now;
+          - HOT_FORWARD_FIELDS (leverage/size_usd/lookback_days): applied now;
             forward-looking only, so safe even with an open position.
           - EXIT_THRESHOLD_FIELDS (target_pct/max_loss_pct): applied now only if the
             strategy is flat OR force=True; otherwise DEFERRED (would force-close an
             open position on the next bar via should_exit).
-          - RESTART_REQUIRED_FIELDS (symbol/timeframe/interval_seconds): never hot-applied
-            (captured loop-local); reported so the caller can prompt a restart.
+          - RESTART_REQUIRED_FIELDS (symbol/timeframe/interval_seconds/enabled): not
+            honored by the running loop; reported (never claimed applied) so the caller
+            can prompt a restart. enabled=false does NOT stop a running strategy —
+            use POST /strategies/{name}/stop for that.
           - "params": shallow-merged into config.params (forward-looking for signals).
 
         Returns {"applied": [...], "deferred": [...], "restart_required": [...],
