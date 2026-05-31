@@ -565,8 +565,8 @@ async def lifespan(app: FastAPI):
                 _WINNER_MIN_TRADES = 1
                 dynamic_winners = {
                     r.name for r in running
-                    if _live_stats.get(r.name, {}).get("pnl", 0.0) > 0
-                    and _live_stats.get(r.name, {}).get("trades", 0) >= _WINNER_MIN_TRADES
+                    if _live_stats.get(r.name, {}).get("pnl", r.total_pnl) > 0
+                    and _live_stats.get(r.name, {}).get("trades", r.total_trades) >= _WINNER_MIN_TRADES
                 }
                 _WINNER_SET = dynamic_winners if dynamic_winners else _STATIC_WINNERS
 
