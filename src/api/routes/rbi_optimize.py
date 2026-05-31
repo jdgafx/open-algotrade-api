@@ -1,9 +1,10 @@
+import asyncio
 import logging
 from dataclasses import asdict
 from typing import Any, Optional
 
 import httpx
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, BackgroundTasks, HTTPException
 from pydantic import BaseModel, Field
 
 from src.engine.llm_gate import llm_gate
@@ -15,6 +16,9 @@ router = APIRouter(prefix="/optimize/rbi", tags=["rbi-optimizer"])
 
 _optimizer = OptimizationEngine(commission_pct=0.14)  # 2x 0.07% research default; promote only on worst-case slippage
 _pipelines: dict[str, RBIPipeline] = {}
+# In-flight and completed trigger results keyed by strategy_type
+_trigger_results: dict[str, dict] = {}
+_trigger_running: set[str] = set()
 
 BACKEND_BASE = "http://localhost:8000"
 
@@ -65,25 +69,52 @@ class TriggerRequest(BaseModel):
     n_trials: int = Field(default=100, ge=10, le=300)
 
 
-@router.post("/trigger/{strategy_type}")
-async def trigger_optimization(strategy_type: str, req: TriggerRequest):
-    """Manually trigger an RBI optimize+promote cycle for a strategy."""
+async def _run_trigger_background(strategy_type: str, strategy_id: int, symbol: str,
+                                   timeframe: str, lookback_days: int, n_trials: int):
+    """Run RBI cycle in background; store result in _trigger_results."""
+    _trigger_running.add(strategy_type)
     pipeline = _get_or_create_pipeline(strategy_type)
     try:
         event = await pipeline.run_cycle(
-            strategy_type=strategy_type,
-            strategy_id=req.strategy_id,
-            symbol=req.symbol,
-            timeframe=req.timeframe,
-            lookback_days=req.lookback_days,
-            n_trials=req.n_trials,
+            strategy_type=strategy_type, strategy_id=strategy_id,
+            symbol=symbol, timeframe=timeframe,
+            lookback_days=lookback_days, n_trials=n_trials,
         )
-        return asdict(event)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        result = asdict(event)
+        result["status"] = "completed"
+        logger.info("RBI background trigger done: %s promoted=%s", strategy_type, event.promoted)
     except Exception as e:
-        logger.error("RBI trigger failed for %s: %s", strategy_type, e)
-        raise HTTPException(status_code=500, detail=str(e))
+        result = {"status": "error", "strategy_type": strategy_type, "detail": str(e)}
+        logger.error("RBI background trigger failed for %s: %s", strategy_type, e)
+    finally:
+        _trigger_running.discard(strategy_type)
+    _trigger_results[strategy_type] = result
+
+
+@router.post("/trigger/{strategy_type}", status_code=202)
+async def trigger_optimization(strategy_type: str, req: TriggerRequest,
+                                background_tasks: BackgroundTasks):
+    """Manually trigger an RBI optimize+promote cycle (async, returns 202 immediately).
+    Poll GET /optimize/rbi/trigger/{strategy_type}/status for result."""
+    if strategy_type in _trigger_running:
+        raise HTTPException(status_code=409, detail=f"{strategy_type} optimization already running")
+    background_tasks.add_task(
+        _run_trigger_background,
+        strategy_type, req.strategy_id, req.symbol,
+        req.timeframe, req.lookback_days, req.n_trials,
+    )
+    return {"status": "accepted", "strategy_type": strategy_type,
+            "message": f"Optimization queued — poll /optimize/rbi/trigger/{strategy_type}/status"}
+
+
+@router.get("/trigger/{strategy_type}/status")
+async def trigger_status(strategy_type: str):
+    """Check status of a background RBI trigger."""
+    if strategy_type in _trigger_running:
+        return {"status": "running", "strategy_type": strategy_type}
+    if strategy_type in _trigger_results:
+        return _trigger_results[strategy_type]
+    return {"status": "not_started", "strategy_type": strategy_type}
 
 
 @router.get("/history")

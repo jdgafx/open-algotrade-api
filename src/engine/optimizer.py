@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -71,6 +72,7 @@ class OptimizationEngine:
         )
 
         for _ in range(n_trials):
+            await asyncio.sleep(0)  # yield to event loop between trials so concurrent runs interleave
             trial = study.ask()
             try:
                 params = suggest_params(trial, strategy_type)
