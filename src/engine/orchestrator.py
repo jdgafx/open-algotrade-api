@@ -35,6 +35,17 @@ from src.strategies.registry import create_strategy, get_strategy_class
 logger = logging.getLogger(__name__)
 
 
+# ── Live-tuning field classes (which config changes can hot-apply to a running strategy) ──
+# Forward-looking fields only affect the NEXT entry's sizing/leverage, never an open
+# position, so they are always safe to apply live.
+HOT_FORWARD_FIELDS = frozenset({"leverage", "size_usd", "enabled", "lookback_days"})
+# Exit-threshold fields are read by should_exit() on the next bar, so tightening one
+# while a position is open can instantly force-close it — defer until flat (or force).
+EXIT_THRESHOLD_FIELDS = frozenset({"target_pct", "max_loss_pct"})
+# These are captured loop-local at strategy-loop start, so a live mutation has no
+# effect until the strategy is restarted.
+RESTART_REQUIRED_FIELDS = frozenset({"symbol", "timeframe", "interval_seconds"})
+
 
 class StrategyOrchestrator:
     """
@@ -146,6 +157,80 @@ class StrategyOrchestrator:
         strategy_type = self._strategy_types.get(name, "")
         return adaptation_multiplier(strategy_type, side, atr_pct, current_regime,
                                      favorable_types, funding_bias)
+
+    def has_open_position(self, name: str) -> bool:
+        """Best-effort sync check: does strategy `name` currently hold an open position?
+
+        Reads the paper executor's in-memory `_positions` map. If the executor exposes
+        no such map (e.g. a live executor whose positions live remotely), we cannot tell
+        synchronously, so we answer conservatively (True) — callers use this only to
+        decide whether to DEFER an exit-threshold change, and deferring is the safe side.
+        """
+        positions = getattr(self.executor, "_positions", None)
+        if not isinstance(positions, dict):
+            return True  # unknown structure → conservative: treat as open, defer tightening
+        return any(getattr(p, "strategy_name", None) == name for p in positions.values())
+
+    def update_live_params(self, name: str, fields: Dict, *, force: bool = False) -> Dict:
+        """Apply config changes to a LIVE running strategy in-memory — no restart, no DB.
+
+        This is the hot-apply primitive the compounder/boost paths already use inline;
+        centralizing it lets the PATCH endpoint and the RBI promotion write-back actually
+        reach the running process (closing the "DB-only write-back" gap).
+
+        Field handling:
+          - HOT_FORWARD_FIELDS (leverage/size_usd/enabled/lookback_days): applied now;
+            forward-looking only, so safe even with an open position.
+          - EXIT_THRESHOLD_FIELDS (target_pct/max_loss_pct): applied now only if the
+            strategy is flat OR force=True; otherwise DEFERRED (would force-close an
+            open position on the next bar via should_exit).
+          - RESTART_REQUIRED_FIELDS (symbol/timeframe/interval_seconds): never hot-applied
+            (captured loop-local); reported so the caller can prompt a restart.
+          - "params": shallow-merged into config.params (forward-looking for signals).
+
+        Returns {"applied": [...], "deferred": [...], "restart_required": [...],
+                 "running": bool}. A non-running strategy is a no-op with running=False.
+        """
+        strat = self.get_strategy(name)
+        if strat is None:
+            return {"applied": [], "deferred": [], "restart_required": [], "running": False}
+
+        fields = fields or {}
+        applied: List[str] = []
+        deferred: List[str] = []
+        restart_required: List[str] = []
+
+        # Only pay for the open-position check when an exit-threshold change is requested.
+        touches_exit = bool({k for k, v in fields.items() if v is not None} & EXIT_THRESHOLD_FIELDS)
+        open_pos = self.has_open_position(name) if touches_exit else False
+
+        for key, val in fields.items():
+            if val is None:
+                continue
+            if key == "params" and isinstance(val, dict):
+                strat.config.params.update(val)
+                applied.append("params")
+            elif key in RESTART_REQUIRED_FIELDS:
+                restart_required.append(key)
+            elif key in EXIT_THRESHOLD_FIELDS:
+                if open_pos and not force:
+                    deferred.append(key)
+                else:
+                    setattr(strat.config, key, val)
+                    applied.append(key)
+            elif key in HOT_FORWARD_FIELDS:
+                setattr(strat.config, key, val)
+                applied.append(key)
+            # unknown keys are ignored (not live-applicable config attributes)
+
+        if applied or deferred or restart_required:
+            logger.info(
+                "Live-tune %s | applied=%s deferred=%s restart_required=%s%s",
+                name, applied, deferred, restart_required,
+                " (forced)" if force else "",
+            )
+        return {"applied": applied, "deferred": deferred,
+                "restart_required": restart_required, "running": True}
 
     async def start_strategy(self, name: str):
         """Start a single strategy's run loop."""
