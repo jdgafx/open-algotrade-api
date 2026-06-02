@@ -69,10 +69,14 @@ def _select_cull_candidates(
 
     `stats` maps strategy_name -> {"pnl": float, "trades": int, "win_rate": float}.
     A name is selected when it is NOT a confirmed winner AND it has cleared the
-    trade-count floor AND it is either bleeding PnL or has a sub-floor win-rate:
+    trade-count floor AND it is actually losing money via one of two triggers:
 
         (pnl <= min_pnl AND trades >= min_trades)
-        OR (win_rate < min_winrate AND trades >= min_trades)
+        OR (win_rate < min_winrate AND pnl < 0 AND trades >= min_trades)
+
+    The `pnl < 0` guard on the win-rate trigger protects asymmetric net-positive
+    strategies (few wins, big trend wins — e.g. flip-flop-btc at ~30% win-rate)
+    from being culled just for a low hit-rate: a bleeder by definition loses money.
 
     Result is sorted by pnl ascending (worst bleeders first) and truncated to
     `max_per_run`. No I/O — this is the unit-tested core of the cull job.
@@ -86,7 +90,7 @@ def _select_cull_candidates(
         win_rate = float(s.get("win_rate", 0.0))
         if trades < min_trades:
             continue
-        if (pnl <= min_pnl) or (win_rate < min_winrate):
+        if (pnl <= min_pnl) or (win_rate < min_winrate and pnl < 0.0):
             candidates.append((pnl, name))
     candidates.sort(key=lambda c: c[0])  # worst PnL first
     return [name for _pnl, name in candidates[:max_per_run]]
@@ -693,7 +697,12 @@ async def lifespan(app: FastAPI):
                     if _live.get(r.name, {}).get("pnl", r.total_pnl) > 0
                     and _live.get(r.name, {}).get("trades", r.total_trades) >= _WINNER_MIN_TRADES
                 }
-                _WINNER_SET = dynamic_winners if dynamic_winners else _STATIC_WINNERS
+                # Union, NOT fallback: a confirmed static winner must stay
+                # protected even when dynamic detection is non-empty AND its own
+                # in-memory PnL momentarily reads <=0 (e.g. right after a redeploy
+                # resets executor trade history). Fallback-only left flip-flop-btc
+                # exposed in exactly that window.
+                _WINNER_SET = dynamic_winners | _STATIC_WINNERS
 
                 # Stats dict in the shape _select_cull_candidates expects, scoped
                 # to RUNNING strategies only.
