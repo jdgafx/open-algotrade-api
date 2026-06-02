@@ -614,21 +614,32 @@ async def lifespan(app: FastAPI):
                 _STATIC_WINNERS = {
                     'flip-flop-btc',  # only confirmed live winner (+$16.66, trend asymmetry)
                 }
-                _WINNER_MIN_TRADES = 1
+                _WINNER_MIN_TRADES = 6  # require a real sample — 2-4 trade noise no longer qualifies as a winner
                 dynamic_winners = {
                     r.name for r in running
                     if _live_stats.get(r.name, {}).get("pnl", r.total_pnl) > 0
                     and _live_stats.get(r.name, {}).get("trades", r.total_trades) >= _WINNER_MIN_TRADES
                 }
-                _WINNER_SET = dynamic_winners if dynamic_winners else _STATIC_WINNERS
+                # Union, NOT fallback: a confirmed static winner must stay
+                # protected even when dynamic detection is non-empty AND its own
+                # in-memory PnL momentarily reads <=0 (e.g. right after a redeploy
+                # resets executor trade history). Fallback-only left flip-flop-btc
+                # exposed in exactly that window.
+                _WINNER_SET = dynamic_winners | _STATIC_WINNERS
 
-                # Winners-first: concentrate ALL investable capital on proven winners.
-                # No per-winner cap — more capital on confirmed edges is faster compounding.
+                # Winners-first: concentrate investable capital on proven winners.
+                # Soft per-winner cap: no single winner gets more than 50% of the
+                # current balance (env WINNER_MAX_PCT). With a lone winner this
+                # leaves the rest unallocated as reserve instead of dumping all
+                # investable into one strategy.
                 # Non-winners get $100 minimum for signal discovery only.
                 _winners_running = [r for r in running if r.name in _WINNER_SET]
                 _winner_unit = (
                     round(investable / max(len(_winners_running), 1), 2)
                 ) if _winners_running else 100.0
+                _WINNER_MAX_PCT = float(os.getenv("WINNER_MAX_PCT", "0.50"))
+                _WINNER_MAX_USD = balance * _WINNER_MAX_PCT
+                _winner_unit = min(_winner_unit, _WINNER_MAX_USD)
                 _OTHER_SIZE = 100.0
 
                 for _cinst in running:
