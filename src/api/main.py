@@ -44,6 +44,54 @@ with engine.connect() as _conn:
 logger = logging.getLogger(__name__)
 
 
+# ── Bleeder-cull controller config (env-overridable) ──
+# Autonomously stops chronic loser strategies so they stop bleeding the paper
+# balance. Tuned conservatively: a strategy must clear a trade-count floor
+# before either a PnL or a win-rate trigger can fire, and confirmed winners are
+# never culled (see _cull_job's winner-set computation).
+CULL_MIN_PNL = float(os.getenv("CULL_MIN_PNL", "-15.0"))        # cull if cumulative PnL <= this
+CULL_MIN_TRADES = int(os.getenv("CULL_MIN_TRADES", "6"))         # need this many closed trades first
+CULL_MIN_WINRATE = float(os.getenv("CULL_MIN_WINRATE", "0.25"))  # cull if win-rate below this
+CULL_MAX_PER_RUN = int(os.getenv("CULL_MAX_PER_RUN", "3"))       # cap culls per run (safety brake)
+CULL_INTERVAL_MIN = int(os.getenv("CULL_INTERVAL_MIN", "15"))    # scheduler cadence (minutes)
+
+
+def _select_cull_candidates(
+    stats: dict,
+    winners: set,
+    *,
+    min_pnl: float,
+    min_trades: int,
+    min_winrate: float,
+    max_per_run: int,
+) -> list[str]:
+    """Pure selection of which RUNNING strategies should be culled.
+
+    `stats` maps strategy_name -> {"pnl": float, "trades": int, "win_rate": float}.
+    A name is selected when it is NOT a confirmed winner AND it has cleared the
+    trade-count floor AND it is either bleeding PnL or has a sub-floor win-rate:
+
+        (pnl <= min_pnl AND trades >= min_trades)
+        OR (win_rate < min_winrate AND trades >= min_trades)
+
+    Result is sorted by pnl ascending (worst bleeders first) and truncated to
+    `max_per_run`. No I/O — this is the unit-tested core of the cull job.
+    """
+    candidates: list[tuple[float, str]] = []
+    for name, s in stats.items():
+        if name in winners:
+            continue
+        pnl = float(s.get("pnl", 0.0))
+        trades = int(s.get("trades", 0))
+        win_rate = float(s.get("win_rate", 0.0))
+        if trades < min_trades:
+            continue
+        if (pnl <= min_pnl) or (win_rate < min_winrate):
+            candidates.append((pnl, name))
+    candidates.sort(key=lambda c: c[0])  # worst PnL first
+    return [name for _pnl, name in candidates[:max_per_run]]
+
+
 def _auto_deploy_winners(db, orchestrator):
     """Deploy default winner strategies into an empty DB so they auto-start."""
     winners = [
@@ -598,6 +646,123 @@ async def lifespan(app: FastAPI):
         except Exception as _ce:
             logger.error("Compound job error: %s", _ce)
 
+    async def _cull_job():
+        """Autonomously stop chronic loser strategies so they stop bleeding.
+
+        Mirrors the compounder: rebuilds live per-strategy stats from
+        executor.get_trade_history(), computes the same winner set (so a winner
+        is never culled), then uses the pure _select_cull_candidates() helper to
+        pick bleeders and stops each via the exact reversible sequence the manual
+        /strategies/{name}/stop route uses.
+        """
+        try:
+            if not (paper_mode and executor and orchestrator):
+                return
+            from .database import SessionLocal as _KSL
+            _kdb = _KSL()
+            try:
+                running = _kdb.query(models.StrategyInstance).filter(
+                    models.StrategyInstance.status == "running"
+                ).all()
+                if not running:
+                    return
+
+                # Build real per-strategy stats from live executor memory (same
+                # pattern as the compounder — DB is always stale).
+                _live: dict = {}
+                for _t in executor.get_trade_history():
+                    _sname = _t.get("strategy", "")
+                    if not _sname:
+                        continue
+                    if _sname not in _live:
+                        _live[_sname] = {"pnl": 0.0, "trades": 0, "wins": 0}
+                    if _t.get("action") == "exit":
+                        _live[_sname]["trades"] += 1
+                        _live[_sname]["pnl"] += _t.get("pnl", 0.0)
+                        if (_t.get("pnl") or 0.0) > 0:
+                            _live[_sname]["wins"] += 1
+
+                # Winner set, computed exactly as the compounder does, so a
+                # confirmed winner can never be culled.
+                _STATIC_WINNERS = {
+                    'flip-flop-btc',  # only confirmed live winner (+$16.66, trend asymmetry)
+                }
+                _WINNER_MIN_TRADES = 1
+                dynamic_winners = {
+                    r.name for r in running
+                    if _live.get(r.name, {}).get("pnl", r.total_pnl) > 0
+                    and _live.get(r.name, {}).get("trades", r.total_trades) >= _WINNER_MIN_TRADES
+                }
+                _WINNER_SET = dynamic_winners if dynamic_winners else _STATIC_WINNERS
+
+                # Stats dict in the shape _select_cull_candidates expects, scoped
+                # to RUNNING strategies only.
+                _stats: dict = {}
+                for r in running:
+                    _s = _live.get(r.name, {})
+                    _trades = int(_s.get("trades", r.total_trades or 0))
+                    _wins = int(_s.get("wins", r.winning_trades or 0))
+                    _stats[r.name] = {
+                        "pnl": float(_s.get("pnl", r.total_pnl or 0.0)),
+                        "trades": _trades,
+                        "win_rate": (_wins / _trades) if _trades else 0.0,
+                    }
+
+                _to_cull = _select_cull_candidates(
+                    _stats, _WINNER_SET,
+                    min_pnl=CULL_MIN_PNL, min_trades=CULL_MIN_TRADES,
+                    min_winrate=CULL_MIN_WINRATE, max_per_run=CULL_MAX_PER_RUN,
+                )
+                if not _to_cull:
+                    return
+
+                _by_name = {r.name: r for r in running}
+                _culled = 0
+                for _name in _to_cull:
+                    _inst = _by_name.get(_name)
+                    if _inst is None:
+                        continue
+                    _m = _stats.get(_name, {})
+                    _pnl = _m.get("pnl", 0.0)
+                    _trd = _m.get("trades", 0)
+                    _wr = _m.get("win_rate", 0.0)
+                    _reason = (
+                        "pnl<=min" if _pnl <= CULL_MIN_PNL else "winrate<min"
+                    )
+                    # Exact reversible stop sequence from /strategies/{name}/stop.
+                    try:
+                        await orchestrator.stop_strategy(_name)
+                        orchestrator.remove_strategy(_name)
+                    except Exception as _oe:
+                        logger.warning(
+                            "Cull: orchestrator stop error for %s (continuing): %s", _name, _oe
+                        )
+                    if hasattr(executor, "close_by_strategy"):
+                        try:
+                            _results = await executor.close_by_strategy(_name)
+                            _closed = sum(1 for _r in _results if _r.success)
+                            if _closed:
+                                logger.info("Cull: closed %d orphan position(s) for %s", _closed, _name)
+                        except Exception as _fe:
+                            logger.warning(
+                                "Cull: orphan flush error for %s (continuing): %s", _name, _fe
+                            )
+                    _inst.status = "stopped"
+                    _kdb.commit()
+                    _culled += 1
+                    logger.warning(
+                        "Bleeder-cull: stopped %s | pnl=$%.2f | trades=%d | win_rate=%.2f | reason=%s",
+                        _name, _pnl, _trd, _wr, _reason,
+                    )
+                logger.info(
+                    "Bleeder-cull run: culled %d/%d running (winners protected: %s)",
+                    _culled, len(running), sorted(_WINNER_SET),
+                )
+            finally:
+                _kdb.close()
+        except Exception as _ke:
+            logger.error("Cull job error: %s", _ke)
+
     from datetime import datetime as _dt
     _scheduler.add_job(
         _compound_job, "interval", minutes=15,
@@ -605,12 +770,20 @@ async def lifespan(app: FastAPI):
         replace_existing=True,
         next_run_time=_dt.now(),
     )
+    # Stagger the cull a few minutes after the compounder so the two jobs don't
+    # contend on the same DB session / executor state on the first tick.
+    _scheduler.add_job(
+        _cull_job, "interval", minutes=CULL_INTERVAL_MIN,
+        id="bleeder_cull",
+        replace_existing=True,
+        next_run_time=_dt.now() + timedelta(minutes=3),
+    )
 
     _scheduler.start()
     app.state.rbi_scheduler = _scheduler
     app.state.compound_initial_balance = _INITIAL_BALANCE
     app.state.compound_reserve_pct = _COMPOUND_RESERVE_PCT
-    logger.info("RBI scheduler started with %d jobs + compounder", len(_scheduler.get_jobs()) - 1)
+    logger.info("RBI scheduler started with %d jobs + compounder + bleeder-cull", len(_scheduler.get_jobs()) - 2)
 
     yield
 
