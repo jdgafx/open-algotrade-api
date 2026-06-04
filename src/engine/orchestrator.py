@@ -18,6 +18,7 @@ MoonDev Profitability Controls (integrated from 200-video analysis):
 
 import asyncio
 import logging
+import os
 import random
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
@@ -80,6 +81,18 @@ class StrategyOrchestrator:
         daily_loss_limit_pct: float = 2.0,
         max_portfolio_exposure_pct: float = 80.0,
     ):
+        # T020: optional Hyperliquid native-WS candle feed (env-gated, default OFF).
+        # Wraps the REST client so get_ohlcv is served from a live ws candle buffer with
+        # REST candleSnapshot fallback (zero strategy/loop changes; a dead socket degrades
+        # to today's REST behavior). Flip HL_WS_CANDLES=1 on Railway to activate + watch.
+        if os.getenv("HL_WS_CANDLES", "").strip().lower() in ("1", "true", "yes", "on"):
+            try:
+                from src.lib.hyperliquid_ws_client import HyperliquidWsClient
+
+                client = HyperliquidWsClient(client)
+                logger.info("HL WS candle feed ENABLED (orchestrator client wrapped)")
+            except Exception as e:  # noqa: BLE001 - never block startup on the ws upgrade
+                logger.warning("HL WS candle feed disabled (wrap failed: %s); using REST client", e)
         self.client = client
         self.executor = executor
         self.regime_detector = regime_detector

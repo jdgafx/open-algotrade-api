@@ -32,6 +32,16 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
+# The HL SDK eagerly processes spot metadata in Info/Exchange __init__. Current mainnet
+# spotMeta has a pair (@367) referencing a token index beyond tokens[] (479 > 464), which
+# IndexErrors on construct in some SDK versions (e.g. 0.22.0) and is a moving target as HL
+# adds spot listings. This is a PERP-only bot — no code path needs spot metadata — so we
+# pass an empty spot_meta to every Info/Exchange construction. This makes client
+# construction immune to that SDK/data inconsistency regardless of the installed SDK
+# version, removing a latent deploy landmine (unpinned SDK + a fresh pip install could
+# otherwise brick all client construction on startup).
+_EMPTY_SPOT_META = {"universe": [], "tokens": []}
+
 
 @dataclass
 class OrderResult:
@@ -92,8 +102,8 @@ class HyperliquidClient:
             self.base_url = constants.TESTNET_API_URL
 
         self.vault_address = vault_address or os.getenv("VAULT_ADDRESS")
-        self.info = Info(self.base_url, skip_ws=True)
-        self.exchange = Exchange(self.account, self.base_url)
+        self.info = Info(self.base_url, skip_ws=True, spot_meta=_EMPTY_SPOT_META)
+        self.exchange = Exchange(self.account, self.base_url, spot_meta=_EMPTY_SPOT_META)
 
         logger.info(
             "HyperliquidClient initialized | network=%s | account=%s | vault=%s",
@@ -966,7 +976,7 @@ class HyperliquidDataClient:
             self.base_url = constants.TESTNET_API_URL
 
         self.vault_address = None
-        self.info = Info(self.base_url, skip_ws=True)
+        self.info = Info(self.base_url, skip_ws=True, spot_meta=_EMPTY_SPOT_META)
 
         logger.info("HyperliquidDataClient initialized (read-only) | network=%s", self.network)
 
