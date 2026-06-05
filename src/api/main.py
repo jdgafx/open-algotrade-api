@@ -46,14 +46,17 @@ logger = logging.getLogger(__name__)
 
 # ── Bleeder-cull controller config (env-overridable) ──
 # Autonomously stops chronic loser strategies so they stop bleeding the paper
-# balance. Tuned conservatively: a strategy must clear a trade-count floor
-# before either a PnL or a win-rate trigger can fire, and confirmed winners are
-# never culled (see _cull_job's winner-set computation).
-CULL_MIN_PNL = float(os.getenv("CULL_MIN_PNL", "-15.0"))        # cull if cumulative PnL <= this
-CULL_MIN_TRADES = int(os.getenv("CULL_MIN_TRADES", "6"))         # need this many closed trades first
-CULL_MIN_WINRATE = float(os.getenv("CULL_MIN_WINRATE", "0.25"))  # cull if win-rate below this
-CULL_MAX_PER_RUN = int(os.getenv("CULL_MAX_PER_RUN", "3"))       # cap culls per run (safety brake)
-CULL_INTERVAL_MIN = int(os.getenv("CULL_INTERVAL_MIN", "15"))    # scheduler cadence (minutes)
+# balance. Tuned (2026-06-05 operator directive) to stop a clear bleeder within
+# ~a day instead of ~a week: a strategy still must clear a trade-count floor and
+# be genuinely losing before a PnL or win-rate trigger fires, confirmed winners
+# are never culled, and a running-book floor (CULL_MIN_RUNNING) caps how much the
+# more-aggressive thresholds can remove per book.
+CULL_MIN_PNL = float(os.getenv("CULL_MIN_PNL", "-10.0"))        # cull if cumulative PnL <= this (2026-06-05: -15 -> -10)
+CULL_MIN_TRADES = int(os.getenv("CULL_MIN_TRADES", "4"))         # need this many closed trades first (2026-06-05: 6 -> 4)
+CULL_MIN_WINRATE = float(os.getenv("CULL_MIN_WINRATE", "0.25"))  # cull if win-rate below this (guarded by pnl<0)
+CULL_MAX_PER_RUN = int(os.getenv("CULL_MAX_PER_RUN", "6"))       # cap culls per run (2026-06-05: 3 -> 6, clear backlog faster)
+CULL_INTERVAL_MIN = int(os.getenv("CULL_INTERVAL_MIN", "10"))    # scheduler cadence (2026-06-05: 15 -> 10 min)
+CULL_MIN_RUNNING = int(os.getenv("CULL_MIN_RUNNING", "12"))      # floor: never cull the running book below this (safety rail)
 
 
 def _select_cull_candidates(
@@ -637,7 +640,7 @@ async def lifespan(app: FastAPI):
                 _winner_unit = (
                     round(investable / max(len(_winners_running), 1), 2)
                 ) if _winners_running else 100.0
-                _WINNER_MAX_PCT = float(os.getenv("WINNER_MAX_PCT", "0.50"))
+                _WINNER_MAX_PCT = float(os.getenv("WINNER_MAX_PCT", "0.75"))  # 2026-06-05 operator: lean harder into the proven winner (was 0.50); ~25% reserve; env-overridable
                 _WINNER_MAX_USD = balance * _WINNER_MAX_PCT
                 _winner_unit = min(_winner_unit, _WINNER_MAX_USD)
                 _OTHER_SIZE = 100.0
@@ -735,6 +738,19 @@ async def lifespan(app: FastAPI):
                 )
                 if not _to_cull:
                     return
+
+                # Floor guard (2026-06-05 operator directive): the faster/looser cull
+                # thresholds must never strip the running book below CULL_MIN_RUNNING.
+                # _to_cull is already worst-PnL-first, so slicing keeps the worst bleeders.
+                _max_cullable = max(0, len(running) - CULL_MIN_RUNNING)
+                if _max_cullable <= 0:
+                    logger.info(
+                        "Bleeder-cull: %d running at/below floor %d — skipping cull this tick",
+                        len(running), CULL_MIN_RUNNING,
+                    )
+                    return
+                if len(_to_cull) > _max_cullable:
+                    _to_cull = _to_cull[:_max_cullable]
 
                 _by_name = {r.name: r for r in running}
                 _culled = 0
