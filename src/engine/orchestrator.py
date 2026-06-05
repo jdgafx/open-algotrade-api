@@ -602,6 +602,34 @@ class StrategyOrchestrator:
                                 await asyncio.sleep(sleep_seconds)
                                 continue
 
+                        # ── Gate 4.3: Funding Guard (fresh ws activeAssetCtx) ──
+                        # Net-tighten ONLY: hard-block entering INTO an extreme adverse-funding
+                        # regime (crowded same-side — you'd pay funding AND join the crowd near a
+                        # potential exhaustion). Reads fresh ws funding when the client exposes it
+                        # (HL_WS_CANDLES on); fail-open and a no-op in REST mode or on missing data,
+                        # so it can never block a normal qualified entry — only the extreme tail
+                        # (> FUNDING_BLOCK_ANN annualized, default 100%) is removed.
+                        _get_ctx = getattr(self.client, "get_asset_ctx", None)
+                        if callable(_get_ctx):
+                            try:
+                                _ctx = _get_ctx(symbol)
+                                _f8h = _ctx.get("funding") if _ctx else None
+                                if _f8h is not None:
+                                    _ann = float(_f8h) * 1095.0  # HL 8h funding -> annualized
+                                    _block_ann = float(os.getenv("FUNDING_BLOCK_ANN", "1.0"))
+                                    _is_long = signal.signal_type.value == "long"
+                                    if (_is_long and _ann > _block_ann) or (not _is_long and _ann < -_block_ann):
+                                        logger.info(
+                                            "FUNDING GATE BLOCKED | %s | %s | funding=%+.0f%% ann (extreme %s-crowded) | OI=%s",
+                                            name, signal.signal_type.value, _ann * 100.0,
+                                            "long" if _ann > 0 else "short",
+                                            _ctx.get("open_interest") if _ctx else None,
+                                        )
+                                        await asyncio.sleep(sleep_seconds)
+                                        continue
+                            except Exception as _fund_err:  # noqa: BLE001 - fail-open
+                                logger.warning("Funding gate error (skipping): %s", _fund_err)
+
                         # ── Gate 4.4: Chaos Gate (volatility-spike proxy) ──
                         # MoonDev: skip entries during liquidation cascades. Proxy:
                         # current candle range > 3× 20-period avg = cascade signature.

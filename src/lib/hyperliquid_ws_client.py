@@ -50,6 +50,14 @@ def _interval_ms(interval: str) -> int:
     return _INTERVAL_MS.get(interval, 3_600_000)
 
 
+def _to_float(v):
+    """Parse HL ctx numeric strings -> float, or None when absent/unparseable."""
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
 class HyperliquidWsClient:
     """Websocket candle feed wrapping a REST client; same get_ohlcv contract + REST fallback."""
 
@@ -72,6 +80,11 @@ class HyperliquidWsClient:
         self._last_reconnect = 0.0
         self._construct_count = 0   # # of Info(skip_ws=False) constructions (observability)
         self._fallback_count = 0    # # of times get_ohlcv served REST instead of the ws buffer
+        # T021: live perp asset ctx (funding / open interest / mark / oracle / premium) per
+        # symbol, fed by an activeAssetCtx sub multiplexed over the SAME ws connection as the
+        # candle feed. Powers the orchestrator funding gate; missing ctx -> caller does not gate.
+        self._asset_ctx: Dict[str, dict] = {}
+        self._ctx_sub_ids: Dict[str, int] = {}
         self._max_keys = max_keys if max_keys is not None else int(os.getenv("HL_WS_MAX_KEYS", "60"))
         self._ensure_info()
 
@@ -112,10 +125,19 @@ class HyperliquidWsClient:
                 self._info = new_info
                 with self._lock:
                     keys = list(self._buffers.keys())
+                    # ctx universe on reconnect = every symbol we already track ctx for, plus
+                    # every symbol we have a candle buffer for (so funding/OI re-warms too).
+                    ctx_syms = sorted(set(self._ctx_sub_ids) | {s for s, _ in keys})
                     self._sub_ids.clear()
+                    self._ctx_sub_ids.clear()
                 for sym, iv in keys:
                     self._do_subscribe(sym, iv)
-                logger.info("HL ws connected (#%d, %d key(s) resubscribed)", self._construct_count, len(keys))
+                for sym in ctx_syms:
+                    self._do_subscribe_ctx(sym)
+                logger.info(
+                    "HL ws connected (#%d, %d candle key(s) + %d ctx sym(s) resubscribed)",
+                    self._construct_count, len(keys), len(ctx_syms),
+                )
                 return True
             except Exception as e:  # noqa: BLE001 - liveness must never crash the loop
                 logger.warning("HL ws connect failed: %s (REST fallback active)", e)
@@ -152,6 +174,38 @@ class HyperliquidWsClient:
                 logger.debug("HL ws candle callback parse error", exc_info=True)
 
         return _cb
+
+    # ── activeAssetCtx (funding / OI / mark / oracle) — T021 ──────────────
+    def _make_ctx_cb(self, symbol: str):
+        def _cb(msg):
+            try:
+                d = msg.get("data") if isinstance(msg, dict) else None
+                ctx = (d or {}).get("ctx") or {}
+                if not ctx:
+                    return
+                with self._lock:
+                    self._asset_ctx[symbol] = {
+                        "funding": _to_float(ctx.get("funding")),           # raw 8h rate
+                        "open_interest": _to_float(ctx.get("openInterest")),
+                        "mark_px": _to_float(ctx.get("markPx")),
+                        "oracle_px": _to_float(ctx.get("oraclePx")),
+                        "premium": _to_float(ctx.get("premium")),
+                        "ts": int(datetime.now().timestamp() * 1000),
+                    }
+            except Exception:  # noqa: BLE001
+                logger.debug("HL ws ctx callback parse error", exc_info=True)
+        return _cb
+
+    def _do_subscribe_ctx(self, symbol: str) -> None:
+        info = self._info
+        if info is None:
+            return
+        try:
+            sid = info.subscribe({"type": "activeAssetCtx", "coin": symbol}, self._make_ctx_cb(symbol))
+            with self._lock:
+                self._ctx_sub_ids[symbol] = sid
+        except Exception as e:  # noqa: BLE001
+            logger.warning("HL ws activeAssetCtx subscribe %s failed: %s", symbol, e)
 
     # ── REST seed / fallback ──────────────────────────────────────────────
     def _rest_snapshot(self, symbol: str, interval: str, lookback_days: int) -> list:
@@ -232,6 +286,11 @@ class HyperliquidWsClient:
                 self._seed(symbol, interval, lookback_days)
             if not subscribed and self._ensure_info():
                 self._do_subscribe(symbol, interval)
+            # Ensure one activeAssetCtx sub per traded symbol (funding/OI), idempotent.
+            with self._lock:
+                _need_ctx = symbol not in self._ctx_sub_ids
+            if _need_ctx and self._ensure_info():
+                self._do_subscribe_ctx(symbol)
 
             with self._lock:
                 buf = dict(self._buffers.get(key, {}))
@@ -263,6 +322,15 @@ class HyperliquidWsClient:
             logger.warning("HL ws get_ohlcv %s %s -> REST fallback: %s", symbol, interval, e)
             return self._rest_fallback(symbol, interval, lookback_days)
 
+    def get_asset_ctx(self, symbol: str) -> Optional[dict]:
+        """Latest perp asset ctx for *symbol* from the activeAssetCtx ws sub:
+        {funding (raw 8h), open_interest, mark_px, oracle_px, premium, ts} — or None if
+        not yet received. Fail-safe by contract: callers treat None as 'no data, do not
+        gate', so a cold/missing ctx never blocks a trade."""
+        with self._lock:
+            ctx = self._asset_ctx.get(symbol)
+            return dict(ctx) if ctx else None
+
     @property
     def ws_ready(self) -> bool:
         info = self._info
@@ -293,6 +361,14 @@ class HyperliquidWsClient:
             sub_count = len(self._sub_ids)
             fb = self._fallback_count
             cc = self._construct_count
+            asset_ctx = {
+                sym: {
+                    "funding": c.get("funding"),
+                    "open_interest": c.get("open_interest"),
+                    "age_s": round((now_ms - c.get("ts", now_ms)) / 1000, 1),
+                }
+                for sym, c in self._asset_ctx.items()
+            }
         return {
             "ws_ready": self.ws_ready,
             "connected": bool(wm is not None and wm.is_alive()),
@@ -302,6 +378,8 @@ class HyperliquidWsClient:
             "fallback_count": fb,
             "max_keys": self._max_keys,
             "keys": keys,
+            "asset_ctx_keys": len(asset_ctx),
+            "asset_ctx": asset_ctx,
         }
 
     def __getattr__(self, name: str):
