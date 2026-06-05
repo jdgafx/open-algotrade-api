@@ -1193,6 +1193,30 @@ def get_compound_status(request: Request):
     }
 
 
+@app.get("/ws/status")
+def get_ws_status(request: Request):
+    """Hyperliquid native-WS candle feed status (T020/T023).
+
+    Lets ws activation be VERIFIED in prod: the FastAPI app's logger.info does not reach
+    Railway stdout, so this endpoint is the way to confirm the ws feed is genuinely serving
+    (ws_ready + buffers filling + low fallback_count) rather than silently falling back to
+    REST. Returns {enabled:false} when HL_WS_CANDLES is off (orchestrator client unwrapped).
+    """
+    orch = getattr(request.app.state, "orchestrator", None)
+    client = getattr(orch, "client", None) if orch is not None else None
+    status_fn = getattr(client, "status", None)
+    if callable(status_fn):
+        try:
+            return {"enabled": True, **status_fn()}
+        except Exception as e:  # noqa: BLE001
+            return {"enabled": True, "error": str(e)}
+    return {
+        "enabled": False,
+        "reason": "HL_WS_CANDLES off or orchestrator client not ws-wrapped",
+        "client_type": type(client).__name__ if client is not None else None,
+    }
+
+
 # ──────────────────────────────────────────────
 # Auth
 # ──────────────────────────────────────────────
