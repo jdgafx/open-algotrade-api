@@ -148,6 +148,13 @@ def _auto_deploy_winners(db, orchestrator):
             logger.warning("Auto-deploy: failed to create %s — %s", w["name"], e)
 
 
+# Strategies that must remain running after every deploy.
+# Any DB instance with status="running" not in this set is flipped to
+# status="stopped" in the DB BEFORE the auto-start loop, so it is never
+# loaded by the orchestrator.
+_SURVIVOR_SET = frozenset({"flip-flop-btc", "vwap-btc", "closed-mkt-btc", "liqdip-btc"})
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize all services on startup, clean up on shutdown."""
@@ -358,6 +365,37 @@ async def lifespan(app: FastAPI):
     except Exception as _rh_e:
         logger.warning("PnL rehydrate failed (non-fatal): %s", _rh_e)
 
+    # ── Survivor purge (DB-only, BEFORE auto-start) ──
+    # Mark non-survivors as stopped in the DB so the auto-start loop never
+    # loads them.  No orchestrator calls needed here — the orchestrator hasn't
+    # touched these instances yet.
+    if orchestrator is not None:
+        try:
+            from .database import SessionLocal as _PurgeSL
+            _purge_db = _PurgeSL()
+            try:
+                _all_running = _purge_db.query(models.StrategyInstance).filter(
+                    models.StrategyInstance.status == "running"
+                ).all()
+                _purged = 0
+                for _inst in _all_running:
+                    if _inst.name in _SURVIVOR_SET:
+                        continue
+                    _inst.status = "stopped"
+                    _purged += 1
+                if _purged:
+                    _purge_db.commit()
+                    logger.warning(
+                        "Survivor purge (DB-only): marked %d non-survivor instances as stopped (survivors: %s)",
+                        _purged, sorted(_SURVIVOR_SET),
+                    )
+                else:
+                    logger.info("Survivor purge: all running instances are survivors — no purge needed")
+            finally:
+                _purge_db.close()
+        except Exception as _pe:
+            logger.warning("Survivor purge failed (non-fatal): %s", _pe)
+
     # ── Auto-start strategies that were running before shutdown ──
     if orchestrator is not None:
         try:
@@ -418,48 +456,18 @@ async def lifespan(app: FastAPI):
                             db.commit()
                 else:
                     logger.info("Auto-start: no strategies with status=running")
+
+                # Audit: warn if any survivor is not loaded after startup
+                _loaded = set(orchestrator._strategies.keys()) if orchestrator else set()
+                for _s in _SURVIVOR_SET:
+                    if _s not in _loaded:
+                        logger.error(
+                            "STARTUP AUDIT: survivor %s NOT loaded — check DB and registry", _s
+                        )
             finally:
                 db.close()
         except Exception as e:
             logger.warning("Auto-start: could not restore strategies — %s", e)
-
-    # ── Survivor purge: stop all running strategies NOT in the survivor set ──
-    # 2026-06-07: portfolio is -$419 across 76 strategies; only 4 have live edge.
-    # On every startup, any DB instance with status=running that isn't a survivor
-    # is immediately stopped and marked stopped — no manual intervention required.
-    _SURVIVOR_SET = frozenset({"flip-flop-btc", "vwap-btc", "closed-mkt-btc", "liqdip-btc"})
-    if orchestrator is not None:
-        try:
-            from .database import SessionLocal as _PurgeSL
-            _purge_db = _PurgeSL()
-            try:
-                _all_running = _purge_db.query(models.StrategyInstance).filter(
-                    models.StrategyInstance.status == "running"
-                ).all()
-                _purged = 0
-                for _inst in _all_running:
-                    if _inst.name in _SURVIVOR_SET:
-                        continue
-                    # Stop in orchestrator (no-op if not loaded yet — safe)
-                    try:
-                        await orchestrator.stop_strategy(_inst.name)
-                        orchestrator.remove_strategy(_inst.name)
-                    except Exception as _oe:
-                        logger.warning("Survivor purge: orchestrator stop error for %s: %s", _inst.name, _oe)
-                    _inst.status = "stopped"
-                    _purged += 1
-                if _purged:
-                    _purge_db.commit()
-                    logger.warning(
-                        "Survivor purge: stopped %d non-survivor strategies (survivors: %s)",
-                        _purged, sorted(_SURVIVOR_SET),
-                    )
-                else:
-                    logger.info("Survivor purge: all running strategies are survivors — no purge needed")
-            finally:
-                _purge_db.close()
-        except Exception as _pe:
-            logger.warning("Survivor purge failed (non-fatal): %s", _pe)
 
     # ── Periodic paper state saver (every 5 minutes) ──
     async def _paper_state_saver():
@@ -2806,7 +2814,7 @@ def profitability_controls(request: Request):
     return result
 
 
-@app.get("/gate/stats")
+@app.get("/gate-stats")
 def gate_stats(request: Request):
     """Attribution data from the order-book imbalance gate (Gate 4.7).
 
