@@ -434,8 +434,7 @@ async def lifespan(app: FastAPI):
                     _existing_names = {
                         r.name for r in db.query(models.StrategyInstance.name).all()
                     }
-                    _winners_names = {"flip-flop-btc", "vwap-btc", "closed-mkt-btc",
-                                      "liqdip-btc", "flip-flop-btc-v2"}
+                    _winners_names = set(_SURVIVOR_SET)  # single source of truth
                     if not _winners_names.issubset(_existing_names):
                         logger.info("Auto-ensure: creating missing survivors: %s",
                                     _winners_names - _existing_names)
@@ -775,13 +774,15 @@ async def lifespan(app: FastAPI):
                             _cinst.edge_confidence_score = edge_confidence(_n, _wr, _payoff)
 
                 # Dynamic winner detection from live stats.
-                # Static fallback covers the 4 confirmed survivors (2026-06-07 purge).
+                # Static fallback covers the 4 confirmed survivors (2026-06-07 purge)
+                # plus flip-flop-btc-v2 (paper test — do not cull during trial period).
                 # Only these run at all — the purge block already stopped everything else.
                 _STATIC_WINNERS = {
-                    'flip-flop-btc',   # confirmed live winner (+$16.66, trend asymmetry)
-                    'vwap-btc',        # confirmed live winner (VWAP probability bias)
-                    'closed-mkt-btc',  # survivor: overnight/weekend breakout
-                    'liqdip-btc',      # survivor: liquidation double-dip
+                    'flip-flop-btc',      # confirmed live winner (+$16.66, trend asymmetry)
+                    'vwap-btc',           # confirmed live winner (VWAP probability bias)
+                    'closed-mkt-btc',     # survivor: overnight/weekend breakout
+                    'liqdip-btc',         # survivor: liquidation double-dip
+                    'flip-flop-btc-v2',   # paper test: 12%/5% R:R + ADX>25 filter
                 }
                 _WINNER_MIN_TRADES = 6  # require a real sample — 2-4 trade noise no longer qualifies as a winner
                 dynamic_winners = {
@@ -882,13 +883,15 @@ async def lifespan(app: FastAPI):
 
                 # Winner set, computed exactly as the compounder does, so a
                 # confirmed winner can never be culled.
-                # 2026-06-07: all 4 survivors are static winners — the purge block
+                # 2026-06-07: all survivors are static winners — the purge block
                 # already stopped everything else; the cull is a safety net only.
+                # flip-flop-btc-v2 is included so the cull never stops the paper test.
                 _STATIC_WINNERS = {
-                    'flip-flop-btc',   # confirmed live winner (+$16.66, trend asymmetry)
-                    'vwap-btc',        # confirmed live winner (VWAP probability bias)
-                    'closed-mkt-btc',  # survivor: overnight/weekend breakout
-                    'liqdip-btc',      # survivor: liquidation double-dip
+                    'flip-flop-btc',      # confirmed live winner (+$16.66, trend asymmetry)
+                    'vwap-btc',           # confirmed live winner (VWAP probability bias)
+                    'closed-mkt-btc',     # survivor: overnight/weekend breakout
+                    'liqdip-btc',         # survivor: liquidation double-dip
+                    'flip-flop-btc-v2',   # paper test: 12%/5% R:R + ADX>25 filter
                 }
                 _WINNER_MIN_TRADES = 1
                 dynamic_winners = {
