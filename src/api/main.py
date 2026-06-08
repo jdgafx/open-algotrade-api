@@ -458,7 +458,7 @@ async def lifespan(app: FastAPI):
                     logger.info("Auto-start: no strategies with status=running")
 
                 # Audit: warn if any survivor is not loaded after startup
-                _loaded = set(orchestrator._strategies.keys()) if orchestrator else set()
+                _loaded = set(orchestrator._strategies.keys())
                 for _s in _SURVIVOR_SET:
                     if _s not in _loaded:
                         logger.error(
