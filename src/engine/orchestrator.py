@@ -118,12 +118,18 @@ class StrategyOrchestrator:
         # Daily loss tracking
         self._daily_starting_balance: Optional[float] = None
         self._daily_loss_triggered: bool = False
+        self._daily_loss_flattened: bool = False  # True once close_by_strategy called on halt
         self._day_start: Optional[datetime] = None
 
         # Regime gate stats
         self._regime_blocks: int = 0
         self._rate_limit_blocks: int = 0
         self._daily_loss_blocks: int = 0
+
+        # Risk constants
+        # max_portfolio_exposure_pct is already stored from __init__ arg (0-100 scale, e.g. 80.0)
+        # BTC-delta cap: combined long notional must not exceed this multiple of equity
+        self._btc_delta_cap_x: float = 1.5
 
         logger.info(
             "StrategyOrchestrator initialized | max_global_trades/hr=%d | daily_loss_limit=%.1f%% | max_exposure=%.0f%%",
@@ -328,6 +334,91 @@ class StrategyOrchestrator:
             pass
         return 10000.0
 
+    def _get_total_open_notional(self) -> float:
+        """Estimate total open notional (USD) across all active positions.
+
+        For PaperExecutor: uses the `size_usd` field stored on each PaperPosition.
+        For HyperliquidVaultExecutor: uses the per-strategy `config.size_usd` as a
+        conservative proxy (actual fill may differ slightly, but this avoids an async
+        account-state fetch inside the hot loop).
+        Falls back to 0.0 on any error.
+        """
+        try:
+            # PaperExecutor exposes _positions: Dict[str, PaperPosition]
+            paper_positions = getattr(self.executor, '_positions', None)
+            if isinstance(paper_positions, dict) and paper_positions:
+                total = 0.0
+                for pos in paper_positions.values():
+                    # PaperPosition has size_usd; fall back to abs(size)*entry_price
+                    sz_usd = getattr(pos, 'size_usd', None)
+                    if sz_usd is not None and sz_usd > 0:
+                        total += sz_usd
+                    else:
+                        ep = getattr(pos, 'entry_price', 0.0) or 0.0
+                        sz = abs(getattr(pos, 'size', 0.0) or 0.0)
+                        total += sz * ep
+                return total
+
+            # HyperliquidVaultExecutor exposes _active_positions: Dict[str, Dict]
+            hl_positions = getattr(self.executor, '_active_positions', None)
+            if isinstance(hl_positions, dict) and hl_positions:
+                # Each entry doesn't store size_usd directly; use per-strategy
+                # config.size_usd as a reasonable proxy.
+                total = 0.0
+                for pos_dict in hl_positions.values():
+                    strat_name = pos_dict.get('strategy', '')
+                    strat = self._strategies.get(strat_name)
+                    if strat is not None:
+                        total += float(strat.config.size_usd or 0.0)
+                    else:
+                        # Unknown strategy — can't estimate; treat as zero (fail-open)
+                        pass
+                return total
+        except Exception as _exp_err:
+            logger.debug("_get_total_open_notional error (defaulting 0): %s", _exp_err)
+        return 0.0
+
+    def _get_btc_long_notional(self) -> float:
+        """Estimate total BTC long notional (USD) across all active positions.
+
+        Same dual-executor strategy as _get_total_open_notional but filtered to
+        BTC positions with side='long'.
+        """
+        try:
+            paper_positions = getattr(self.executor, '_positions', None)
+            if isinstance(paper_positions, dict) and paper_positions:
+                total = 0.0
+                for pos in paper_positions.values():
+                    sym = getattr(pos, 'symbol', '') or ''
+                    side = getattr(pos, 'side', '') or ''
+                    if 'BTC' not in sym.upper() or side != 'long':
+                        continue
+                    sz_usd = getattr(pos, 'size_usd', None)
+                    if sz_usd is not None and sz_usd > 0:
+                        total += sz_usd
+                    else:
+                        ep = getattr(pos, 'entry_price', 0.0) or 0.0
+                        sz = abs(getattr(pos, 'size', 0.0) or 0.0)
+                        total += sz * ep
+                return total
+
+            hl_positions = getattr(self.executor, '_active_positions', None)
+            if isinstance(hl_positions, dict) and hl_positions:
+                total = 0.0
+                for pos_dict in hl_positions.values():
+                    sym = pos_dict.get('symbol', '') or ''
+                    side = pos_dict.get('side', '') or ''
+                    if 'BTC' not in sym.upper() or side != 'long':
+                        continue
+                    strat_name = pos_dict.get('strategy', '')
+                    strat = self._strategies.get(strat_name)
+                    if strat is not None:
+                        total += float(strat.config.size_usd or 0.0)
+                return total
+        except Exception as _btc_err:
+            logger.debug("_get_btc_long_notional error (defaulting 0): %s", _btc_err)
+        return 0.0
+
     def _check_daily_loss(self) -> bool:
         """
         Check if daily loss limit has been breached.
@@ -348,6 +439,7 @@ class StrategyOrchestrator:
             self._day_start = today_start
             self._daily_starting_balance = self._get_current_balance()
             self._daily_loss_triggered = False
+            self._daily_loss_flattened = False
             logger.info("Daily reset | new starting balance: $%.2f", self._daily_starting_balance)
             return False
 
@@ -483,6 +575,28 @@ class StrategyOrchestrator:
             try:
                 # ── Gate 1: Daily Loss Guard ──
                 if self._check_daily_loss():
+                    # On first trigger: flat ALL running strategies to honour the halt.
+                    # Use a flag so we close exactly once per halt event (not once per
+                    # strategy loop per tick, which would spam close_by_strategy).
+                    if not self._daily_loss_flattened:
+                        self._daily_loss_flattened = True
+                        running_names = list(self._tasks.keys())
+                        logger.critical(
+                            "DAILY LOSS HALT: closing all positions for %d strategies: %s",
+                            len(running_names), running_names,
+                        )
+                        for _strat_name in running_names:
+                            try:
+                                await self.executor.close_by_strategy(_strat_name)
+                                logger.info(
+                                    "DAILY LOSS HALT: closed positions for strategy %s",
+                                    _strat_name,
+                                )
+                            except Exception as _halt_err:
+                                logger.error(
+                                    "DAILY LOSS HALT: close_by_strategy(%s) failed: %s",
+                                    _strat_name, _halt_err,
+                                )
                     logger.debug("Daily loss gate active | %s sleeping", name)
                     await asyncio.sleep(sleep_seconds * 4)  # Sleep longer when halted
                     continue
@@ -710,6 +824,46 @@ class StrategyOrchestrator:
                                     continue
                             except Exception as _hlp_err:
                                 logger.warning("HLP gate error (skipping): %s", _hlp_err)
+
+                        # ── Gate 4.7: Portfolio Exposure Cap ──
+                        # Skip entry if total open notional / equity already exceeds
+                        # max_portfolio_exposure_pct (default 80.0 = 80%).
+                        _equity = self._get_current_balance()
+                        if _equity > 0:
+                            _total_notional = self._get_total_open_notional()
+                            _exposure_ratio = _total_notional / _equity
+                            _exposure_limit = self.max_portfolio_exposure_pct / 100.0
+                            if _exposure_ratio >= _exposure_limit:
+                                logger.warning(
+                                    "PORTFOLIO EXPOSURE CAP | %s | %s | notional=$%.0f equity=$%.0f"
+                                    " ratio=%.1f%% >= limit=%.1f%% — entry skipped",
+                                    name, signal.signal_type.value,
+                                    _total_notional, _equity,
+                                    _exposure_ratio * 100.0,
+                                    self.max_portfolio_exposure_pct,
+                                )
+                                await asyncio.sleep(sleep_seconds)
+                                continue
+
+                        # ── Gate 4.8: Net BTC-Delta Cap ──
+                        # For BTC long entries only: total BTC long notional must not exceed
+                        # _btc_delta_cap_x × equity (default 1.5×).
+                        _is_btc_long = (
+                            signal.signal_type.value == "long"
+                            and "BTC" in symbol.upper()
+                        )
+                        if _is_btc_long and _equity > 0:
+                            _btc_long_notional = self._get_btc_long_notional()
+                            _btc_cap = self._btc_delta_cap_x * _equity
+                            if _btc_long_notional >= _btc_cap:
+                                logger.warning(
+                                    "BTC DELTA CAP | %s | BTC long notional=$%.0f >= cap=$%.0f"
+                                    " (%.1fx equity) — entry skipped",
+                                    name, _btc_long_notional, _btc_cap,
+                                    self._btc_delta_cap_x,
+                                )
+                                await asyncio.sleep(sleep_seconds)
+                                continue
 
                     # ── ADR-0002: attach realtime adaptation multiplier for entries ──
                     if is_entry:
