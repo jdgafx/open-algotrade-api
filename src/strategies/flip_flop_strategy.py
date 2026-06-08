@@ -92,10 +92,59 @@ class FlipFlopStrategy(BaseStrategy):
             return None
         return self._supertrend(data, period, multiplier)
 
+    def _compute_adx(self, df: pd.DataFrame, period: int) -> float:
+        """Compute ADX for the last bar using Wilder smoothing. Returns 0.0 on insufficient data."""
+        if len(df) < period + 1:
+            return 0.0
+        high = df["high"].to_numpy(dtype=float)
+        low = df["low"].to_numpy(dtype=float)
+        close = df["close"].to_numpy(dtype=float)
+
+        plus_dm = np.maximum(high[1:] - high[:-1], 0.0)
+        minus_dm = np.maximum(low[:-1] - low[1:], 0.0)
+        # When both positive, keep the larger; when equal, both zero
+        both_pos = (plus_dm > 0) & (minus_dm > 0)
+        larger_plus = plus_dm >= minus_dm
+        plus_dm = np.where(both_pos & ~larger_plus, 0.0, plus_dm)
+        minus_dm = np.where(both_pos & larger_plus, 0.0, minus_dm)
+
+        tr = np.maximum(
+            high[1:] - low[1:],
+            np.maximum(np.abs(high[1:] - close[:-1]), np.abs(low[1:] - close[:-1])),
+        )
+
+        def _wilder(arr, p):
+            out = np.zeros(len(arr))
+            out[p - 1] = arr[:p].sum()
+            for i in range(p, len(arr)):
+                out[i] = out[i - 1] - out[i - 1] / p + arr[i]
+            return out
+
+        atr_w = _wilder(tr, period)
+        pdm_w = _wilder(plus_dm, period)
+        mdm_w = _wilder(minus_dm, period)
+
+        with np.errstate(divide="ignore", invalid="ignore"):
+            pdi = np.where(atr_w > 0, 100.0 * pdm_w / atr_w, 0.0)
+            mdi = np.where(atr_w > 0, 100.0 * mdm_w / atr_w, 0.0)
+            dx = np.where((pdi + mdi) > 0, 100.0 * np.abs(pdi - mdi) / (pdi + mdi), 0.0)
+
+        # ADX = Wilder-smoothed DX
+        adx_arr = _wilder(dx[period - 1:], period)
+        return float(adx_arr[-1]) if len(adx_arr) > 0 else 0.0
+
     async def should_enter(self, data: pd.DataFrame) -> Optional[Signal]:
         df = self._compute(data)
         if df is None:
             return None
+
+        # Optional ADX filter — skipped if adx_threshold is absent or 0 (backward-compat)
+        adx_threshold = float(self.config.params.get("adx_threshold", 0))
+        if adx_threshold > 0:
+            adx_period = int(self.config.params.get("adx_period", 14))
+            adx_val = self._compute_adx(data, adx_period)
+            if adx_val < adx_threshold:
+                return None  # ADX too weak, no entry
 
         curr_dir = int(df["st_direction"].iloc[-1])
         if curr_dir == 0:

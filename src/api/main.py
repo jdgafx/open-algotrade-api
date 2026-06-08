@@ -115,6 +115,13 @@ def _auto_deploy_winners(db, orchestrator):
         {"name": "closed-mkt-btc", "strategy_type": "closed_market_overnight", "symbol": "BTC", "timeframe": "1h", "size_usd": 100, "leverage": 3, "params": {"momentum_lookback": 12, "breakout_pct": 0.002, "tp_pct": 0.010, "sl_pct": 0.008, "min_hold_bars": 2, "cooldown_seconds": 180, "max_trades_per_hour": 4, "min_signal_strength": 0.65}},
         # ── SURVIVOR: liqdip-btc — liquidation double-dip, MoonDev edge ──
         {"name": "liqdip-btc", "strategy_type": "liquidation_dip", "symbol": "BTC", "timeframe": "5m", "size_usd": 100, "leverage": 3, "params": {"liq_threshold_usd": 500000, "bounce_pct": 0.005, "dip_tolerance_pct": 0.002, "max_liq_age_hours": 4, "mode": "double_dip", "take_profit_pct": 1.5, "stop_loss_pct": 10.0, "time_limit_hours": 24, "min_hold_bars": 3, "cooldown_seconds": 120, "max_trades_per_hour": 5, "min_signal_strength": 0.60}},
+        # ── PAPER TEST: flip-flop-btc-v2 — improved R:R (12%/5%) + ADX>25 filter ──
+        {"name": "flip-flop-btc-v2", "strategy_type": "flip_flop", "symbol": "BTC", "timeframe": "1h",
+         "size_usd": 100, "leverage": 4,
+         "params": {"atr_period": 10, "multiplier": 3.0, "cooldown_seconds": 0,
+                    "max_trades_per_hour": 24, "min_signal_strength": 0.80,
+                    "adx_period": 14, "adx_threshold": 25.0},
+         "target_pct": 12.0, "max_loss_pct": -5.0},
         # NOTE: conspop-btc is INTENTIONALLY EXCLUDED — paper data is stale, do not re-add.
         # Formerly-running strategies (mm-eth, mm-sol, arb-eth, nw-eth, nw-sol, adx-eth,
         # mean-rev-eth, turtle-btc, bollinger-btc, conspop-btc, sdz-btc, rsi-btc, pivot-btc,
@@ -135,7 +142,9 @@ def _auto_deploy_winners(db, orchestrator):
             inst = models.StrategyInstance(
                 name=w["name"], strategy_type=w["strategy_type"], symbol=w["symbol"],
                 timeframe=w["timeframe"], leverage=w.get("leverage", 3),
-                size_usd=w.get("size_usd", 100), target_pct=9.0, max_loss_pct=-8.0,
+                size_usd=w.get("size_usd", 100),
+                target_pct=w.get("target_pct", 9.0),
+                max_loss_pct=w.get("max_loss_pct", -8.0),
                 lookback_days=w.get("lookback_days", 14),
                 interval_seconds=30, enabled=True, params=w.get("params", {}),
                 tier="bonus_algos", status="running",
@@ -152,7 +161,7 @@ def _auto_deploy_winners(db, orchestrator):
 # Any DB instance with status="running" not in this set is flipped to
 # status="stopped" in the DB BEFORE the auto-start loop, so it is never
 # loaded by the orchestrator.
-_SURVIVOR_SET = frozenset({"flip-flop-btc", "vwap-btc", "closed-mkt-btc", "liqdip-btc"})
+_SURVIVOR_SET = frozenset({"flip-flop-btc", "vwap-btc", "closed-mkt-btc", "liqdip-btc", "flip-flop-btc-v2"})
 
 
 @asynccontextmanager
@@ -417,6 +426,23 @@ async def lifespan(app: FastAPI):
                     running_instances = db.query(models.StrategyInstance).filter(
                         models.StrategyInstance.status == "running"
                     ).all()
+                else:
+                    # Ensure any newly-added survivors exist in the DB (idempotent upsert
+                    # for instances added after the initial deploy, e.g. flip-flop-btc-v2).
+                    # _auto_deploy_winners rolls back silently on unique-constraint errors,
+                    # so it's safe to call on an existing DB — only missing entries are created.
+                    _existing_names = {
+                        r.name for r in db.query(models.StrategyInstance.name).all()
+                    }
+                    _winners_names = {"flip-flop-btc", "vwap-btc", "closed-mkt-btc",
+                                      "liqdip-btc", "flip-flop-btc-v2"}
+                    if not _winners_names.issubset(_existing_names):
+                        logger.info("Auto-ensure: creating missing survivors: %s",
+                                    _winners_names - _existing_names)
+                        _auto_deploy_winners(db, orchestrator)
+                        running_instances = db.query(models.StrategyInstance).filter(
+                            models.StrategyInstance.status == "running"
+                        ).all()
 
                 if running_instances:
                     logger.info("Auto-start: found %d strategies with status=running", len(running_instances))
