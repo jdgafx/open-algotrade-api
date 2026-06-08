@@ -2806,6 +2806,21 @@ def profitability_controls(request: Request):
     return result
 
 
+@app.get("/gate/stats")
+def gate_stats(request: Request):
+    """Attribution data from the order-book imbalance gate (Gate 4.7).
+
+    Returns counts and percentages of entries that would have been blocked if
+    the gate were in active (non-shadow) mode.  Shadow mode is the default —
+    no entries are actually blocked until SHADOW_MODE is flipped to False in
+    src/services/orderbook_gate.py.
+    """
+    orchestrator = getattr(request.app.state, "orchestrator", None)
+    if orchestrator is None or not hasattr(orchestrator, "_ob_gate"):
+        return {"error": "orchestrator not initialized", "stats": None}
+    return orchestrator._ob_gate.get_stats()
+
+
 # ──────────────────────────────────────────────
 # Market Data
 # ──────────────────────────────────────────────

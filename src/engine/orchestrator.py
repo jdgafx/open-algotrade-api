@@ -30,6 +30,7 @@ from src.execution.paper_executor import DEFAULT_RUIN_GUARD_BUFFER_PCT
 from src.lib.nice_funcs import HyperliquidClient
 from src.services.hlp_gate import HLPSentimentGate
 from src.services.liquidation_guard import LiquidationGuard
+from src.services.orderbook_gate import OrderBookImbalanceGate
 from src.strategies.base_strategy import BaseStrategy, StrategyConfig, StrategyTier
 from src.strategies.registry import create_strategy, get_strategy_class
 
@@ -98,6 +99,7 @@ class StrategyOrchestrator:
         self.regime_detector = regime_detector
         self.liquidation_guard = liquidation_guard
         self.hlp_gate = hlp_gate
+        self._ob_gate = OrderBookImbalanceGate(client)
         self.risk_controller = risk_controller
         self.funding_monitor = funding_monitor
         self.liquidation_tracker = liquidation_tracker
@@ -825,7 +827,27 @@ class StrategyOrchestrator:
                             except Exception as _hlp_err:
                                 logger.warning("HLP gate error (skipping): %s", _hlp_err)
 
-                        # ── Gate 4.7: Portfolio Exposure Cap ──
+                        # ── Gate 4.7: Order-Book Imbalance Gate ──
+                        # Shadow mode (default): log what would be blocked, never skip entries.
+                        # Flip OrderBookImbalanceGate.shadow_mode=False to activate blocking.
+                        try:
+                            _ob_side = signal.signal_type.value  # "long" or "short"
+                            _ob_result = await self._ob_gate.check(symbol, _ob_side)
+                            _would_block = "BLOCK" in _ob_result.reason
+                            logger.info(
+                                "[OB-GATE] %s %s %s imbalance=%.3f -> %s",
+                                name, symbol, _ob_side,
+                                _ob_result.imbalance_ratio,
+                                "BLOCK" if _would_block else "ALLOW",
+                            )
+                            if not _ob_result.allowed:
+                                # Shadow mode is off and the gate says block
+                                await asyncio.sleep(sleep_seconds)
+                                continue
+                        except Exception as _ob_err:
+                            logger.warning("OB gate error (skipping): %s", _ob_err)
+
+                        # ── Gate 4.8: Portfolio Exposure Cap ──
                         # Skip entry if total open notional / equity already exceeds
                         # max_portfolio_exposure_pct (default 80.0 = 80%).
                         _equity = self._get_current_balance()
@@ -845,7 +867,7 @@ class StrategyOrchestrator:
                                 await asyncio.sleep(sleep_seconds)
                                 continue
 
-                        # ── Gate 4.8: Net BTC-Delta Cap ──
+                        # ── Gate 4.9: Net BTC-Delta Cap ──
                         # For BTC long entries only: total BTC long notional must not exceed
                         # _btc_delta_cap_x × equity (default 1.5×).
                         _is_btc_long = (
