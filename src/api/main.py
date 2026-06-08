@@ -550,7 +550,7 @@ async def lifespan(app: FastAPI):
                 args=[_spec["strategy_type"], _spec["strategy_id"], _spec["symbol"], _spec["timeframe"]],
                 id=f"rbi_{_spec['strategy_type']}_{_spec['strategy_id']}",
                 replace_existing=True,
-                next_run_time=_dt.now() + _jitter,
+                next_run_time=datetime.now() + _jitter,
             )
         logger.info("RBI scheduler: %d DB-derived jobs scheduled (supported types: %s)", len(_job_specs), sorted(_supported_types))
     else:
@@ -568,7 +568,7 @@ async def lifespan(app: FastAPI):
                 args=[stype, sid, sym, tf],
                 id=f"rbi_{stype}",
                 replace_existing=True,
-                next_run_time=_dt.now() + _jitter,
+                next_run_time=datetime.now() + _jitter,
             )
         logger.info(
             "RBI scheduler: empty DB — fell back to %d hardcoded jobs",
