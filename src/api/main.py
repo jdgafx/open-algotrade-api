@@ -100,42 +100,27 @@ def _select_cull_candidates(
 
 
 def _auto_deploy_winners(db, orchestrator):
-    """Deploy default winner strategies into an empty DB so they auto-start."""
+    """Deploy default winner strategies into an empty DB so they auto-start.
+
+    2026-06-07 SURVIVOR-ONLY: portfolio is -$419 across 76 strategies.
+    Only these 4 have proven live edge — all others are disabled.
+    To re-enable a strategy: add it back here AND remove from purge list below.
+    """
     winners = [
-        # ── Original 8 MoonDev winners ──
-        {"name": "mm-eth", "strategy_type": "market_maker", "symbol": "ETH", "timeframe": "5m", "size_usd": 100, "leverage": 3, "params": {"num_bars": 180, "quartile": 0.33, "max_l2h": 0.05, "max_tr_pct": 0.02, "exit_pct": 0.010, "mm_stop_pct": 0.006, "time_limit_minutes": 480, "last_n_bars": 17, "cooldown_seconds": 300, "max_trades_per_hour": 3, "min_signal_strength": 0.5}},
-        {"name": "mm-sol", "strategy_type": "market_maker", "symbol": "SOL", "timeframe": "5m", "size_usd": 100, "leverage": 3, "params": {"num_bars": 180, "quartile": 0.33, "max_l2h": 0.06, "max_tr_pct": 0.025, "exit_pct": 0.010, "mm_stop_pct": 0.006, "time_limit_minutes": 360, "last_n_bars": 17, "cooldown_seconds": 300, "max_trades_per_hour": 3, "min_signal_strength": 0.5}},
-        {"name": "arb-eth", "strategy_type": "funding_arb", "symbol": "ETH", "timeframe": "1h", "size_usd": 150, "leverage": 3, "params": {"momentum_threshold": 0.015, "combined_target_pct": 0.8, "arb_max_loss_pct": -1.5, "min_hold_bars": 3, "cooldown_seconds": 300, "max_trades_per_hour": 3, "min_signal_strength": 0.4}},
-        {"name": "nw-eth", "strategy_type": "nadaraya_watson", "symbol": "ETH", "timeframe": "1h", "size_usd": 100, "leverage": 3, "params": {"kernel_bandwidth": 8.0, "kernel_lookback": 100, "overbought": 80, "oversold": 20, "adx_threshold": 35, "cooldown_seconds": 600, "max_trades_per_hour": 2, "min_signal_strength": 0.5}},
-        {"name": "nw-sol", "strategy_type": "nadaraya_watson", "symbol": "SOL", "timeframe": "1h", "size_usd": 100, "leverage": 3, "params": {"kernel_bandwidth": 8.0, "kernel_lookback": 100, "overbought": 80, "oversold": 20, "adx_threshold": 35, "cooldown_seconds": 600, "max_trades_per_hour": 2, "min_signal_strength": 0.5}},
-        {"name": "adx-eth", "strategy_type": "adx", "symbol": "ETH", "timeframe": "1h", "size_usd": 100, "leverage": 3, "params": {"adx_period": 14, "adx_threshold": 20, "exit_threshold": 15, "cooldown_seconds": 600, "max_trades_per_hour": 2, "min_signal_strength": 0.5}},
+        # ── SURVIVOR: flip-flop-btc — SuperTrend always-in-market, confirmed live winner ──
+        {"name": "flip-flop-btc", "strategy_type": "flip_flop", "symbol": "BTC", "timeframe": "1h", "size_usd": 100, "leverage": 4, "params": {"atr_period": 10, "multiplier": 3.0, "cooldown_seconds": 0, "max_trades_per_hour": 24, "min_signal_strength": 0.80}},
+        # ── SURVIVOR: vwap-btc — VWAP probability bias, confirmed live winner ──
         {"name": "vwap-btc", "strategy_type": "vwap_bot", "symbol": "BTC", "timeframe": "15m", "size_usd": 100, "leverage": 3, "params": {"vwap_bias_long": 0.7, "vwap_bias_short": 0.3, "min_vwap_distance": 0.0008, "cooldown_seconds": 300, "max_trades_per_hour": 3, "min_signal_strength": 0.5}},
-        {"name": "mean-rev-eth", "strategy_type": "mean_reversion", "symbol": "ETH", "timeframe": "15m", "size_usd": 100, "leverage": 3, "params": {"zscore_entry": 1.5, "zscore_exit": 0.3, "reversion_target_pct": 0.008, "bb_std": 2.2, "dynamic_sizing": True, "cooldown_seconds": 300, "max_trades_per_hour": 3, "min_signal_strength": 0.5}},
-        # ── Full fleet: breakout strategies ──
-        {"name": "turtle-btc", "strategy_type": "turtle", "symbol": "BTC", "timeframe": "1h", "size_usd": 100, "leverage": 3, "params": {"lookback_period": 55, "atr_period": 20, "atr_multiplier": 3.0, "take_profit_pct": 0.075, "min_hold_bars": 3, "cooldown_seconds": 600, "max_trades_per_hour": 2, "min_signal_strength": 0.5}},
-        {"name": "bollinger-btc", "strategy_type": "bollinger", "symbol": "BTC", "timeframe": "1h", "size_usd": 100, "leverage": 3, "params": {"bb_period": 20, "bb_std": 2.0, "squeeze_threshold": 0.05, "min_hold_bars": 3, "cooldown_seconds": 600, "max_trades_per_hour": 2, "min_signal_strength": 0.5}},
-        {"name": "conspop-btc", "strategy_type": "consolidation_pop", "symbol": "BTC", "timeframe": "15m", "size_usd": 100, "leverage": 3, "params": {"atr_period": 14, "deviance_threshold": 0.45, "range_position_buy": 0.3, "range_position_sell": 0.7, "tp_pct": 0.02, "sl_pct": 0.015, "min_hold_bars": 3, "cooldown_seconds": 300, "max_trades_per_hour": 3, "min_signal_strength": 0.5}},
-        # quarter-btc removed 2026-05-15: quarter_theory deliberately
-        # disabled in src/strategies/registry.py (buggy TP/SL in crypto).
-        # ── Full fleet: reversal strategies ──
-        {"name": "sdz-btc", "strategy_type": "supply_demand_zone", "symbol": "BTC", "timeframe": "4h", "size_usd": 100, "leverage": 3, "interval_seconds": 60, "lookback_days": 30, "params": {"zone_lookback_days": 30, "zone_threshold": 0.015, "min_hold_bars": 2, "cooldown_seconds": 900, "max_trades_per_hour": 2, "min_signal_strength": 0.5}},
-        {"name": "rsi-btc", "strategy_type": "rsi", "symbol": "BTC", "timeframe": "1h", "size_usd": 100, "leverage": 3, "params": {"rsi_period": 14, "oversold": 30, "overbought": 70, "trend_mode": False, "divergence_mode": False, "min_hold_bars": 3, "cooldown_seconds": 600, "max_trades_per_hour": 2, "min_signal_strength": 0.5}},
-        {"name": "pivot-btc", "strategy_type": "pivot_lines", "symbol": "BTC", "timeframe": "1h", "size_usd": 100, "leverage": 3, "params": {"pivot_lookback": 24, "min_hold_bars": 3, "cooldown_seconds": 600, "max_trades_per_hour": 2, "min_signal_strength": 0.5}},
-        {"name": "rsivwap-btc", "strategy_type": "rsi_vwap", "symbol": "BTC", "timeframe": "15m", "size_usd": 100, "leverage": 3, "params": {"rsi_period": 14, "oversold": 30, "overbought": 70, "min_hold_bars": 3, "cooldown_seconds": 300, "max_trades_per_hour": 3, "min_signal_strength": 0.5}},
-        # ── Full fleet: trend strategies ──
-        {"name": "sma-btc", "strategy_type": "sma_crossover", "symbol": "BTC", "timeframe": "1h", "size_usd": 100, "leverage": 3, "params": {"sma_period": 20, "support_lookback": 20, "adx_threshold": 15, "min_hold_bars": 3, "cooldown_seconds": 600, "max_trades_per_hour": 2, "min_signal_strength": 0.5}},
-        {"name": "vwma-btc", "strategy_type": "vwma", "symbol": "BTC", "timeframe": "15m", "size_usd": 100, "leverage": 3, "params": {"fast_period": 20, "mid_period": 41, "slow_period": 75, "min_hold_bars": 3, "cooldown_seconds": 300, "max_trades_per_hour": 3, "min_signal_strength": 0.5}},
-        {"name": "macd-btc", "strategy_type": "macd", "symbol": "BTC", "timeframe": "1h", "size_usd": 100, "leverage": 3, "params": {"fast_period": 12, "slow_period": 26, "signal_period": 9, "ma_filter_period": 50, "histogram_mode": True, "zero_cross_mode": True, "confirmation_bars": 1, "min_hold_bars": 3, "cooldown_seconds": 600, "max_trades_per_hour": 2, "min_signal_strength": 0.5}},
-        {"name": "ichimoku-btc", "strategy_type": "ichimoku", "symbol": "BTC", "timeframe": "4h", "size_usd": 100, "leverage": 3, "interval_seconds": 60, "params": {"tenkan_period": 9, "kijun_period": 26, "senkou_b_period": 52, "min_hold_bars": 2, "cooldown_seconds": 900, "max_trades_per_hour": 2, "min_signal_strength": 0.5}},
-        {"name": "emabb-btc", "strategy_type": "ema_bollinger", "symbol": "BTC", "timeframe": "1h", "size_usd": 100, "leverage": 3, "params": {"short_ema_period": 20, "long_ema_period": 50, "bb_period": 20, "bb_std": 2.0, "min_hold_bars": 3, "cooldown_seconds": 600, "max_trades_per_hour": 2, "min_signal_strength": 0.5}},
-        {"name": "combo-btc", "strategy_type": "sma_adx_bb_vol", "symbol": "BTC", "timeframe": "1h", "size_usd": 100, "leverage": 3, "params": {"sma_period": 20, "adx_period": 14, "bb_period": 20, "bb_std": 2.0, "min_adx": 25, "volume_multiplier": 1.1, "min_hold_bars": 3, "cooldown_seconds": 600, "max_trades_per_hour": 2, "min_signal_strength": 0.5}},
-        # ── Full fleet: statistical/pattern strategies ──
-        {"name": "corr-sol", "strategy_type": "correlation", "symbol": "SOL", "timeframe": "15m", "size_usd": 100, "leverage": 3, "params": {"leader": "ETH", "correlation_window": 20, "lag_threshold": 0.003, "sl_pct": 0.005, "tp_pct": 0.015, "momentum_threshold": 0.015, "min_hold_bars": 3, "cooldown_seconds": 300, "max_trades_per_hour": 3, "min_signal_strength": 0.5}},
-        # elliott-btc, ellpiv-btc removed 2026-05-15: elliott_wave and
-        # elliott_pivot are deliberately disabled in
-        # src/strategies/registry.py (unreliable in crypto). Re-add here
-        # only when the registry re-enables them.
-        {"name": "gridfib-btc", "strategy_type": "grid_fibonacci", "symbol": "BTC", "timeframe": "4h", "size_usd": 100, "leverage": 3, "interval_seconds": 60, "params": {"fib_lookback": 50, "proximity_pct": 0.8, "trend_period": 20, "take_profit_fib": 0.618, "stop_loss_fib": 1.0, "min_hold_bars": 2, "cooldown_seconds": 900, "max_trades_per_hour": 2, "min_signal_strength": 0.5}},
+        # ── SURVIVOR: closed-mkt-btc — overnight/weekend breakout, NYSE-close gate ──
+        {"name": "closed-mkt-btc", "strategy_type": "closed_market_overnight", "symbol": "BTC", "timeframe": "1h", "size_usd": 100, "leverage": 3, "params": {"momentum_lookback": 12, "breakout_pct": 0.002, "tp_pct": 0.010, "sl_pct": 0.008, "min_hold_bars": 2, "cooldown_seconds": 180, "max_trades_per_hour": 4, "min_signal_strength": 0.65}},
+        # ── SURVIVOR: liqdip-btc — liquidation double-dip, MoonDev edge ──
+        {"name": "liqdip-btc", "strategy_type": "liquidation_dip", "symbol": "BTC", "timeframe": "5m", "size_usd": 100, "leverage": 3, "params": {"liq_threshold_usd": 500000, "bounce_pct": 0.005, "dip_tolerance_pct": 0.002, "max_liq_age_hours": 4, "mode": "double_dip", "take_profit_pct": 1.5, "stop_loss_pct": 10.0, "time_limit_hours": 24, "min_hold_bars": 3, "cooldown_seconds": 120, "max_trades_per_hour": 5, "min_signal_strength": 0.60}},
+        # NOTE: conspop-btc is INTENTIONALLY EXCLUDED — paper data is stale, do not re-add.
+        # Formerly-running strategies (mm-eth, mm-sol, arb-eth, nw-eth, nw-sol, adx-eth,
+        # mean-rev-eth, turtle-btc, bollinger-btc, conspop-btc, sdz-btc, rsi-btc, pivot-btc,
+        # rsivwap-btc, sma-btc, vwma-btc, macd-btc, ichimoku-btc, emabb-btc, combo-btc,
+        # corr-sol, gridfib-btc) are disabled: all had PnL < 0 with N > 10 trades.
+        # Re-enable only after fresh live validation shows positive edge.
     ]
     for w in winners:
         try:
@@ -404,6 +389,44 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning("Auto-start: could not restore strategies — %s", e)
 
+    # ── Survivor purge: stop all running strategies NOT in the survivor set ──
+    # 2026-06-07: portfolio is -$419 across 76 strategies; only 4 have live edge.
+    # On every startup, any DB instance with status=running that isn't a survivor
+    # is immediately stopped and marked stopped — no manual intervention required.
+    _SURVIVOR_SET = frozenset({"flip-flop-btc", "vwap-btc", "closed-mkt-btc", "liqdip-btc"})
+    if orchestrator is not None:
+        try:
+            from .database import SessionLocal as _PurgeSL
+            _purge_db = _PurgeSL()
+            try:
+                _all_running = _purge_db.query(models.StrategyInstance).filter(
+                    models.StrategyInstance.status == "running"
+                ).all()
+                _purged = 0
+                for _inst in _all_running:
+                    if _inst.name in _SURVIVOR_SET:
+                        continue
+                    # Stop in orchestrator (no-op if not loaded yet — safe)
+                    try:
+                        await orchestrator.stop_strategy(_inst.name)
+                        orchestrator.remove_strategy(_inst.name)
+                    except Exception as _oe:
+                        logger.warning("Survivor purge: orchestrator stop error for %s: %s", _inst.name, _oe)
+                    _inst.status = "stopped"
+                    _purged += 1
+                if _purged:
+                    _purge_db.commit()
+                    logger.warning(
+                        "Survivor purge: stopped %d non-survivor strategies (survivors: %s)",
+                        _purged, sorted(_SURVIVOR_SET),
+                    )
+                else:
+                    logger.info("Survivor purge: all running strategies are survivors — no purge needed")
+            finally:
+                _purge_db.close()
+        except Exception as _pe:
+            logger.warning("Survivor purge failed (non-fatal): %s", _pe)
+
     # ── Periodic paper state saver (every 5 minutes) ──
     async def _paper_state_saver():
         while True:
@@ -417,22 +440,13 @@ async def lifespan(app: FastAPI):
     if paper_mode and executor is not None:
         asyncio.create_task(_paper_state_saver())
 
-    # ── Winner High-Frequency + Leverage Boost (applied each startup) ──
-    # Proven live: vwap +$3.12 | rsi +$3.09 | macd +$1.89 | pivot +$9.75
-    # ETH/SOL live: adx-eth +$15.15/trade | macd-sol +$8.47/trade
-    # MoonDev backtest: liqadx 494% Sharpe 2.81 | flip-flop 529% WR 81%
+    # ── Survivor Boost: tune live params for the 4 confirmed winners ──
+    # 2026-06-07: only survivors get boosted; all others are stopped.
     _BTC_WINNERS = {
-        "vwap-btc":     {"leverage": 3, "size_usd": 100, "cooldown_seconds": 120, "max_trades_per_hour": 6},
-        "rsi-btc":      {"leverage": 3, "size_usd": 100, "cooldown_seconds": 300, "max_trades_per_hour": 4},
-        "macd-btc":     {"leverage": 3, "size_usd": 100, "cooldown_seconds": 240, "max_trades_per_hour": 4},
-        "pivot-btc":    {"leverage": 3, "size_usd": 100, "cooldown_seconds": 180, "max_trades_per_hour": 5},
-        "adx-eth":      {"leverage": 3, "size_usd": 100, "cooldown_seconds": 180, "max_trades_per_hour": 5},
-        "macd-sol":     {"leverage": 3, "size_usd": 100, "cooldown_seconds": 240, "max_trades_per_hour": 4},
-        "turtle-btc":   {"leverage": 3, "size_usd": 100, "cooldown_seconds": 300, "max_trades_per_hour": 3},
-        "liqadx-btc":   {"leverage": 4, "size_usd": 100, "cooldown_seconds": 300, "max_trades_per_hour": 3},
-        "liqadx-eth":   {"leverage": 4, "size_usd": 100, "cooldown_seconds": 300, "max_trades_per_hour": 3},
-        "flip-flop-btc":{"leverage": 4, "size_usd": 100, "cooldown_seconds": 300, "max_trades_per_hour": 3},
-        "flip-flop-eth":{"leverage": 3, "size_usd": 100, "cooldown_seconds": 300, "max_trades_per_hour": 3},
+        "flip-flop-btc":  {"leverage": 4, "size_usd": 100, "cooldown_seconds": 0,   "max_trades_per_hour": 24},
+        "vwap-btc":       {"leverage": 3, "size_usd": 100, "cooldown_seconds": 120, "max_trades_per_hour": 6},
+        "closed-mkt-btc": {"leverage": 3, "size_usd": 100, "cooldown_seconds": 180, "max_trades_per_hour": 4},
+        "liqdip-btc":     {"leverage": 3, "size_usd": 100, "cooldown_seconds": 120, "max_trades_per_hour": 5},
     }
     try:
         from .database import SessionLocal as _BoostSL
@@ -622,11 +636,13 @@ async def lifespan(app: FastAPI):
                             _cinst.edge_confidence_score = edge_confidence(_n, _wr, _payoff)
 
                 # Dynamic winner detection from live stats.
-                # Static fallback is intentionally minimal — only strategies with confirmed live
-                # positive PnL qualify. Stale "hopeful" entries cause the compounder to
-                # allocate capital to losers after restarts.
+                # Static fallback covers the 4 confirmed survivors (2026-06-07 purge).
+                # Only these run at all — the purge block already stopped everything else.
                 _STATIC_WINNERS = {
-                    'flip-flop-btc',  # only confirmed live winner (+$16.66, trend asymmetry)
+                    'flip-flop-btc',   # confirmed live winner (+$16.66, trend asymmetry)
+                    'vwap-btc',        # confirmed live winner (VWAP probability bias)
+                    'closed-mkt-btc',  # survivor: overnight/weekend breakout
+                    'liqdip-btc',      # survivor: liquidation double-dip
                 }
                 _WINNER_MIN_TRADES = 6  # require a real sample — 2-4 trade noise no longer qualifies as a winner
                 dynamic_winners = {
@@ -727,8 +743,13 @@ async def lifespan(app: FastAPI):
 
                 # Winner set, computed exactly as the compounder does, so a
                 # confirmed winner can never be culled.
+                # 2026-06-07: all 4 survivors are static winners — the purge block
+                # already stopped everything else; the cull is a safety net only.
                 _STATIC_WINNERS = {
-                    'flip-flop-btc',  # only confirmed live winner (+$16.66, trend asymmetry)
+                    'flip-flop-btc',   # confirmed live winner (+$16.66, trend asymmetry)
+                    'vwap-btc',        # confirmed live winner (VWAP probability bias)
+                    'closed-mkt-btc',  # survivor: overnight/weekend breakout
+                    'liqdip-btc',      # survivor: liquidation double-dip
                 }
                 _WINNER_MIN_TRADES = 1
                 dynamic_winners = {
