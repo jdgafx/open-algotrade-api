@@ -120,7 +120,7 @@ class LiquidationTracker:
     def _info_request(self, data: Dict) -> Any:
         """Make a POST request to the HL Info API."""
         url = f"{self.base_url}/info"
-        resp = requests.post(url, headers={"Content-Type": "application/json"}, json=data)
+        resp = requests.post(url, headers={"Content-Type": "application/json"}, json=data, timeout=10)
         resp.raise_for_status()
         return resp.json()
 
@@ -367,6 +367,61 @@ class LiquidationTracker:
         """
         vol = self.get_liquidation_volume(30, symbol)
         return vol < self.liq_threshold_usd
+
+    # Configurable threshold: abs(8h funding rate) above this signals extreme
+    # one-sided crowding (~130% annualized at 0.003).
+    FUNDING_CROWD_THRESHOLD_8H: float = 0.003
+
+    def is_safe_to_trade_by_oi(self, symbol: str) -> bool:
+        """
+        OI/funding-based safety check.
+
+        Uses live metaAndAssetCtxs data to detect extreme one-sided crowding.
+        Returns False when the 8h funding rate for *symbol* exceeds
+        FUNDING_CROWD_THRESHOLD_8H in absolute terms, indicating the market is
+        dangerously crowded and near a potential liquidation cascade.
+
+        Fail-open: returns True on any fetch/parse error so a transient API
+        failure never silently blocks all trading.
+        """
+        try:
+            universe, ctxs = self._get_meta_and_ctxs()
+            if not universe or not ctxs:
+                return True
+
+            # Match symbol to asset index (universe is a list of dicts with "name")
+            asset_idx: Optional[int] = None
+            for i, asset in enumerate(universe):
+                if asset.get("name") == symbol:
+                    asset_idx = i
+                    break
+
+            if asset_idx is None or asset_idx >= len(ctxs):
+                # Symbol not found — fail-open
+                return True
+
+            ctx = ctxs[asset_idx]
+            raw_funding = ctx.get("funding")
+            if raw_funding is None:
+                return True
+
+            funding_rate_8h = float(raw_funding)
+            if abs(funding_rate_8h) > self.FUNDING_CROWD_THRESHOLD_8H:
+                logger.info(
+                    "[LIQ-TRACKER] %s extreme funding crowding: 8h_rate=%.4f%% (threshold %.4f%%)",
+                    symbol,
+                    funding_rate_8h * 100.0,
+                    self.FUNDING_CROWD_THRESHOLD_8H * 100.0,
+                )
+                return False
+
+            return True
+        except Exception as _err:
+            logger.warning(
+                "[LIQ-TRACKER] is_safe_to_trade_by_oi(%s) error (fail-open): %s",
+                symbol, _err,
+            )
+            return True
 
     # ──────────────────────────────────────────────
     # Near Liquidation Queries

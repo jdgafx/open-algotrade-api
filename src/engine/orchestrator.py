@@ -786,6 +786,26 @@ class StrategyOrchestrator:
                             except Exception as _fg_err:  # noqa: BLE001 - fail-open
                                 logger.warning("Funding-cost gate error (skipping): %s", _fg_err)
 
+                        # ── Gate 4.5b: Liquidation Tracker Safety Gate ──
+                        # Block entries when market shows extreme funding crowding
+                        # (OI-based proxy). is_safe_to_trade_by_oi is fail-open:
+                        # returns True on any fetch error so it never silently
+                        # kills all entries on a transient API failure.
+                        if self.liquidation_tracker is not None:
+                            try:
+                                _lt_safe = await asyncio.to_thread(
+                                    self.liquidation_tracker.is_safe_to_trade_by_oi, symbol
+                                )
+                                if not _lt_safe:
+                                    logger.warning(
+                                        "[LIQ-TRACKER] %s %s blocked: extreme OI/funding crowding",
+                                        name, signal.signal_type.value,
+                                    )
+                                    await asyncio.sleep(sleep_seconds)
+                                    continue
+                            except Exception as _lt_err:
+                                logger.warning("Liquidation tracker gate error (skipping): %s", _lt_err)
+
                         # ── Gate 4.6: LLM Advisory Gate ── (was 4.5 before funding gate)
                         try:
                             regime_info = (
