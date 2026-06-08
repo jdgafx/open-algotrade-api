@@ -656,8 +656,22 @@ async def lifespan(app: FastAPI):
                 _winner_unit = min(_winner_unit, _WINNER_MAX_USD)
                 _OTHER_SIZE = 100.0
 
+                # Kelly guard: do not compound a strategy beyond $500 until it has
+                # N>=100 completed trades. A negative Kelly fraction (e.g. flip-flop-btc
+                # at -16.7% on 12 trades) means there is no proven edge and uncapped
+                # compounding is ruin-seeking.
+                _COMPOUND_MIN_TRADES = 100
+                _COMPOUND_MAX_UNPROVEN = 500.0
+
                 for _cinst in running:
                     new_size = _winner_unit if _cinst.name in _WINNER_SET else _OTHER_SIZE
+                    _trade_count = _live_stats.get(_cinst.name, {}).get("trades", 0)
+                    if new_size > _COMPOUND_MAX_UNPROVEN and _trade_count < _COMPOUND_MIN_TRADES:
+                        logger.warning(
+                            "compounder suppressed for %s: only %d trades, need %d before scaling above $%.0f (capping at $%.0f)",
+                            _cinst.name, _trade_count, _COMPOUND_MIN_TRADES, _COMPOUND_MAX_UNPROVEN, _COMPOUND_MAX_UNPROVEN,
+                        )
+                        new_size = _COMPOUND_MAX_UNPROVEN
                     _cinst.size_usd = new_size
                     if orchestrator:
                         _cstrat = orchestrator.get_strategy(_cinst.name)
