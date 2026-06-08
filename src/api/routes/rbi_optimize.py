@@ -6,8 +6,10 @@ from typing import Any, Optional
 
 import httpx
 from fastapi import APIRouter, BackgroundTasks, HTTPException
+
 from pydantic import BaseModel, Field
 
+from src.api.database import SessionLocal
 from src.engine.llm_gate import llm_gate
 from src.engine.optimizer import OptimizationEngine
 from src.engine.rbi_pipeline import RBIPipeline
@@ -58,6 +60,7 @@ def _get_or_create_pipeline(strategy_type: str) -> RBIPipeline:
             get_strategy_fn=_get_strategy,
             patch_strategy_fn=_patch_strategy,
             optimizer=_optimizer,
+            db_session_factory=SessionLocal,  # enables DB persistence + history rebuild
         )
     return _pipelines[strategy_type]
 
@@ -122,12 +125,40 @@ async def trigger_status(strategy_type: str):
 
 @router.get("/history")
 def get_history():
-    """Return all past promotion events across all strategies."""
-    all_events = []
-    for pipeline in _pipelines.values():
-        all_events.extend(asdict(e) for e in pipeline.get_history())
-    all_events.sort(key=lambda e: e["timestamp"], reverse=True)
-    return all_events
+    """Return all past promotion events across all strategies (reads from DB — survives redeploys)."""
+    try:
+        from src.api.models import PromotionEventRecord
+        db = SessionLocal()
+        try:
+            rows = (
+                db.query(PromotionEventRecord)
+                .order_by(PromotionEventRecord.timestamp.desc())
+                .all()
+            )
+            return [
+                {
+                    "strategy_type": r.strategy_type,
+                    "strategy_id": r.strategy_id,
+                    "timestamp": r.timestamp,
+                    "promoted": r.promoted,
+                    "reason": r.reason,
+                    "before_params": r.before_params or {},
+                    "after_params": r.after_params or {},
+                    "before_metrics": r.before_metrics or {},
+                    "after_metrics": r.after_metrics or {},
+                }
+                for r in rows
+            ]
+        finally:
+            db.close()
+    except Exception as exc:
+        logger.error("GET /optimize/rbi/history DB error: %s", exc)
+        # Fallback to in-memory if DB unavailable
+        all_events = []
+        for pipeline in _pipelines.values():
+            all_events.extend(asdict(e) for e in pipeline.get_history())
+        all_events.sort(key=lambda e: e["timestamp"], reverse=True)
+        return all_events
 
 
 @router.post("/rollback/{strategy_type}")
@@ -145,14 +176,51 @@ async def rollback(strategy_type: str, strategy_id: int):
 
 @router.get("/status")
 def get_status():
-    """Return per-strategy RBI history summary."""
-    return {
-        stype: {
-            "promotions": sum(1 for e in p.get_history() if e.promoted),
-            "last_run": p.get_history()[-1].timestamp if p.get_history() else None,
-        }
-        for stype, p in _pipelines.items()
-    }
+    """Return per-strategy RBI heartbeat — includes last_run, run_count, promotions, last_outcome.
+    Reads from DB so it reflects all historical runs, not just this boot session."""
+    try:
+        from src.api.models import PromotionEventRecord
+        from sqlalchemy import func as sqlfunc
+        db = SessionLocal()
+        try:
+            rows = db.query(PromotionEventRecord).all()
+        finally:
+            db.close()
+    except Exception as exc:
+        logger.error("GET /optimize/rbi/status DB error: %s", exc)
+        rows = []
+
+    # Aggregate by strategy_type from DB rows
+    from collections import defaultdict
+    agg: dict[str, dict] = defaultdict(lambda: {
+        "run_count": 0,
+        "promotions": 0,
+        "last_run": None,
+        "last_outcome": None,
+    })
+    for r in rows:
+        s = agg[r.strategy_type]
+        s["run_count"] += 1
+        if r.promoted:
+            s["promotions"] += 1
+        if s["last_run"] is None or r.timestamp > s["last_run"]:
+            s["last_run"] = r.timestamp
+            s["last_outcome"] = r.reason
+
+    # Merge with in-memory pipelines for any types that fired this session
+    # but may not have committed to DB yet (edge case).
+    for stype, p in _pipelines.items():
+        history = p.get_history()
+        if not history:
+            continue
+        s = agg[stype]
+        in_mem_last = history[-1].timestamp
+        if s["last_run"] is None or in_mem_last > s["last_run"]:
+            s["last_run"] = in_mem_last
+            s["last_outcome"] = history[-1].reason
+        # run_count and promotions from DB are authoritative; don't double-count.
+
+    return dict(agg)
 
 
 llm_router = APIRouter(prefix="/optimize/llm-gate", tags=["llm-gate"])

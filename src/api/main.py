@@ -531,17 +531,26 @@ async def lifespan(app: FastAPI):
         logger.warning("RBI scheduler: DB query failed (%s); using hardcoded schedule", _dbe)
         _running_instances = []
 
+    # Per-job jitter: stagger boot-run offsets between 30s and 5 min so the
+    # ~19 RBI jobs don't thunder-herd on startup.  Each job gets a unique
+    # random offset; the compounder already uses next_run_time=_dt.now() as
+    # a pattern — we use the same idea with spread-out offsets here.
+    _JITTER_MIN_S = 30
+    _JITTER_MAX_S = 300
+
     if _running_instances:
         _job_specs = build_rbi_job_specs(_running_instances, _supported_types)
         _skipped = [i.strategy_type for i in _running_instances if i.strategy_type not in _supported_types]
         if _skipped:
             logger.warning("RBI scheduler: skipping unsupported strategy types (not in param_spaces): %s", sorted(set(_skipped)))
         for _spec in _job_specs:
+            _jitter = timedelta(seconds=random.randint(_JITTER_MIN_S, _JITTER_MAX_S))
             _scheduler.add_job(
                 _rbi_job, "interval", hours=_spec["hours"],
                 args=[_spec["strategy_type"], _spec["strategy_id"], _spec["symbol"], _spec["timeframe"]],
                 id=f"rbi_{_spec['strategy_type']}_{_spec['strategy_id']}",
                 replace_existing=True,
+                next_run_time=_dt.now() + _jitter,
             )
         logger.info("RBI scheduler: %d DB-derived jobs scheduled (supported types: %s)", len(_job_specs), sorted(_supported_types))
     else:
@@ -553,11 +562,13 @@ async def lifespan(app: FastAPI):
         for stype, sid, sym, tf, hours in _RBI_SCHEDULE:
             if stype not in _supported_types:
                 continue
+            _jitter = timedelta(seconds=random.randint(_JITTER_MIN_S, _JITTER_MAX_S))
             _scheduler.add_job(
                 _rbi_job, "interval", hours=hours,
                 args=[stype, sid, sym, tf],
                 id=f"rbi_{stype}",
                 replace_existing=True,
+                next_run_time=_dt.now() + _jitter,
             )
         logger.info(
             "RBI scheduler: empty DB — fell back to %d hardcoded jobs",

@@ -190,6 +190,23 @@ class WhaleAlertRecord(Base):
     timestamp = Column(DateTime(timezone=True), server_default=func.now(), index=True)
 
 
+class PromotionEventRecord(Base):
+    """Durable log of every RBI run_cycle outcome — survives Railway redeploys."""
+    __tablename__ = "rbi_promotion_events"
+
+    id = Column(Integer, primary_key=True, index=True)
+    strategy_type = Column(String, index=True, nullable=False)
+    strategy_id = Column(Integer, nullable=False)
+    timestamp = Column(String, nullable=False, index=True)
+    promoted = Column(Boolean, nullable=False, default=False)
+    reason = Column(String, nullable=False)
+    before_params = Column(JSON, default=dict)
+    after_params = Column(JSON, default=dict)
+    before_metrics = Column(JSON, default=dict)
+    after_metrics = Column(JSON, default=dict)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
 # Keep legacy table for migration compatibility
 class StrategyState(Base):
     __tablename__ = "strategy_state"
