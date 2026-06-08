@@ -40,7 +40,7 @@ def _mock_strategy(active_positions=0, params=None):
     }
 
 
-def _make_pipeline(session_factory, active_positions=0, params=None):
+def _make_pipeline(session_factory, active_positions=0, params=None, strategy_type=None):
     get_fn = AsyncMock(return_value=_mock_strategy(active_positions, params))
     patch_fn = AsyncMock(return_value={})
     optimizer = OptimizationEngine()
@@ -49,6 +49,7 @@ def _make_pipeline(session_factory, active_positions=0, params=None):
         patch_strategy_fn=patch_fn,
         optimizer=optimizer,
         db_session_factory=session_factory,
+        strategy_type=strategy_type,
     )
 
 
@@ -371,3 +372,43 @@ async def test_pipeline_without_db_factory_still_works():
     assert event.promoted is False
     assert len(pipeline.get_history()) == 1
     assert pipeline.run_count == 1
+
+
+# ──────────────────────────────────────────────
+# Cross-type isolation: strategy_type filter
+# ──────────────────────────────────────────────
+
+def test_strategy_type_filter_isolates_history():
+    """A pipeline with strategy_type='adx' must NOT load rows for strategy_type='rsi'."""
+    SessionLocal = _make_session_factory()
+    db = SessionLocal()
+    try:
+        db.add(PromotionEventRecord(
+            strategy_type="rsi", strategy_id=1,
+            timestamp="2026-01-01T00:00:00+00:00",
+            promoted=True, reason="promotion_gate_passed",
+            before_params={"rsi_period": 14}, after_params={"rsi_period": 18},
+            before_metrics={}, after_metrics={},
+        ))
+        db.add(PromotionEventRecord(
+            strategy_type="adx", strategy_id=2,
+            timestamp="2026-01-02T00:00:00+00:00",
+            promoted=False, reason="no_passing_candidates",
+            before_params={"adx_period": 14}, after_params={},
+            before_metrics={}, after_metrics={},
+        ))
+        db.commit()
+    finally:
+        db.close()
+
+    # Pipeline scoped to "adx" must only see the adx row.
+    adx_pipeline = _make_pipeline(SessionLocal, strategy_type="adx")
+    assert adx_pipeline.run_count == 1
+    assert len(adx_pipeline.get_history()) == 1
+    assert adx_pipeline.get_history()[0].strategy_type == "adx"
+
+    # Pipeline scoped to "rsi" must only see the rsi row.
+    rsi_pipeline = _make_pipeline(SessionLocal, strategy_type="rsi")
+    assert rsi_pipeline.run_count == 1
+    assert len(rsi_pipeline.get_history()) == 1
+    assert rsi_pipeline.get_history()[0].strategy_type == "rsi"

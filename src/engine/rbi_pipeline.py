@@ -43,11 +43,13 @@ class RBIPipeline:
         patch_strategy_fn: Callable,
         optimizer: Optional[OptimizationEngine] = None,
         db_session_factory: Optional[Callable] = None,
+        strategy_type: Optional[str] = None,
     ):
         self._get_strategy_fn = get_strategy_fn
         self._patch_strategy_fn = patch_strategy_fn
         self._optimizer = optimizer or OptimizationEngine(commission_pct=0.14)  # 2x the 0.07% research default — worst-case slippage so we never promote on rosy costs
         self._db_session_factory = db_session_factory
+        self._strategy_type = strategy_type
         self._history: list[PromotionEvent] = []
         self._previous_params: dict[str, dict] = {}
         self._run_count: int = 0
@@ -63,11 +65,10 @@ class RBIPipeline:
             from src.api.models import PromotionEventRecord
             db = self._db_session_factory()
             try:
-                rows = (
-                    db.query(PromotionEventRecord)
-                    .order_by(PromotionEventRecord.timestamp.asc())
-                    .all()
-                )
+                q = db.query(PromotionEventRecord)
+                if self._strategy_type:
+                    q = q.filter(PromotionEventRecord.strategy_type == self._strategy_type)
+                rows = q.order_by(PromotionEventRecord.timestamp.asc()).all()
                 for row in rows:
                     event = _record_to_event(row)
                     self._history.append(event)

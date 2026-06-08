@@ -61,6 +61,7 @@ def _get_or_create_pipeline(strategy_type: str) -> RBIPipeline:
             patch_strategy_fn=_patch_strategy,
             optimizer=_optimizer,
             db_session_factory=SessionLocal,  # enables DB persistence + history rebuild
+            strategy_type=strategy_type,
         )
     return _pipelines[strategy_type]
 
@@ -180,7 +181,6 @@ def get_status():
     Reads from DB so it reflects all historical runs, not just this boot session."""
     try:
         from src.api.models import PromotionEventRecord
-        from sqlalchemy import func as sqlfunc
         db = SessionLocal()
         try:
             rows = db.query(PromotionEventRecord).all()
