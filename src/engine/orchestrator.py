@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 from src.engine.llm_gate import TradeContext, llm_gate
+from src.services.funding_monitor import FUNDING_LONG_SUPPRESS_THRESHOLD
 from src.services.adaptation import adaptation_multiplier
 from src.execution.hl_executor import HyperliquidVaultExecutor
 from src.execution.paper_executor import DEFAULT_RUIN_GUARD_BUFFER_PCT
@@ -766,7 +767,26 @@ class StrategyOrchestrator:
                             except Exception as _chaos_err:
                                 logger.warning("Chaos gate error (skipping): %s", _chaos_err)
 
-                        # ── Gate 4.5: LLM Advisory Gate ──
+                        # ── Gate 4.5: Funding-Cost Long Suppression ──
+                        # Block new long entries when the 8h funding rate exceeds
+                        # FUNDING_LONG_SUPPRESS_THRESHOLD (0.01%/8h). At that level
+                        # longs bleed funding every 8 hours on top of taker fees.
+                        # Shorts benefit from high positive funding — only longs suppressed.
+                        # Fail-open: if the fetch fails, get_current_funding returns 0.0.
+                        if signal.signal_type.value == "long" and self.funding_monitor is not None:
+                            try:
+                                _funding_rate = await self.funding_monitor.get_current_funding(symbol)
+                                if _funding_rate > FUNDING_LONG_SUPPRESS_THRESHOLD:
+                                    logger.warning(
+                                        "[FUNDING-GATE] %s %s long suppressed: funding=%s/8h > threshold",
+                                        name, symbol, f"{_funding_rate:.4%}",
+                                    )
+                                    await asyncio.sleep(sleep_seconds)
+                                    continue
+                            except Exception as _fg_err:  # noqa: BLE001 - fail-open
+                                logger.warning("Funding-cost gate error (skipping): %s", _fg_err)
+
+                        # ── Gate 4.6: LLM Advisory Gate ── (was 4.5 before funding gate)
                         try:
                             regime_info = (
                                 self.regime_detector.get_current_regime(symbol)
@@ -810,7 +830,7 @@ class StrategyOrchestrator:
                         except Exception as _llm_err:
                             logger.warning("LLM gate error (skipping gate): %s", _llm_err)
 
-                        # ── Gate 4.6: HLP Sentiment Gate ──
+                        # ── Gate 4.7: HLP Sentiment Gate ──
                         # MoonDev Edge B: fade HLP when it has a concentrated losing position.
                         if is_entry and self.hlp_gate:
                             try:
@@ -827,7 +847,7 @@ class StrategyOrchestrator:
                             except Exception as _hlp_err:
                                 logger.warning("HLP gate error (skipping): %s", _hlp_err)
 
-                        # ── Gate 4.7: Order-Book Imbalance Gate ──
+                        # ── Gate 4.8: Order-Book Imbalance Gate ──
                         # Shadow mode (default): log what would be blocked, never skip entries.
                         # Flip OrderBookImbalanceGate.shadow_mode=False to activate blocking.
                         try:
@@ -847,7 +867,7 @@ class StrategyOrchestrator:
                         except Exception as _ob_err:
                             logger.warning("OB gate error (skipping): %s", _ob_err)
 
-                        # ── Gate 4.8: Portfolio Exposure Cap ──
+                        # ── Gate 4.9: Portfolio Exposure Cap ──
                         # Skip entry if total open notional / equity already exceeds
                         # max_portfolio_exposure_pct (default 80.0 = 80%).
                         _equity = self._get_current_balance()
@@ -867,7 +887,7 @@ class StrategyOrchestrator:
                                 await asyncio.sleep(sleep_seconds)
                                 continue
 
-                        # ── Gate 4.9: Net BTC-Delta Cap ──
+                        # ── Gate 4.10: Net BTC-Delta Cap ──
                         # For BTC long entries only: total BTC long notional must not exceed
                         # _btc_delta_cap_x × equity (default 1.5×).
                         _is_btc_long = (

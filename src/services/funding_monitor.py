@@ -16,6 +16,7 @@ Contrarian logic:
     Going AGAINST extreme funding -> boost confidence (contrarian edge)
 """
 
+import asyncio
 import logging
 import threading
 import time
@@ -41,6 +42,10 @@ CONTRARIAN_BONUS = 0.2  # boost when fading extreme crowd
 
 DEFAULT_REFRESH_INTERVAL = 900  # 15 minutes in seconds
 HISTORY_RETENTION = timedelta(hours=24)
+
+# Funding-cost gate: block long entries when 8h funding exceeds this threshold.
+# 0.0001 = 0.01%/8h — longs pay this much per 8-hour period.
+FUNDING_LONG_SUPPRESS_THRESHOLD = 0.0001
 
 HL_MAINNET_INFO_URL = "https://api.hyperliquid.xyz/info"
 
@@ -234,61 +239,44 @@ class FundingMonitor:
         items.sort(key=lambda x: abs(x["annualized_rate"]), reverse=True)
         return items[:n]
 
-    def should_reduce_confidence(
-        self, symbol: str, is_long: bool,
-    ) -> Tuple[bool, float, str]:
+    async def get_current_funding(self, symbol: str) -> float:
         """
-        Determine whether the orchestrator should adjust signal confidence
-        based on current funding conditions.
+        Fetch the live 8h funding rate for *symbol* and return it as a decimal.
 
-        Args:
-            symbol:  The asset being traded.
-            is_long: True if the proposed trade is a long entry.
+        Makes a fresh HTTP request (via asyncio.to_thread so the async caller is
+        not blocked) rather than relying on the 15-minute background cache, giving
+        the entry gate an up-to-the-second reading.
 
-        Returns:
-            (should_adjust, factor, reason)
-            - should_adjust: True when a non-zero adjustment applies.
-            - factor: Negative means reduce confidence, positive means boost.
-                      e.g. -0.3 = subtract 0.3 from signal strength,
-                           +0.2 = add 0.2.
-            - reason: Human-readable explanation.
+        Returns 0.0 on any error (fail-open: entry is not suppressed when data is
+        unavailable).
+
+        Example: 0.0001 = 0.01%/8h (longs are paying shorts).
         """
-        rate = self._rates.get(symbol)
-        if rate is None:
-            return False, 0.0, "no funding data"
+        try:
+            def _fetch() -> float:
+                payload = {"type": "metaAndAssetCtxs"}
+                headers = {"Content-Type": "application/json"}
+                resp = requests.post(
+                    self._base_url, headers=headers, json=payload, timeout=10
+                )
+                resp.raise_for_status()
+                result = resp.json()
+                if not isinstance(result, list) or len(result) < 2:
+                    return 0.0
+                universe = result[0].get("universe", [])
+                ctxs = result[1]
+                for i, asset_meta in enumerate(universe):
+                    if asset_meta.get("name") == symbol and i < len(ctxs):
+                        return float(ctxs[i].get("funding", 0))
+                return 0.0
 
-        severity = self.classify_rate(rate)
-        if severity == "normal":
-            return False, 0.0, "funding normal"
-
-        funding_is_positive = rate > 0  # longs paying shorts
-
-        if is_long and funding_is_positive and severity in ("extreme", "high"):
-            # Going long while funding is extremely positive = agreeing with crowd
-            return True, -CROWD_PENALTY, (
-                f"long_crowded funding ({rate:+.0%} ann.) -- reduce confidence"
+            return await asyncio.to_thread(_fetch)
+        except Exception as exc:
+            logger.warning(
+                "get_current_funding(%s) failed — fail-open (returning 0.0): %s",
+                symbol, exc,
             )
-
-        if not is_long and not funding_is_positive and severity in ("extreme", "high"):
-            # Going short while funding is extremely negative = agreeing with crowd
-            return True, -CROWD_PENALTY, (
-                f"short_crowded funding ({rate:+.0%} ann.) -- reduce confidence"
-            )
-
-        if is_long and not funding_is_positive and severity in ("extreme", "high"):
-            # Going long against extreme negative funding = contrarian edge
-            return True, CONTRARIAN_BONUS, (
-                f"contrarian long against negative funding ({rate:+.0%} ann.) -- boost confidence"
-            )
-
-        if not is_long and funding_is_positive and severity in ("extreme", "high"):
-            # Going short against extreme positive funding = contrarian edge
-            return True, CONTRARIAN_BONUS, (
-                f"contrarian short against positive funding ({rate:+.0%} ann.) -- boost confidence"
-            )
-
-        # Elevated but not extreme -- report but don't adjust
-        return False, 0.0, f"funding elevated ({rate:+.0%} ann.) but below adjustment threshold"
+            return 0.0
 
     # ------------------------------------------------------------------
     # Summary / serialization
