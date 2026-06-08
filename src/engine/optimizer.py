@@ -87,17 +87,21 @@ class OptimizationEngine:
         out_sample = data.iloc[split_idx:].reset_index(drop=True)
 
         # Invariant: both slices must be non-empty and temporally disjoint.
-        assert len(in_sample) > 0 and len(out_sample) > 0, (
-            f"Walk-forward split produced empty slice: in={len(in_sample)} out={len(out_sample)}"
-        )
+        # Use ValueError, not assert — assert is silenced by python -O (PYTHONOPTIMIZE=1).
+        if len(in_sample) == 0 or len(out_sample) == 0:
+            raise ValueError(
+                f"Walk-forward split produced empty slice: in={len(in_sample)} "
+                f"out={len(out_sample)} (total={len(data)}, split={self.WALKFORWARD_SPLIT})"
+            )
         if isinstance(data.index, pd.DatetimeIndex):
             # After sort_index ascending, the last IS bar must precede the first OOS bar.
             is_last = data.index[split_idx - 1]
             oos_first = data.index[split_idx]
-            assert is_last < oos_first, (
-                f"Temporal overlap detected: IS ends at {is_last}, OOS starts at {oos_first}. "
-                "Walk-forward split is invalid."
-            )
+            if is_last >= oos_first:
+                raise ValueError(
+                    f"Temporal overlap: IS ends at {is_last}, OOS starts at {oos_first}. "
+                    "Walk-forward split is invalid — data may not be sorted ascending."
+                )
             logger.debug("WF split: IS ends %s | OOS starts %s", is_last, oos_first)
 
         study = optuna.create_study(
