@@ -524,6 +524,104 @@ class HyperliquidVaultExecutor:
             logger.error("PnL guard failed | %s | %s", symbol, e)
             return None
 
+    async def close_by_strategy(self, strategy_name: str) -> List[ExecutionResult]:
+        """Close every live position attributed to strategy_name.
+
+        Called by the orchestrator ruin-guard and hard-stop paths. Uses
+        _active_positions as the authoritative list of what this executor
+        opened for this strategy (keyed strategy:symbol), then issues a
+        market reduce-only order for each one.
+
+        Market orders are intentional here — this is a forced safety close,
+        not an entry, so taker fees are acceptable over fill uncertainty.
+
+        Returns the list of ExecutionResults (one per closed position).
+        No-ops silently if there are no matching positions.
+        """
+        results: List[ExecutionResult] = []
+
+        # Collect symbols tracked under this strategy in our local registry.
+        prefix = f"{strategy_name}:"
+        pos_keys = [k for k in list(self._active_positions.keys()) if k.startswith(prefix)]
+
+        if not pos_keys:
+            logger.info(
+                "close_by_strategy | %s | no tracked positions — no-op", strategy_name
+            )
+            return results
+
+        for pos_key in pos_keys:
+            pos_info = self._active_positions.get(pos_key)
+            if not pos_info:
+                continue
+            symbol = pos_info["symbol"]
+            side = pos_info.get("side", "long")
+
+            try:
+                # Fetch live position size from the exchange — don't trust local registry
+                # for the actual open size (it may be stale after a restart or partial fill).
+                position_data = await self.get_position(symbol)
+
+                if not position_data or position_data.get("size", 0) == 0:
+                    logger.info(
+                        "close_by_strategy | %s | %s | no live position, removing from registry",
+                        strategy_name, symbol,
+                    )
+                    self._active_positions.pop(pos_key, None)
+                    continue
+
+                abs_size = abs(position_data["size"])
+                # To close a long we sell (is_buy=False); to close a short we buy (is_buy=True)
+                is_buy = position_data["size"] < 0
+
+                logger.critical(
+                    "[RUIN-GUARD/HARD-STOP] close_by_strategy | %s | closing %s %.6f (%s) | reason=force_close",
+                    strategy_name, symbol, abs_size, "short" if is_buy else "long",
+                )
+
+                order_result = await asyncio.to_thread(
+                    self.client.market_order,
+                    symbol,
+                    is_buy,
+                    abs_size,
+                    self.default_slippage * 2,  # wider slippage for immediate fill
+                    True,                        # reduce_only
+                    self.vault_address,
+                )
+
+                realized_pnl = position_data.get("unrealized_pnl", 0.0)
+
+                result = ExecutionResult(
+                    success=order_result.success,
+                    order_result=order_result,
+                    realized_pnl=realized_pnl,
+                )
+
+                if order_result.success:
+                    self._active_positions.pop(pos_key, None)
+                    logger.info(
+                        "close_by_strategy | %s | %s closed | pnl=$%.2f | oid=%s",
+                        strategy_name, symbol, realized_pnl,
+                        order_result.oid if order_result else "?",
+                    )
+                else:
+                    result.error = order_result.error
+                    logger.error(
+                        "close_by_strategy | %s | %s FAILED | error=%s",
+                        strategy_name, symbol, order_result.error,
+                    )
+
+                self._execution_history.append(result)
+                results.append(result)
+
+            except Exception as e:
+                logger.error(
+                    "close_by_strategy exception | %s | %s | %s", strategy_name, symbol, e
+                )
+                results.append(ExecutionResult(success=False, error=str(e)))
+
+        return results
+
     def get_active_positions(self) -> Dict[str, Dict]:
         return dict(self._active_positions)
 
