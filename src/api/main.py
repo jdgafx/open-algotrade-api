@@ -324,6 +324,40 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning("Paper state restore failed: %s", e)
 
+    # ── Rehydrate PnL stats + daily_starting_balance from DB ──
+    # Runs after load_state() so DB values only fill gaps not covered by the JSON snapshot.
+    # The trade history loaded from paper_state.json already carries per-trade PnL, so the
+    # executor's in-memory stats are authoritative once load_state() succeeds.  We only
+    # restore _daily_starting_balance (orchestrator circuit-breaker) from the DB here,
+    # because that lives on the orchestrator, not on the executor JSON snapshot.
+    try:
+        from .database import SessionLocal as _RH_SL
+        _rh_db = _RH_SL()
+        try:
+            _snap_rows = _rh_db.query(models.PnlSnapshot).all()
+            if _snap_rows:
+                # Restore daily_starting_balance for the circuit breaker
+                _port_snap = next((r for r in _snap_rows if r.strategy_name == "_portfolio"), None)
+                if _port_snap and _port_snap.daily_starting_balance and orchestrator is not None:
+                    if orchestrator._daily_starting_balance is None:
+                        orchestrator._daily_starting_balance = _port_snap.daily_starting_balance
+                        logger.info(
+                            "PnL rehydrate: daily_starting_balance=$%.2f (from DB)",
+                            _port_snap.daily_starting_balance,
+                        )
+
+                _strat_snaps = [r for r in _snap_rows if r.strategy_name != "_portfolio"]
+                logger.info(
+                    "PnL rehydrate: found %d strategy snapshot(s) in DB (trade history from paper_state.json is authoritative)",
+                    len(_strat_snaps),
+                )
+            else:
+                logger.info("PnL rehydrate: no snapshots in DB (fresh deploy)")
+        finally:
+            _rh_db.close()
+    except Exception as _rh_e:
+        logger.warning("PnL rehydrate failed (non-fatal): %s", _rh_e)
+
     # ── Auto-start strategies that were running before shutdown ──
     if orchestrator is not None:
         try:
@@ -439,6 +473,77 @@ async def lifespan(app: FastAPI):
 
     if paper_mode and executor is not None:
         asyncio.create_task(_paper_state_saver())
+
+    # ── PnL flush loop (every 5 minutes) — persist track record across redeploys ──
+    async def _pnl_flush_loop():
+        """Every 300 s, upsert per-strategy PnL stats + daily_starting_balance to SQLite.
+
+        Uses strategy_name="_portfolio" as a reserved row for the orchestrator's
+        daily circuit-breaker balance so it survives a Railway redeploy.
+        """
+        from .database import SessionLocal as _PFLSL
+        while True:
+            await asyncio.sleep(300)
+            try:
+                if executor is None:
+                    continue
+
+                # Build per-strategy stats from live executor trade history
+                _pfl_stats: dict = {}
+                if hasattr(executor, "get_trade_history"):
+                    for _t in executor.get_trade_history():
+                        if _t.get("action") != "exit":
+                            continue
+                        _sname = _t.get("strategy", "")
+                        if not _sname:
+                            continue
+                        if _sname not in _pfl_stats:
+                            _pfl_stats[_sname] = {"total_pnl": 0.0, "total_trades": 0, "winning_trades": 0, "losing_trades": 0}
+                        _pfl_stats[_sname]["total_trades"] += 1
+                        _pfl_stats[_sname]["total_pnl"] += _t.get("pnl", 0.0)
+                        if (_t.get("pnl") or 0.0) > 0:
+                            _pfl_stats[_sname]["winning_trades"] += 1
+                        else:
+                            _pfl_stats[_sname]["losing_trades"] += 1
+
+                _dsb = orchestrator._daily_starting_balance if orchestrator is not None else None
+
+                _pfl_db = _PFLSL()
+                try:
+                    for _sname, _s in _pfl_stats.items():
+                        _row = _pfl_db.query(models.PnlSnapshot).filter(
+                            models.PnlSnapshot.strategy_name == _sname
+                        ).first()
+                        if _row is None:
+                            _row = models.PnlSnapshot(strategy_name=_sname)
+                            _pfl_db.add(_row)
+                        _row.total_pnl = round(_s["total_pnl"], 4)
+                        _row.total_trades = _s["total_trades"]
+                        _row.winning_trades = _s["winning_trades"]
+                        _row.losing_trades = _s["losing_trades"]
+
+                    # Portfolio row: stores daily_starting_balance for the circuit breaker
+                    _port_row = _pfl_db.query(models.PnlSnapshot).filter(
+                        models.PnlSnapshot.strategy_name == "_portfolio"
+                    ).first()
+                    if _port_row is None:
+                        _port_row = models.PnlSnapshot(strategy_name="_portfolio")
+                        _pfl_db.add(_port_row)
+                    if _dsb is not None:
+                        _port_row.daily_starting_balance = _dsb
+
+                    _pfl_db.commit()
+                    logger.info(
+                        "PnL flush: %d strategies | dsb=$%s",
+                        len(_pfl_stats),
+                        f"{_dsb:.2f}" if _dsb is not None else "None",
+                    )
+                finally:
+                    _pfl_db.close()
+            except Exception as _pfl_e:
+                logger.warning("PnL flush error (non-fatal): %s", _pfl_e)
+
+    asyncio.create_task(_pnl_flush_loop())
 
     # ── Survivor Boost: tune live params for the 4 confirmed winners ──
     # 2026-06-07: only survivors get boosted; all others are stopped.

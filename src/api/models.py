@@ -207,6 +207,28 @@ class PromotionEventRecord(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
+class PnlSnapshot(Base):
+    """5-minute PnL flush — persists per-strategy stats + daily circuit-breaker
+    balance across Railway redeploys so the 90-day track record survives.
+
+    strategy_name="_portfolio" is a reserved row that stores
+    daily_starting_balance for the orchestrator's loss-limit circuit breaker.
+    All other rows are keyed by strategy name.
+    """
+    __tablename__ = "pnl_snapshots"
+
+    id = Column(Integer, primary_key=True, index=True)
+    strategy_name = Column(String, unique=True, index=True, nullable=False)
+    total_pnl = Column(Float, default=0.0)
+    total_trades = Column(Integer, default=0)
+    winning_trades = Column(Integer, default=0)
+    losing_trades = Column(Integer, default=0)
+    daily_starting_balance = Column(Float, nullable=True)
+    updated_at = Column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
 # Keep legacy table for migration compatibility
 class StrategyState(Base):
     __tablename__ = "strategy_state"
