@@ -39,6 +39,10 @@ logger = logging.getLogger(__name__)
 
 _OBSERVATION_FLOOR = 0.10  # fresh/edgeless strategies size at 10% until confidence accrues
 
+# Last N closed trades that define a strategy's "recent" realized performance —
+# the window F1 champion-challenger promotion decides on (not lifetime PnL).
+RECENT_PNL_WINDOW = 20
+
 # Wilson score interval constants
 _WILSON_Z_90 = 1.645  # z-score for 90% confidence interval
 
@@ -327,6 +331,33 @@ class PaperTradingExecutor:
         payoff = (avg_win / avg_loss) if avg_loss > 0 else (_NO_LOSS_PAYOFF if avg_win > 0 else 0.0)
         wr_lo, wr_hi = _wilson_interval(len(wins), n)
         return win_rate, payoff, n, wr_lo, wr_hi
+
+    def recent_realized_pnl(
+        self, strategy_name: str, window: int = RECENT_PNL_WINDOW
+    ) -> tuple[float, int]:
+        """Realized PnL summed over the most-recent `window` CLOSED trades for a
+        strategy, plus the trade count in that window.
+
+        Returns (recent_pnl, n) where n <= window; n == 0 when the strategy has
+        no closed trades. This is the RECENT-window live signal F1 promotion
+        keys off — it tracks current performance, unlike lifetime cumulative PnL
+        which lags a stale historical buffer. self._trades is append-ordered so
+        the last matching slice is the most recent."""
+        pnls = [
+            t.pnl for t in self._trades
+            if t.strategy_name == strategy_name and t.action == "exit"
+        ]
+        recent = pnls[-window:]
+        return round(sum(recent), 2), len(recent)
+
+    def open_position_count(self, strategy_name: str) -> int:
+        """Number of currently-open positions belonging to a strategy. Used to
+        skip RBI re-optimization/promotion while a position is open (so params
+        are never swapped mid-trade)."""
+        return sum(
+            1 for p in self._positions.values()
+            if p.strategy_name == strategy_name
+        )
 
     async def _execute_entry(
         self, signal: Signal, strategy: BaseStrategy

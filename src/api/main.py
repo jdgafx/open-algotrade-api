@@ -2241,6 +2241,14 @@ def get_strategy_instance(name: str, request: Request, db: Session = Depends(get
             if last_sig:
                 instance.last_signal = str(last_sig)
 
+    # Enrich with executor live-loop signals (transient attrs, not DB columns):
+    # recent-window realized PnL + open-position count drive the RBI
+    # champion-challenger gate (F1) and its open-position skip guard.
+    executor = getattr(request.app.state, "executor", None)
+    if executor is not None and hasattr(executor, "recent_realized_pnl"):
+        instance.recent_pnl, instance.recent_trades = executor.recent_realized_pnl(name)
+        instance.active_positions = executor.open_position_count(name)
+
     return instance
 
 

@@ -192,6 +192,12 @@ class StrategyInstanceOut(BaseModel):
     total_pnl: float
     max_drawdown: float
     edge_confidence_score: float = 0.0
+    # Live-loop signals enriched from the executor (default 0 for non-paper /
+    # create paths). active_positions powers the RBI open-position skip guard;
+    # recent_pnl/recent_trades are the RECENT window F1 promotion decides on.
+    active_positions: int = 0
+    recent_pnl: float = 0.0
+    recent_trades: int = 0
     iterations: int
     errors: int
     last_signal: Optional[str] = None

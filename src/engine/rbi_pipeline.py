@@ -7,6 +7,47 @@ from .optimizer import OptimizationEngine
 
 logger = logging.getLogger(__name__)
 
+# F1 — champion-challenger. Minimum RECENT realized trades before the
+# incumbent's live track record is trusted enough to protect a winner / condemn
+# a loser. Below this we have no trustworthy RECENT signal and defer to the
+# backtest gate (safe degradation — never freeze on missing/stale data).
+# The decision is on a RECENT window (recent_pnl/recent_trades), NOT lifetime
+# cumulative PnL: a decayed winner with a big stale historical buffer but
+# negative recent PnL must be replaced, not frozen.
+MIN_RECENT_TRADES_FOR_CHAMPION = 10
+
+
+def _incumbent_live_edge(current: dict) -> dict:
+    """Extract the incumbent strategy's RECENT realized live performance from the
+    strategy record returned by get_strategy_fn (GET /strategies/{name}).
+
+    Decision keys: recent_pnl / recent_trades (sum + count over the last N closed
+    trades for the strategy). Lifetime total_pnl/total_trades are kept for
+    observability only — they are NOT what the promotion decision keys off."""
+    recent_trades = int(current.get("recent_trades", 0) or 0)
+    recent_pnl = float(current.get("recent_pnl", 0.0) or 0.0)
+    total_trades = int(current.get("total_trades", 0) or 0)
+    total_pnl = float(current.get("total_pnl", 0.0) or 0.0)
+    return {
+        "recent_pnl": recent_pnl,
+        "recent_trades": recent_trades,
+        "live_pnl": total_pnl,        # lifetime — recorded, not decided on
+        "live_trades": total_trades,  # lifetime — recorded, not decided on
+    }
+
+
+def _challenger_metrics(best: Any) -> dict:
+    """The backtest OOS metrics of a candidate, recorded on the event so a
+    declined or accepted challenger is auditable."""
+    return {
+        "oos_sharpe": best.out_sample_sharpe,
+        "oos_profit_factor": best.out_sample_profit_factor,
+        "oos_win_rate": best.out_sample_win_rate,
+        "oos_trades": best.out_sample_total_trades,
+        "oos_max_drawdown": best.out_sample_max_drawdown,
+        "composite_score": best.composite_score,
+    }
+
 
 @dataclass
 class PromotionEvent:
@@ -157,30 +198,54 @@ class RBIPipeline:
             return event
 
         best = passing[0]
+        live = _incumbent_live_edge(current)
+
+        # F1 champion-challenger: a passing backtest candidate is not enough on
+        # its own. Decide on the incumbent's RECENT realized window: protect a
+        # RECENT winner from being churned on backtest hope; replace a RECENT
+        # loser; otherwise (thin/absent recent data — fresh strategy or
+        # post-redeploy reset) defer to the backtest gate that already passed.
+        proven_record = live["recent_trades"] >= MIN_RECENT_TRADES_FOR_CHAMPION
+        if proven_record and live["recent_pnl"] > 0:
+            event = PromotionEvent(
+                strategy_type=strategy_type, strategy_id=strategy_id, timestamp=ts,
+                promoted=False, reason="retained_live_winner",
+                before_params=current_params, after_params={},
+                before_metrics=live, after_metrics=_challenger_metrics(best),
+            )
+            self._history.append(event)
+            self._run_count += 1
+            self._persist_event(event)
+            logger.info(
+                "RBI retained live winner %s (id=%d): recent_pnl=%.2f over %d recent "
+                "trades; declined challenger OOS sharpe=%.2f",
+                strategy_type, strategy_id, live["recent_pnl"], live["recent_trades"],
+                best.out_sample_sharpe,
+            )
+            return event
+
+        reason = ("promoted_over_live_loser"
+                  if proven_record and live["recent_pnl"] < 0
+                  else "promotion_gate_passed")
+
         self._previous_params[strategy_type] = current_params.copy()
         await self._patch_strategy_fn(strategy_id, {"params": best.params})
 
         event = PromotionEvent(
             strategy_type=strategy_type, strategy_id=strategy_id, timestamp=ts,
-            promoted=True, reason="promotion_gate_passed",
+            promoted=True, reason=reason,
             before_params=current_params, after_params=best.params,
-            before_metrics={},
-            after_metrics={
-                "oos_sharpe": best.out_sample_sharpe,
-                "oos_profit_factor": best.out_sample_profit_factor,
-                "oos_win_rate": best.out_sample_win_rate,
-                "oos_trades": best.out_sample_total_trades,
-                "oos_max_drawdown": best.out_sample_max_drawdown,
-                "composite_score": best.composite_score,
-            },
+            before_metrics=live, after_metrics=_challenger_metrics(best),
         )
         self._history.append(event)
         self._run_count += 1
         self._persist_event(event)
         logger.info(
-            "RBI promoted %s (id=%d): OOS sharpe=%.2f PF=%.2f WR=%.1f%%",
-            strategy_type, strategy_id, best.out_sample_sharpe,
+            "RBI promoted %s (id=%d) [%s]: OOS sharpe=%.2f PF=%.2f WR=%.1f%% "
+            "(incumbent recent_pnl=%.2f over %d recent trades)",
+            strategy_type, strategy_id, reason, best.out_sample_sharpe,
             best.out_sample_profit_factor, best.out_sample_win_rate,
+            live["recent_pnl"], live["recent_trades"],
         )
         return event
 
