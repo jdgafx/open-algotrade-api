@@ -21,6 +21,7 @@ web3
 # ── Data / Analytics ──
 pandas
 numpy
+scipy  # required by src/engine/rigor/validation.py (Deflated Sharpe / CPCV) — was present in the venv but unpinned; the live promotion gate now imports it
 requests
 httpx
 

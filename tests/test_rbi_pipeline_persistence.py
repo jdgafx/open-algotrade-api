@@ -283,6 +283,7 @@ async def test_run_cycle_persists_promotion():
         out_sample_profit_factor=1.5, out_sample_win_rate=48.0,
         out_sample_total_trades=30, out_sample_max_drawdown=8.0,
         composite_score=0.72, passed_walkforward=True,
+        out_sample_dsr=0.99, cpcv_frac_positive=0.8,  # clear the overfitting guards too
     )
     optimizer.optimize = AsyncMock(return_value=[passing])
 

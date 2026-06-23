@@ -52,6 +52,7 @@ async def test_promotes_when_candidate_passes(pipeline):
         out_sample_profit_factor=1.5, out_sample_win_rate=48.0,
         out_sample_total_trades=30, out_sample_max_drawdown=8.0,
         composite_score=0.72, passed_walkforward=True,
+        out_sample_dsr=0.99, cpcv_frac_positive=0.8,  # clear the overfitting guards too
     )
     pipeline._optimizer.optimize = AsyncMock(return_value=[passing])
     result = await pipeline.run_cycle("mean_reversion", 8, "BTC", "1h")
@@ -69,6 +70,7 @@ async def test_rollback_returns_previous_params(pipeline):
         out_sample_profit_factor=1.5, out_sample_win_rate=48.0,
         out_sample_total_trades=30, out_sample_max_drawdown=8.0,
         composite_score=0.72, passed_walkforward=True,
+        out_sample_dsr=0.99, cpcv_frac_positive=0.8,  # clear the overfitting guards too
     )
     pipeline._optimizer.optimize = AsyncMock(return_value=[passing])
     await pipeline.run_cycle("mean_reversion", 8, "BTC", "1h")

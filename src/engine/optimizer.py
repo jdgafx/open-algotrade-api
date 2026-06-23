@@ -1,5 +1,7 @@
 import asyncio
 import logging
+import math
+import statistics
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
@@ -10,6 +12,17 @@ import pandas as pd
 from .backtester import Backtester
 from .data_cache import candle_cache
 from .param_spaces import suggest_params
+from .rigor import (
+    DSR_MIN,
+    cpcv_stability,
+    deflated_sharpe_ratio,
+    purged_combinatorial_kfold,
+)
+
+# The backtester reports an ANNUALIZED Sharpe (mean/std * sqrt(252), backtester.py).
+# DSR must be fed per-period (per-trade) Sharpes consistent with the per-trade
+# returns series, so trial/selected Sharpes are de-annualized by this factor.
+_ANNUALIZATION = math.sqrt(252)
 
 logger = logging.getLogger(__name__)
 optuna.logging.set_verbosity(optuna.logging.WARNING)
@@ -26,6 +39,12 @@ class OptimizationResult:
     out_sample_max_drawdown: float
     composite_score: float
     passed_walkforward: bool
+    # Overfitting guards (plan U2). Defaults keep older constructions valid;
+    # a real optimize() run populates both. The gate treats the defaults as a
+    # fail (DSR 0.0 < DSR_MIN; cpcv 0.0 not > CPCV_MIN_FRAC_POSITIVE), so a
+    # candidate with no guard evidence can never be promoted.
+    out_sample_dsr: float = 0.0
+    cpcv_frac_positive: float = 0.0
 
 
 class OptimizationEngine:
@@ -44,6 +63,9 @@ class OptimizationEngine:
     # the inflated 12.8 seen before the sort guard was added.  1.0 was effectively
     # blocking all real candidates; 0.5 is still a meaningful positive edge floor.
     PROMOTION_MIN_SHARPE = 0.5
+    # Overfitting guards (plan U2) — ADDITIVE to the checks above, never a relaxation.
+    PROMOTION_MIN_DSR = DSR_MIN              # Deflated Sharpe >= this (0.95)
+    CPCV_MIN_FRAC_POSITIVE = 0.5             # > half the combinatorial-purged CV paths net-positive
 
     def __init__(self, initial_capital: float = 10000.0, commission_pct: float = 0.07):
         self._initial_capital = initial_capital
@@ -129,12 +151,24 @@ class OptimizationEngine:
             reverse=True,
         )
 
+        # The full distribution of tried (in-sample) Sharpes, de-annualized to
+        # per-trade units, is what DSR deflates the selected edge against — the
+        # more configs we searched, the higher the bar a real edge must clear.
+        sr_trials = [t.value / _ANNUALIZATION for t in trials_sorted]
+
         for trial in trials_sorted[:10]:
             params = trial.params
             try:
                 oos = await self._run_backtest(strategy_type, symbol, timeframe, out_sample, params)
                 pf_capped = min(oos.profit_factor, 5.0)
                 composite = 0.7 * oos.sharpe_ratio + 0.3 * (pf_capped / 5.0)
+                # DSR (cheap — no extra backtest): per-trade Sharpe of the OOS
+                # trades, deflated by the tried-Sharpe distribution.
+                oos_returns = [t["pnl_pct"] / 100.0 for t in oos.trades]
+                sr_selected = self._per_trade_sharpe(oos_returns)
+                dsr = deflated_sharpe_ratio(
+                    sr_selected, sr_trials or [sr_selected], oos_returns
+                )["DSR"]
                 results.append(OptimizationResult(
                     params=params,
                     in_sample_sharpe=trial.value,
@@ -145,12 +179,58 @@ class OptimizationEngine:
                     out_sample_max_drawdown=oos.max_drawdown_pct,
                     composite_score=composite,
                     passed_walkforward=self._passes_walkforward(oos),
+                    out_sample_dsr=dsr,
                 ))
             except Exception as e:
                 logger.warning("OOS validation failed for %s params %s: %s", strategy_type, params, e)
 
         results.sort(key=lambda r: r.composite_score, reverse=True)
+
+        # CPCV stability is the expensive guard (~15 backtests per candidate), so
+        # only candidates already clearing every cheap check INCLUDING DSR earn it
+        # — usually 0-1 candidates, keeping the added cost bounded.
+        for r in results:
+            if self._passes_pre_cpcv_gate(r):
+                r.cpcv_frac_positive = await self._cpcv_frac_positive(
+                    strategy_type, symbol, timeframe, data, r.params
+                )
+
         return results
+
+    @staticmethod
+    def _per_trade_sharpe(returns: list[float]) -> float:
+        """Per-trade Sharpe (unannualized): mean/stdev of the per-trade return
+        series. Matches the units DSR expects (and the meta-repo reference)."""
+        if len(returns) < 2:
+            return 0.0
+        std = statistics.stdev(returns)
+        return statistics.mean(returns) / std if std > 0 else 0.0
+
+    async def _cpcv_frac_positive(
+        self, strategy_type, symbol, timeframe, data, params
+    ) -> float:
+        """Fraction of combinatorial-purged-CV paths on which `params` is
+        net-positive. The selected params are re-backtested on each of the C(6,2)=15
+        purged+embargoed test folds; a fold's score is its mean per-trade return
+        (sign is what drives stability — a per-fold promotion-trade floor would
+        zero out short folds and is intentionally not applied here)."""
+        n = len(data)
+        scores: list[float] = []
+        for _train_idx, test_idx in purged_combinatorial_kfold(n):
+            if len(test_idx) < 2:
+                continue
+            fold = data.iloc[test_idx].reset_index(drop=True)
+            try:
+                bt = await self._run_backtest(strategy_type, symbol, timeframe, fold, params)
+            except Exception as e:
+                logger.debug("CPCV fold backtest failed for %s: %s", strategy_type, e)
+                continue
+            if bt.total_trades < 1 or not bt.trades:
+                continue
+            scores.append(statistics.mean(t["pnl_pct"] / 100.0 for t in bt.trades))
+        if not scores:
+            return 0.0
+        return cpcv_stability(scores)["frac_positive"]
 
     def _passes_walkforward(self, oos_result) -> bool:
         return (
@@ -160,12 +240,10 @@ class OptimizationEngine:
             and oos_result.max_drawdown_pct <= self.MAX_OOS_DRAWDOWN
         )
 
-    def _passes_promotion_gate(self, result: "OptimizationResult") -> bool:
-        """Strict gate a strategy must clear before it earns LIVE leverage.
-
-        Distinct from _passes_walkforward (permissive research screen). Promotion
-        requires a statistically meaningful sample so Kelly sizing is not estimated
-        off noise. Operates on an OptimizationResult (out_sample_* fields).
+    def _passes_pre_cpcv_gate(self, result: "OptimizationResult") -> bool:
+        """The cheap promotion checks (no extra backtest): the original 5-criterion
+        screen PLUS the Deflated-Sharpe guard. Used to decide which candidates are
+        worth the expensive CPCV path eval — and is the first half of the full gate.
         """
         return (
             result.out_sample_total_trades >= self.PROMOTION_MIN_OOS_TRADES
@@ -173,6 +251,22 @@ class OptimizationEngine:
             and result.out_sample_win_rate >= self.PROMOTION_MIN_WIN_RATE
             and result.out_sample_max_drawdown <= self.PROMOTION_MAX_DRAWDOWN
             and result.out_sample_sharpe >= self.PROMOTION_MIN_SHARPE
+            and result.out_sample_dsr >= self.PROMOTION_MIN_DSR
+        )
+
+    def _passes_promotion_gate(self, result: "OptimizationResult") -> bool:
+        """Strict gate a strategy must clear before it earns LIVE leverage.
+
+        Distinct from _passes_walkforward (permissive research screen). Promotion
+        requires a statistically meaningful sample so Kelly sizing is not estimated
+        off noise, AND overfitting guards — Deflated Sharpe (is the edge real or the
+        luckiest of N tries?) plus combinatorial-purged-CV stability (does it hold
+        across data subsets?) — so a backtest-lucky config never reaches live
+        capital. ADDITIVE to the original screen; never relaxes PF/WR/Sharpe/trades/DD.
+        """
+        return (
+            self._passes_pre_cpcv_gate(result)
+            and result.cpcv_frac_positive > self.CPCV_MIN_FRAC_POSITIVE
         )
 
     async def _run_backtest(self, strategy_type, symbol, timeframe, data, params):
