@@ -16,6 +16,7 @@ Usage:
 import asyncio
 import json
 import logging
+import math
 import os
 import time
 from dataclasses import dataclass, field
@@ -37,6 +38,23 @@ from src.strategies.base_strategy import (
 logger = logging.getLogger(__name__)
 
 _OBSERVATION_FLOOR = 0.10  # fresh/edgeless strategies size at 10% until confidence accrues
+
+# Wilson score interval constants
+_WILSON_Z_90 = 1.645  # z-score for 90% confidence interval
+
+
+def _wilson_interval(wins: int, n: int, z: float = _WILSON_Z_90) -> tuple[float, float]:
+    """Wilson score 90% CI for win-rate. stdlib math only.
+
+    Returns (lower, upper) bounds in [0, 1]. When n == 0 returns (0.0, 0.0).
+    """
+    if n == 0:
+        return 0.0, 0.0
+    p = wins / n
+    z2 = z * z
+    centre = (p + z2 / (2 * n)) / (1 + z2 / n)
+    half_width = (z / (1 + z2 / n)) * math.sqrt(p * (1 - p) / n + z2 / (4 * n * n))
+    return max(0.0, centre - half_width), min(1.0, centre + half_width)
 
 DEFAULT_RUIN_GUARD_BUFFER_PCT = 1.0  # force-close ~1 wick before liquidation; overridable via RiskConfig.ruin_guard_buffer_pct
 
@@ -290,13 +308,16 @@ class PaperTradingExecutor:
                 success=False, error=f"Unknown signal type: {signal.signal_type}"
             )
 
-    def _live_edge_stats(self, strategy_name: str) -> tuple[float, float, int]:
-        """Return (win_rate, payoff_ratio, n_trades) from this strategy's CLOSED trades."""
+    def _live_edge_stats(self, strategy_name: str) -> tuple[float, float, int, float, float]:
+        """Return (win_rate, payoff_ratio, n_trades, wr_lower_90, wr_upper_90) from CLOSED trades.
+
+        wr_lower_90 / wr_upper_90 are the Wilson score 90% CI bounds on the win-rate.
+        """
         pnls = [t.pnl for t in self._trades
                 if t.strategy_name == strategy_name and t.action == "exit"]
         n = len(pnls)
         if n == 0:
-            return 0.0, 0.0, 0
+            return 0.0, 0.0, 0, 0.0, 0.0
         wins = [p for p in pnls if p > 0]
         losses = [-p for p in pnls if p < 0]
         win_rate = len(wins) / n
@@ -304,7 +325,8 @@ class PaperTradingExecutor:
         avg_loss = sum(losses) / len(losses) if losses else 0.0
         _NO_LOSS_PAYOFF = 10.0  # no losses observed -> capped high payoff ratio so Kelly ~ win_rate (not a raw $ amount)
         payoff = (avg_win / avg_loss) if avg_loss > 0 else (_NO_LOSS_PAYOFF if avg_win > 0 else 0.0)
-        return win_rate, payoff, n
+        wr_lo, wr_hi = _wilson_interval(len(wins), n)
+        return win_rate, payoff, n, wr_lo, wr_hi
 
     async def _execute_entry(
         self, signal: Signal, strategy: BaseStrategy
@@ -328,7 +350,7 @@ class PaperTradingExecutor:
             # Confidence-scaled leverage + half-Kelly sizing from live edge (docs/adr/0001).
             # Fresh/edgeless strategies trade at observation size (10%) and 1x leverage;
             # leverage + size ramp up only as live edge confidence accrues.
-            win_rate, payoff, n_trades = self._live_edge_stats(config.name)
+            win_rate, payoff, n_trades, *_ = self._live_edge_stats(config.name)
             effective_leverage = ladder_leverage(symbol, n_trades, win_rate, payoff)
 
             # Realtime adaptation (ADR-0002): scale ladder leverage by the per-entry multiplier

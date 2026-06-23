@@ -20,7 +20,7 @@ import asyncio
 import logging
 import os
 import random
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 
 from src.engine.llm_gate import TradeContext, llm_gate
@@ -123,6 +123,16 @@ class StrategyOrchestrator:
         self._daily_loss_triggered: bool = False
         self._daily_loss_flattened: bool = False  # True once close_by_strategy called on halt
         self._day_start: Optional[datetime] = None
+
+        # Weekly drawdown tracking
+        self._weekly_starting_balance: Optional[float] = None
+        self._weekly_start: Optional[datetime] = None
+        self._weekly_halved: bool = False  # True once size_usd halved this week
+
+        # Monthly drawdown tracking
+        self._monthly_starting_balance: Optional[float] = None
+        self._monthly_start: Optional[datetime] = None
+        self._monthly_halt_triggered: bool = False
 
         # Regime gate stats
         self._regime_blocks: int = 0
@@ -461,6 +471,79 @@ class StrategyOrchestrator:
 
         return False
 
+    def _check_weekly_drawdown(self) -> bool:
+        """
+        Weekly 5% drawdown: halve all strategy size_usd.
+        Returns True if the weekly halt is active (monthly halt also triggers this).
+        Resets every Monday 00:00 UTC.
+        """
+        now = datetime.now(timezone.utc)
+        monday = now - timedelta(days=now.weekday())  # weekday() 0=Mon
+        week_start = monday.replace(hour=0, minute=0, second=0, microsecond=0)
+
+        # Reset on new week
+        if self._weekly_start is None or week_start > self._weekly_start:
+            self._weekly_start = week_start
+            self._weekly_starting_balance = self._get_current_balance()
+            self._weekly_halved = False
+            logger.info("Weekly reset | starting balance: $%.2f", self._weekly_starting_balance)
+            return False
+
+        if self._weekly_starting_balance is None or self._weekly_starting_balance <= 0:
+            return False
+
+        current = self._get_current_balance()
+        weekly_pnl_pct = (current - self._weekly_starting_balance) / self._weekly_starting_balance * 100
+
+        if weekly_pnl_pct <= -5.0 and not self._weekly_halved:
+            self._weekly_halved = True
+            logger.critical(
+                "WEEKLY DRAWDOWN -5%%: halving all strategy size_usd | pnl=%.2f%% | balance=$%.2f→$%.2f",
+                weekly_pnl_pct, self._weekly_starting_balance, current,
+            )
+            for name, strat in self._strategies.items():
+                old_sz = strat.config.size_usd
+                strat.config.size_usd = max(10.0, old_sz / 2.0)
+                logger.info("Weekly halve: %s size_usd $%.0f → $%.0f", name, old_sz, strat.config.size_usd)
+
+        return False  # halving doesn't halt; only monthly halts
+
+    def _check_monthly_drawdown(self) -> bool:
+        """
+        Monthly 10% drawdown: halt all strategies.
+        Returns True if trading should halt.
+        Resets on the 1st of each month at 00:00 UTC.
+        """
+        now = datetime.now(timezone.utc)
+        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+        # Reset on new month
+        if self._monthly_start is None or month_start > self._monthly_start:
+            self._monthly_start = month_start
+            self._monthly_starting_balance = self._get_current_balance()
+            self._monthly_halt_triggered = False
+            logger.info("Monthly reset | starting balance: $%.2f", self._monthly_starting_balance)
+            return False
+
+        if self._monthly_halt_triggered:
+            return True
+
+        if self._monthly_starting_balance is None or self._monthly_starting_balance <= 0:
+            return False
+
+        current = self._get_current_balance()
+        monthly_pnl_pct = (current - self._monthly_starting_balance) / self._monthly_starting_balance * 100
+
+        if monthly_pnl_pct <= -10.0:
+            self._monthly_halt_triggered = True
+            logger.critical(
+                "MONTHLY DRAWDOWN HALT | pnl=%.2f%% | balance=$%.2f→$%.2f | HALTING ALL STRATEGIES",
+                monthly_pnl_pct, self._monthly_starting_balance, current,
+            )
+            return True
+
+        return False
+
     def _check_global_rate_limit(self) -> bool:
         """
         Check global trade rate limit across ALL strategies.
@@ -602,6 +685,15 @@ class StrategyOrchestrator:
                                 )
                     logger.debug("Daily loss gate active | %s sleeping", name)
                     await asyncio.sleep(sleep_seconds * 4)  # Sleep longer when halted
+                    continue
+
+                # ── Gate 1b: Weekly Drawdown (halve sizes on -5%) ──
+                self._check_weekly_drawdown()
+
+                # ── Gate 1c: Monthly Drawdown Halt (halt on -10%) ──
+                if self._check_monthly_drawdown():
+                    logger.debug("Monthly drawdown halt active | %s sleeping", name)
+                    await asyncio.sleep(sleep_seconds * 4)
                     continue
 
                 # Fetch OHLCV data

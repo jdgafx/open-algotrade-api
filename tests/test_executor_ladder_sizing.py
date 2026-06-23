@@ -20,7 +20,7 @@ def test_live_edge_stats_from_trade_history():
         ex._trades.append(_exit_trade("donchian-btc", 20.0))   # 6 wins +20
     for _ in range(4):
         ex._trades.append(_exit_trade("donchian-btc", -10.0))  # 4 losses -10
-    wr, payoff, n = ex._live_edge_stats("donchian-btc")
+    wr, payoff, n, *_ = ex._live_edge_stats("donchian-btc")
     assert n == 10
     assert wr == pytest.approx(0.6)
     assert payoff == pytest.approx(2.0)
@@ -32,7 +32,7 @@ def test_live_edge_stats_ignores_other_strategies_and_entries():
     entry = _exit_trade("donchian-btc", 0.0)
     entry.action = "entry"
     ex._trades.append(entry)
-    wr, payoff, n = ex._live_edge_stats("donchian-btc")
+    wr, payoff, n, *_ = ex._live_edge_stats("donchian-btc")
     assert n == 0
 
 
@@ -45,7 +45,7 @@ def test_live_edge_stats_caps_payoff_when_no_losses():
         ex._trades.append(_exit_trade("breakeven-btc", 0.5))   # 6 wins of $0.50
     for _ in range(4):
         ex._trades.append(_exit_trade("breakeven-btc", 0.0))   # 4 breakevens, no losses
-    wr, payoff, n = ex._live_edge_stats("breakeven-btc")
+    wr, payoff, n, *_ = ex._live_edge_stats("breakeven-btc")
     assert n == 10
     assert wr == pytest.approx(0.6)
     assert payoff == pytest.approx(10.0)  # capped sentinel, NOT the $0.50 avg_win
@@ -55,8 +55,9 @@ def test_live_edge_stats_caps_payoff_when_no_losses():
 def test_fresh_strategy_gets_observation_leverage_and_tiny_size():
     from src.services.confidence_ladder import ladder_leverage
     ex = PaperTradingExecutor(initial_balance=200.0)
-    wr, payoff, n = ex._live_edge_stats("fresh-btc")
+    wr, payoff, n, wr_lo, wr_hi = ex._live_edge_stats("fresh-btc")
     assert (wr, payoff, n) == (0.0, 0.0, 0)
+    assert (wr_lo, wr_hi) == (0.0, 0.0)
     assert ladder_leverage("BTC", n, wr, payoff) == 1
 
 

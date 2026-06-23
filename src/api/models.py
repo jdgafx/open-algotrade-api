@@ -224,6 +224,8 @@ class PnlSnapshot(Base):
     winning_trades = Column(Integer, default=0)
     losing_trades = Column(Integer, default=0)
     daily_starting_balance = Column(Float, nullable=True)
+    # MIGRATION: ALTER TABLE pnl_snapshots ADD COLUMN balance_pnl FLOAT;
+    balance_pnl = Column(Float, nullable=True)
     updated_at = Column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )

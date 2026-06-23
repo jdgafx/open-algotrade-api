@@ -41,6 +41,12 @@ with engine.connect() as _conn:
         _conn.execute(_sql_text("ALTER TABLE strategy_instances ADD COLUMN edge_confidence_score FLOAT DEFAULT 0.0"))
         _conn.commit()
 
+with engine.connect() as _conn:
+    _pnl_cols = {row[1] for row in _conn.execute(_sql_text("PRAGMA table_info(pnl_snapshots)"))}
+    if "balance_pnl" not in _pnl_cols:
+        _conn.execute(_sql_text("ALTER TABLE pnl_snapshots ADD COLUMN balance_pnl FLOAT"))
+        _conn.commit()
+
 logger = logging.getLogger(__name__)
 
 
@@ -362,7 +368,41 @@ async def lifespan(app: FastAPI):
                             _port_snap.daily_starting_balance,
                         )
 
-                _strat_snaps = [r for r in _snap_rows if r.strategy_name != "_portfolio"]
+                # Restore weekly circuit-breaker state.
+                # Also set _weekly_start so _check_weekly_drawdown() doesn't immediately
+                # overwrite the restored balance on the first tick (reset branch fires
+                # when _weekly_start is None).
+                _weekly_snap = next((r for r in _snap_rows if r.strategy_name == "_weekly"), None)
+                if _weekly_snap and _weekly_snap.daily_starting_balance and orchestrator is not None:
+                    if orchestrator._weekly_starting_balance is None:
+                        from datetime import timedelta as _td
+                        _now_utc = datetime.now(timezone.utc)
+                        _monday = _now_utc - _td(days=_now_utc.weekday())
+                        orchestrator._weekly_starting_balance = _weekly_snap.daily_starting_balance
+                        orchestrator._weekly_start = _monday.replace(
+                            hour=0, minute=0, second=0, microsecond=0
+                        )
+                        logger.info(
+                            "PnL rehydrate: weekly_starting_balance=$%.2f week_start=%s (from DB)",
+                            _weekly_snap.daily_starting_balance, orchestrator._weekly_start,
+                        )
+
+                # Restore monthly circuit-breaker state.
+                # Same pattern: set _monthly_start to prevent immediate overwrite.
+                _monthly_snap = next((r for r in _snap_rows if r.strategy_name == "_monthly"), None)
+                if _monthly_snap and _monthly_snap.daily_starting_balance and orchestrator is not None:
+                    if orchestrator._monthly_starting_balance is None:
+                        _now_utc2 = datetime.now(timezone.utc)
+                        orchestrator._monthly_starting_balance = _monthly_snap.daily_starting_balance
+                        orchestrator._monthly_start = _now_utc2.replace(
+                            day=1, hour=0, minute=0, second=0, microsecond=0
+                        )
+                        logger.info(
+                            "PnL rehydrate: monthly_starting_balance=$%.2f month_start=%s (from DB)",
+                            _monthly_snap.daily_starting_balance, orchestrator._monthly_start,
+                        )
+
+                _strat_snaps = [r for r in _snap_rows if r.strategy_name not in ("_portfolio", "_weekly", "_monthly")]
                 logger.info(
                     "PnL rehydrate: found %d strategy snapshot(s) in DB (trade history from paper_state.json is authoritative)",
                     len(_strat_snaps),
@@ -564,6 +604,37 @@ async def lifespan(app: FastAPI):
                         _pfl_db.add(_port_row)
                     if _dsb is not None:
                         _port_row.daily_starting_balance = _dsb
+                    # Canonical portfolio PnL = balance − initial_balance (survives redeploy via paper_state.json)
+                    if executor is not None and hasattr(executor, "balance") and hasattr(executor, "initial_balance"):
+                        _port_row.balance_pnl = round(executor.balance - executor.initial_balance, 2)
+
+                    # Weekly row: daily_starting_balance=weekly_start_balance,
+                    # total_trades encodes _weekly_halved flag (1=halved, 0=not)
+                    _wsb = orchestrator._weekly_starting_balance if orchestrator is not None else None
+                    _whalved = int(orchestrator._weekly_halved) if orchestrator is not None else 0
+                    _weekly_row = _pfl_db.query(models.PnlSnapshot).filter(
+                        models.PnlSnapshot.strategy_name == "_weekly"
+                    ).first()
+                    if _weekly_row is None:
+                        _weekly_row = models.PnlSnapshot(strategy_name="_weekly")
+                        _pfl_db.add(_weekly_row)
+                    if _wsb is not None:
+                        _weekly_row.daily_starting_balance = _wsb
+                    _weekly_row.total_trades = _whalved
+
+                    # Monthly row: daily_starting_balance=monthly_start_balance,
+                    # total_trades encodes _monthly_halt_triggered (1=halted, 0=not)
+                    _msb = orchestrator._monthly_starting_balance if orchestrator is not None else None
+                    _mhalt = int(orchestrator._monthly_halt_triggered) if orchestrator is not None else 0
+                    _monthly_row = _pfl_db.query(models.PnlSnapshot).filter(
+                        models.PnlSnapshot.strategy_name == "_monthly"
+                    ).first()
+                    if _monthly_row is None:
+                        _monthly_row = models.PnlSnapshot(strategy_name="_monthly")
+                        _pfl_db.add(_monthly_row)
+                    if _msb is not None:
+                        _monthly_row.daily_starting_balance = _msb
+                    _monthly_row.total_trades = _mhalt
 
                     _pfl_db.commit()
                     logger.info(
@@ -770,7 +841,7 @@ async def lifespan(app: FastAPI):
                         _cinst.winning_trades = _s["wins"]
                         _cinst.total_pnl = round(_s["pnl"], 4)
                         if hasattr(executor, "_live_edge_stats"):
-                            _wr, _payoff, _n = executor._live_edge_stats(_cinst.name)
+                            _wr, _payoff, _n, *_ = executor._live_edge_stats(_cinst.name)
                             _cinst.edge_confidence_score = edge_confidence(_n, _wr, _payoff)
 
                 # Dynamic winner detection from live stats.
@@ -1614,7 +1685,8 @@ def portfolio_summary(request: Request, db: Session = Depends(get_db)):
         initial_equity = stats.get("initial_balance", 0)
         max_dd_pct = stats.get("max_drawdown_pct", 0)
         active_positions = stats.get("active_positions", 0)
-        agg_pnl = stats.get("total_realized_pnl", agg_pnl)
+        # Use balance-delta as canonical PnL (survives redeploy; avoids reset-prone _execution_history)
+        agg_pnl = round(stats.get("balance", 0) - stats.get("initial_balance", 0), 2)
     else:
         vault = _get_or_create_vault_state(db)
         total_equity = vault.total_equity
@@ -2652,6 +2724,154 @@ async def reset_paper_trading(request: Request):
 
 
 # ──────────────────────────────────────────────
+# Paper observability endpoints (Track 1)
+# ──────────────────────────────────────────────
+
+# Threshold constants — never hardcode in logic below
+_DIVERGENCE_ALERT_THRESHOLD = 5.0   # USD: alert when live vs DB portfolio PnL diverge more than this
+_EDGE_MIN_TRADES_REAL = 10          # minimum closed trades before declaring real edge
+_EDGE_BREAKEVEN_PRECISION = 6       # decimal places for breakeven_wr display
+
+
+@app.get("/paper/pnl")
+async def paper_pnl(request: Request, db: Session = Depends(get_db)):
+    """Canonical portfolio PnL — balance-delta method, survives Railway redeploys.
+
+    live_pnl  = executor.balance - executor.initial_balance (in-memory, most accurate when present)
+    db_pnl    = pnl_snapshots._portfolio.balance_pnl (persisted every 5 min by _pnl_flush_loop)
+    canonical = live_pnl if executor is available, else db_pnl
+    """
+    executor = getattr(request.app.state, "executor", None)
+    paper_mode = getattr(request.app.state, "paper_mode", False)
+
+    live_pnl = None
+    balance = None
+    initial_balance = None
+    if paper_mode and executor is not None:
+        balance = round(float(getattr(executor, "balance", 0)), 2)
+        initial_balance = round(float(getattr(executor, "initial_balance", 0)), 2)
+        live_pnl = round(balance - initial_balance, 2)
+
+    db_pnl = None
+    port_row = db.query(models.PnlSnapshot).filter(
+        models.PnlSnapshot.strategy_name == "_portfolio"
+    ).first()
+    if port_row is not None and port_row.balance_pnl is not None:
+        db_pnl = round(float(port_row.balance_pnl), 2)
+
+    if live_pnl is not None:
+        canonical_pnl = live_pnl
+        source = "live_executor"
+    elif db_pnl is not None:
+        canonical_pnl = db_pnl
+        source = "db_snapshot"
+    else:
+        canonical_pnl = None
+        source = "unavailable"
+
+    return {
+        "canonical_pnl": canonical_pnl,
+        "source": source,
+        "live_pnl": live_pnl,
+        "db_pnl": db_pnl,
+        "balance": balance,
+        "initial_balance": initial_balance,
+    }
+
+
+@app.get("/paper/edge")
+def paper_edge(request: Request):
+    """Per-strategy edge stats with Wilson 90% CI and real-edge flag.
+
+    real_edge = True when n >= _EDGE_MIN_TRADES_REAL AND wr_lower_90 > breakeven_wr.
+    size_flag:
+        'observation' — n < _EDGE_MIN_TRADES_REAL (still building sample)
+        'real'        — real_edge confirmed
+        'noise'       — enough trades but lower CI doesn't clear breakeven
+    """
+    executor = getattr(request.app.state, "executor", None)
+    paper_mode = getattr(request.app.state, "paper_mode", False)
+
+    if not paper_mode or executor is None or not hasattr(executor, "_live_edge_stats"):
+        raise HTTPException(status_code=400, detail="Paper trading is not active")
+
+    # Build strategy name set from full trade history
+    trade_history = executor.get_trade_history() if hasattr(executor, "get_trade_history") else []
+    strategy_names = {t.get("strategy", "") for t in trade_history if t.get("strategy")}
+
+    result = []
+    for name in sorted(strategy_names):
+        wr, payoff, n, wr_lo, wr_hi = executor._live_edge_stats(name)
+        breakeven_wr = round(1 / (1 + payoff), _EDGE_BREAKEVEN_PRECISION) if payoff > 0 else 1.0
+        is_real_edge = (n >= _EDGE_MIN_TRADES_REAL) and (wr_lo > breakeven_wr)
+
+        if n < _EDGE_MIN_TRADES_REAL:
+            size_flag = "observation"
+        elif is_real_edge:
+            size_flag = "real"
+        else:
+            size_flag = "noise"
+
+        result.append({
+            "strategy": name,
+            "n_trades": n,
+            "win_rate": round(wr, 4),
+            "payoff_ratio": round(payoff, 4),
+            "wr_lower_90": round(wr_lo, 4),
+            "wr_upper_90": round(wr_hi, 4),
+            "breakeven_wr": breakeven_wr,
+            "real_edge": is_real_edge,
+            "size_flag": size_flag,
+        })
+
+    return {"strategies": result, "min_trades_for_real_edge": _EDGE_MIN_TRADES_REAL}
+
+
+@app.get("/paper/reconcile")
+async def paper_reconcile(request: Request, db: Session = Depends(get_db)):
+    """Silent-divergence alarm: compares live executor balance-delta vs DB snapshot.
+
+    divergence_alert fires when |executor_balance_pnl - db_portfolio_pnl| > _DIVERGENCE_ALERT_THRESHOLD.
+    Typical causes: Railway redeploy without paper_state.json, or _pnl_flush_loop lag.
+    """
+    executor = getattr(request.app.state, "executor", None)
+    paper_mode = getattr(request.app.state, "paper_mode", False)
+
+    executor_balance_pnl = None
+    executor_trade_sum_pnl = None
+    if paper_mode and executor is not None:
+        executor_balance_pnl = round(
+            float(getattr(executor, "balance", 0)) - float(getattr(executor, "initial_balance", 0)), 2
+        )
+        trade_history = executor.get_trade_history() if hasattr(executor, "get_trade_history") else []
+        executor_trade_sum_pnl = round(
+            sum(t.get("pnl", 0) for t in trade_history if t.get("action") == "exit"), 2
+        )
+
+    db_portfolio_pnl = None
+    port_row = db.query(models.PnlSnapshot).filter(
+        models.PnlSnapshot.strategy_name == "_portfolio"
+    ).first()
+    if port_row is not None and port_row.balance_pnl is not None:
+        db_portfolio_pnl = round(float(port_row.balance_pnl), 2)
+
+    divergence_alert = False
+    if executor_balance_pnl is not None and db_portfolio_pnl is not None:
+        divergence_alert = abs(executor_balance_pnl - db_portfolio_pnl) > _DIVERGENCE_ALERT_THRESHOLD
+
+    ok = (executor_balance_pnl is not None) and not divergence_alert
+
+    return {
+        "executor_balance_pnl": executor_balance_pnl,
+        "executor_trade_sum_pnl": executor_trade_sum_pnl,
+        "db_portfolio_pnl": db_portfolio_pnl,
+        "divergence_alert": divergence_alert,
+        "divergence_threshold_usd": _DIVERGENCE_ALERT_THRESHOLD,
+        "ok": ok,
+    }
+
+
+# ──────────────────────────────────────────────
 # Dashboard
 # ──────────────────────────────────────────────
 
@@ -2673,7 +2893,8 @@ def dashboard_stats(request: Request, db: Session = Depends(get_db)):
     if executor and hasattr(executor, "get_execution_stats"):
         try:
             stats = executor.get_execution_stats()
-            total_pnl = stats.get("total_realized_pnl", 0.0)
+            # Use balance-delta as canonical PnL (survives redeploy; avoids reset-prone _execution_history)
+            total_pnl = round(stats.get("balance", 0.0) - stats.get("initial_balance", 0.0), 2)
             total_trades = stats.get("total_trades", 0)
             active_positions = stats.get("active_positions", 0)
             balance = stats.get("balance", None)
