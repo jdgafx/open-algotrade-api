@@ -2761,10 +2761,12 @@ async def reset_paper_trading(request: Request):
     if not paper_mode or executor is None or not hasattr(executor, "reset"):
         raise HTTPException(status_code=400, detail="Paper trading is not active")
 
-    # Also reset strategy-level anti-overtrading state
+    # Also reset strategy-level anti-overtrading state. The orchestrator exposes
+    # its strategies as `_strategies` — the old `orchestrator.strategies` reference
+    # did not exist, so the guard was always False and this loop never ran.
     orchestrator = getattr(request.app.state, "orchestrator", None)
-    if orchestrator and hasattr(orchestrator, "strategies"):
-        for strategy in orchestrator.strategies.values():
+    if orchestrator is not None:
+        for strategy in orchestrator._strategies.values():
             strategy.state.total_trades = 0
             strategy.state.winning_trades = 0
             strategy.state.losing_trades = 0
