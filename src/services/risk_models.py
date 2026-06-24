@@ -243,3 +243,51 @@ class FeeCalculatorOutput(BaseModel):
     avg_fee_per_trade: float
     blended_fee_bps: float
     warning: Optional[str] = None
+
+
+def calculate_fees(input: "FeeCalculatorInput") -> "FeeCalculatorOutput":
+    """HyperLiquid fee burn-rate calculator ('Days Until Death')."""
+    taker_ratio = 1.0 - input.maker_ratio
+    blended_fee_bps = (
+        input.maker_fee_bps * input.maker_ratio
+        + input.taker_fee_bps * taker_ratio
+    )
+    blended_fee_pct = blended_fee_bps / 100.0
+    avg_fee_per_trade = input.avg_position_size * (blended_fee_pct / 100.0) * 2
+    daily_fee_cost = avg_fee_per_trade * input.avg_trades_per_day
+    weekly_fee_cost = daily_fee_cost * 7
+    monthly_fee_cost = daily_fee_cost * 30
+    yearly_fee_cost = daily_fee_cost * 365
+    fee_pct_daily = (daily_fee_cost / input.account_balance * 100) if input.account_balance > 0 else 0.0
+    fee_pct_monthly = (monthly_fee_cost / input.account_balance * 100) if input.account_balance > 0 else 0.0
+
+    def _days_until(pct: float) -> Optional[float]:
+        if daily_fee_cost <= 0 or input.account_balance <= 0:
+            return None
+        return round(input.account_balance * (pct / 100.0) / daily_fee_cost, 1)
+
+    days_100 = _days_until(100)
+    warning = None
+    if days_100 is not None and days_100 < 365:
+        if days_100 < 30:
+            warning = f"CRITICAL: Fees will consume your entire account in {days_100:.0f} days at this rate."
+        elif days_100 < 90:
+            warning = f"WARNING: Fees will consume your entire account in {days_100:.0f} days. Consider reducing trade frequency or size."
+        else:
+            warning = f"CAUTION: Fees will consume your entire account in {days_100:.0f} days. You need to outperform fees by {fee_pct_monthly:.1f}%/month."
+
+    return FeeCalculatorOutput(
+        daily_fee_cost=round(daily_fee_cost, 2),
+        weekly_fee_cost=round(weekly_fee_cost, 2),
+        monthly_fee_cost=round(monthly_fee_cost, 2),
+        yearly_fee_cost=round(yearly_fee_cost, 2),
+        fee_pct_of_balance_daily=round(fee_pct_daily, 4),
+        fee_pct_of_balance_monthly=round(fee_pct_monthly, 2),
+        days_until_10pct_eaten=_days_until(10),
+        days_until_25pct_eaten=_days_until(25),
+        days_until_50pct_eaten=_days_until(50),
+        days_until_100pct_eaten=days_100,
+        avg_fee_per_trade=round(avg_fee_per_trade, 4),
+        blended_fee_bps=round(blended_fee_bps, 2),
+        warning=warning,
+    )

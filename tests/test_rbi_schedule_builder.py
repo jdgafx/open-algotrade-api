@@ -1,7 +1,7 @@
 """Unit tests for build_rbi_job_specs — the DB-derived RBI scheduler helper."""
 from types import SimpleNamespace
 
-from src.engine.rbi_schedule import build_rbi_job_specs
+from src.engine.rbi_pipeline import build_rbi_job_specs
 
 
 def _inst(stype, iid, sym="BTC", tf="1h"):

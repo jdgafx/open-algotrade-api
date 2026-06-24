@@ -294,3 +294,26 @@ class RBIPipeline:
 
     def get_history(self) -> list[PromotionEvent]:
         return list(self._history)
+
+
+def build_rbi_job_specs(
+    instances: list[Any],
+    supported_types: set[str],
+    default_hours_by_tf: dict[str, int] | None = None,
+) -> list[dict]:
+    """Build RBI scheduler job specs from live StrategyInstance rows."""
+    hours_by_tf = default_hours_by_tf or {"5m": 4, "15m": 4, "1h": 8, "4h": 12, "1d": 24}
+    specs: list[dict] = []
+    for inst in instances:
+        if inst.strategy_type not in supported_types:
+            continue
+        specs.append(
+            {
+                "strategy_type": inst.strategy_type,
+                "strategy_id": inst.id,
+                "symbol": inst.symbol,
+                "timeframe": inst.timeframe,
+                "hours": hours_by_tf.get(inst.timeframe, 8),
+            }
+        )
+    return specs

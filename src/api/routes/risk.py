@@ -12,8 +12,8 @@ from typing import List
 
 from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
 
-from src.services.fee_calculator import calculate_fees
 from src.services.risk_models import (
+    calculate_fees,
     FeeCalculatorInput,
     FeeCalculatorOutput,
     RiskConfig,

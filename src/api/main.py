@@ -26,7 +26,7 @@ from .auth import get_password_hash, verify_password, create_access_token, requi
 # `# noqa: F401` to keep linters quiet.
 from src.services import rbi_models  # noqa: F401
 from src.services.confidence_ladder import edge_confidence
-from src.engine.rbi_schedule import build_rbi_job_specs
+from src.engine.rbi_pipeline import build_rbi_job_specs
 from src.engine.param_spaces import PARAM_SPACES
 
 models.Base.metadata.create_all(bind=engine)
