@@ -14,6 +14,7 @@ from .data_cache import candle_cache
 from .param_spaces import suggest_params
 from .rigor import (
     DSR_MIN,
+    backtest_fitness,
     cpcv_stability,
     deflated_sharpe_ratio,
     purged_combinatorial_kfold,
@@ -160,8 +161,17 @@ class OptimizationEngine:
             params = trial.params
             try:
                 oos = await self._run_backtest(strategy_type, symbol, timeframe, out_sample, params)
-                pf_capped = min(oos.profit_factor, 5.0)
-                composite = 0.7 * oos.sharpe_ratio + 0.3 * (pf_capped / 5.0)
+                # U3 (R4): rank candidates by the NET-of-cost, risk-adjusted
+                # fitness (Sortino − DD − turnover, Wilson-shrunk) — NOT a gross
+                # Sharpe/PF composite that rewards high-turnover fee-bleeders that
+                # lose their edge to commission. trade['pnl'] is already
+                # commission-net (Backtester deducts entry+exit commission per
+                # trade; the at-most-one forced-close trade is the lone gross
+                # record — negligible). Full fees+slippage+funding is a bounded
+                # follow-up extension (plan U3 seam map).
+                net_trades = [{"pnl_net": t["pnl"]} for t in oos.trades]
+                oos_span_days = max(lookback_days * (1.0 - self.WALKFORWARD_SPLIT), 1.0)
+                composite = backtest_fitness(net_trades, oos_span_days)["score"]
                 # DSR (cheap — no extra backtest): per-trade Sharpe of the OOS
                 # trades, deflated by the tried-Sharpe distribution.
                 oos_returns = [t["pnl_pct"] / 100.0 for t in oos.trades]
