@@ -11,9 +11,27 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, TypedDict
 
 import pandas as pd
+
+
+class PositionDict(TypedDict, total=False):
+    """Shape of the per-strategy position dict that ``should_exit`` consumes.
+
+    The canonical producer is ``PaperTradingExecutor.get_position``; the
+    circuit-breaker shadow evaluator (``ShadowRecoveryEvaluator.synthetic_position``)
+    builds the same shape for halted-strategy recovery eval. Declaring it once keeps
+    the two producers from silently drifting. ``total=False`` because some failure
+    branches omit ``mark_price``/``unrealized_pnl``."""
+    symbol: str
+    size: float
+    entry_px: float
+    mark_price: Optional[float]
+    pnl_perc: float
+    unrealized_pnl: float
+    is_long: bool
+    side: str
 
 
 class SignalType(Enum):
@@ -87,6 +105,26 @@ class StrategyState:
     trades_this_hour: int = 0
     hour_start: Optional[datetime] = None
     entry_bar_count: int = 0
+
+    def reset_circuit_breaker(self) -> None:
+        """Clear the FULL circuit-breaker state so a halted strategy returns to a
+        genuinely clean slate.
+
+        Single source of truth for "what a clean breaker state is" — shared by the
+        manual reset endpoint and the condition-aware auto-recovery path so the two
+        can never drift. Must clear every input the breaker trips on
+        (``_apply_trade_accounting``): the consecutive-loss counter AND the drawdown
+        inputs. ``max_drawdown`` is derived as ``peak_pnl - total_pnl``, so leaving
+        ``peak_pnl`` stale would immediately recompute a large drawdown and re-trip the
+        breaker on the first losing trade — the exact bug this fixes. ``total_pnl`` and
+        the trade counters are deliberately preserved: a reset clears the *halt*, not
+        the strategy's realized track record.
+        """
+        self.circuit_breaker_triggered = False
+        self.circuit_breaker_reason = ""
+        self.consecutive_losses = 0
+        self.max_drawdown = 0.0
+        self.peak_pnl = self.total_pnl
 
 
 class BaseStrategy(ABC):
