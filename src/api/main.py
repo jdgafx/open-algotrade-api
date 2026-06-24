@@ -2467,17 +2467,18 @@ async def reset_circuit_breaker(name: str, request: Request):
 
     was_triggered = strategy.state.circuit_breaker_triggered if hasattr(strategy.state, 'circuit_breaker_triggered') else False
 
-    # Reset circuit breaker state
-    if hasattr(strategy.state, 'circuit_breaker_triggered'):
-        strategy.state.circuit_breaker_triggered = False
-        strategy.state.circuit_breaker_reason = ""
-        strategy.state.consecutive_losses = 0
+    # Reset the FULL circuit-breaker state — not just consecutive_losses. A
+    # drawdown-tripped strategy must also have its drawdown inputs (max_drawdown,
+    # peak_pnl) cleared, or it re-trips on the first losing trade. The helper is the
+    # single source of truth shared with auto-recovery so the two never drift.
+    if hasattr(strategy.state, 'reset_circuit_breaker'):
+        strategy.state.reset_circuit_breaker()
 
     return {
         "name": name,
         "circuit_breaker_was_triggered": was_triggered,
         "circuit_breaker_reset": True,
-        "message": f"Circuit breaker reset for {name}. Use /strategies/{name}/start to restart.",
+        "message": f"Circuit breaker fully reset for {name} (halt, losses, and drawdown cleared). Use /strategies/{name}/start to restart.",
     }
 
 
