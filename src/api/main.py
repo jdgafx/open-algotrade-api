@@ -64,6 +64,52 @@ CULL_MAX_PER_RUN = int(os.getenv("CULL_MAX_PER_RUN", "6"))       # cap culls per
 CULL_INTERVAL_MIN = int(os.getenv("CULL_INTERVAL_MIN", "10"))    # scheduler cadence (2026-06-05: 15 -> 10 min)
 CULL_MIN_RUNNING = int(os.getenv("CULL_MIN_RUNNING", "12"))      # floor: never cull the running book below this (safety rail)
 
+# U6 — confidence-governed allocation + winner-set de-freeze (T027 + F3 + F4).
+WINNER_OBS_PCT = float(os.getenv("WINNER_OBS_PCT", "0.10"))      # per-winner share at ZERO earned confidence (observation-small)
+WINNER_MAX_PCT = float(os.getenv("WINNER_MAX_PCT", "0.75"))      # per-winner ceiling, reached only near FULL confidence (~30 live trades)
+DEFREEZE_MIN_RECENT_TRADES = int(os.getenv("DEFREEZE_MIN_RECENT_TRADES", "10"))  # recent closed trades before a static winner can be demoted
+
+
+def _winner_cap_usd(balance: float, confidence: float,
+                    obs_pct: float = None, max_pct: float = None) -> float:
+    """U6 (R5): per-winner allocation ceiling (USD) that scales with EARNED live
+    confidence. A thin-evidence winner (low edge_confidence_score, ~6 trades) is
+    held to an observation-small share; the WINNER_MAX_PCT ceiling is reached only
+    as confidence approaches 1 (~30 live trades). Confidence is computed from
+    realized fills only — no backtest→live bridge (ADR-0003 / KTD-5)."""
+    obs_pct = WINNER_OBS_PCT if obs_pct is None else obs_pct
+    max_pct = WINNER_MAX_PCT if max_pct is None else max_pct
+    conf = max(0.0, min(confidence, 1.0))
+    pct = obs_pct + (max_pct - obs_pct) * conf
+    return round(balance * pct, 2)
+
+
+def _defrosted_winner_set(static_winners: set, dynamic_winners: set,
+                          recent_pnl_fn, min_recent_trades: int = None) -> set:
+    """U6 (R10 / F3): de-freeze the static winner set. A static name stays
+    protected UNLESS it shows a SUSTAINED recent live loss — enough recent closed
+    trades (>= min_recent_trades) AND negative recent realized PnL — in which case
+    it is DROPPED from protection so the cull can demote it and the compounder
+    stops over-allocating it. Thin recent data (fresh strategy or the brief
+    post-redeploy window) keeps it protected (safe degradation, mirrors F1).
+
+    `recent_pnl_fn(name) -> (recent_pnl, recent_trades)` reads the redeploy-proof
+    recent realized window. Dynamic winners (live-proven THIS window) are always
+    unioned in — that is the promotion-INTO-capital side of de-freezing.
+    """
+    min_recent_trades = DEFREEZE_MIN_RECENT_TRADES if min_recent_trades is None else min_recent_trades
+    protected = set()
+    for name in static_winners:
+        try:
+            recent_pnl, recent_n = recent_pnl_fn(name)
+        except Exception:
+            protected.add(name)  # cannot assess -> keep protected (safe)
+            continue
+        sustained_loser = recent_n >= min_recent_trades and recent_pnl < 0
+        if not sustained_loser:
+            protected.add(name)
+    return set(dynamic_winners) | protected
+
 
 def _select_cull_candidates(
     stats: dict,
@@ -649,49 +695,14 @@ async def lifespan(app: FastAPI):
 
     asyncio.create_task(_pnl_flush_loop())
 
-    # ── Survivor Boost: tune live params for the 4 confirmed winners ──
-    # 2026-06-07: only survivors get boosted; all others are stopped.
-    _BTC_WINNERS = {
-        "flip-flop-btc":  {"leverage": 4, "size_usd": 100, "cooldown_seconds": 0,   "max_trades_per_hour": 24},
-        "vwap-btc":       {"leverage": 3, "size_usd": 100, "cooldown_seconds": 120, "max_trades_per_hour": 6},
-        "closed-mkt-btc": {"leverage": 3, "size_usd": 100, "cooldown_seconds": 180, "max_trades_per_hour": 4},
-        "liqdip-btc":     {"leverage": 3, "size_usd": 100, "cooldown_seconds": 120, "max_trades_per_hour": 5},
-    }
-    try:
-        from .database import SessionLocal as _BoostSL
-        from sqlalchemy.orm.attributes import flag_modified as _flag_modified
-        _boost_db = _BoostSL()
-        try:
-            for _wname, _wcfg in _BTC_WINNERS.items():
-                _winst = _boost_db.query(models.StrategyInstance).filter(
-                    models.StrategyInstance.name == _wname
-                ).first()
-                if _winst:
-                    _winst.leverage = _wcfg["leverage"]
-                    _winst.size_usd = _wcfg["size_usd"]
-                    _winst.params = {
-                        **(_winst.params or {}),
-                        "cooldown_seconds": _wcfg["cooldown_seconds"],
-                        "max_trades_per_hour": _wcfg["max_trades_per_hour"],
-                    }
-                    _flag_modified(_winst, "params")
-                    if orchestrator:
-                        _wstrat = orchestrator.get_strategy(_wname)
-                        if _wstrat:
-                            _wstrat.config.leverage = _wcfg["leverage"]
-                            _wstrat.config.size_usd = _wcfg["size_usd"]
-                            _wstrat.config.params["cooldown_seconds"] = _wcfg["cooldown_seconds"]
-                            _wstrat.config.params["max_trades_per_hour"] = _wcfg["max_trades_per_hour"]
-                    logger.info(
-                        "Winner boost: %s | size=$%d | lev=%dx | cooldown=%ds | max_hr=%d",
-                        _wname, _wcfg["size_usd"], _wcfg["leverage"],
-                        _wcfg["cooldown_seconds"], _wcfg["max_trades_per_hour"],
-                    )
-            _boost_db.commit()
-        finally:
-            _boost_db.close()
-    except Exception as _boost_err:
-        logger.warning("Winner boost failed: %s", _boost_err)
+    # ── _BTC_WINNERS static boost REMOVED (U6 / R5) ──
+    # The hardcoded per-name leverage/size boost (flip-flop-btc 4x, etc., a frozen
+    # 2026-06-07 snapshot) re-leveraged named strategies on every boot regardless
+    # of CURRENT live edge — re-boosting strategies that had since decayed into
+    # losers. Allocation is now confidence-governed in _compound_job
+    # (_winner_cap_usd scales each winner's share by its earned edge_confidence_score),
+    # and the winner set de-freezes (_defrosted_winner_set) so a sustained live
+    # loser is demoted rather than perpetually boosted. No static leverage boost.
 
     # ── Auto-start risk controller (Layer 0 seatbelt — always on) ──
     if risk_controller is not None:
@@ -841,8 +852,11 @@ async def lifespan(app: FastAPI):
                         _cinst.winning_trades = _s["wins"]
                         _cinst.total_pnl = round(_s["pnl"], 4)
                         if hasattr(executor, "_live_edge_stats"):
-                            _wr, _payoff, _n, *_ = executor._live_edge_stats(_cinst.name)
-                            _cinst.edge_confidence_score = edge_confidence(_n, _wr, _payoff)
+                            # U6: confidence (which governs allocation) is computed on the
+                            # Wilson LOWER-BOUND win-rate, consistent with F2 entry sizing —
+                            # thin-evidence luck does not inflate the allocation cap.
+                            _wr, _payoff, _n, _wr_lo, _ = executor._live_edge_stats(_cinst.name)
+                            _cinst.edge_confidence_score = edge_confidence(_n, _wr_lo, _payoff)
 
                 # Dynamic winner detection from live stats.
                 # Static fallback covers the 4 confirmed survivors (2026-06-07 purge)
@@ -861,26 +875,28 @@ async def lifespan(app: FastAPI):
                     if _live_stats.get(r.name, {}).get("pnl", r.total_pnl) > 0
                     and _live_stats.get(r.name, {}).get("trades", r.total_trades) >= _WINNER_MIN_TRADES
                 }
-                # Union, NOT fallback: a confirmed static winner must stay
-                # protected even when dynamic detection is non-empty AND its own
-                # in-memory PnL momentarily reads <=0 (e.g. right after a redeploy
-                # resets executor trade history). Fallback-only left flip-flop-btc
-                # exposed in exactly that window.
-                _WINNER_SET = dynamic_winners | _STATIC_WINNERS
+                # U6 (R10/F3): de-freeze the static winner set. Dynamic winners
+                # (live-proven this window) are unioned in; a static winner stays
+                # protected UNLESS it shows a sustained recent live loss, in which
+                # case it drops out (no longer winner-allocated, and cullable).
+                # recent_realized_pnl is redeploy-proof (JSON on the volume), so the
+                # old "union always, to survive the post-redeploy reset window"
+                # workaround is no longer needed — protection is earned, not frozen.
+                _recent_fn = (executor.recent_realized_pnl
+                              if hasattr(executor, "recent_realized_pnl")
+                              else lambda _n: (0.0, 0))
+                _WINNER_SET = _defrosted_winner_set(_STATIC_WINNERS, dynamic_winners, _recent_fn)
 
-                # Winners-first: concentrate investable capital on proven winners.
-                # Soft per-winner cap: no single winner gets more than 50% of the
-                # current balance (env WINNER_MAX_PCT). With a lone winner this
-                # leaves the rest unallocated as reserve instead of dumping all
-                # investable into one strategy.
-                # Non-winners get $100 minimum for signal discovery only.
+                # Winners-first: concentrate investable capital on proven winners,
+                # but the per-winner share is now CONFIDENCE-GOVERNED (U6 / R5), not
+                # flat. Equal-split is the upper bound (so few winners don't each
+                # grab the whole ceiling); the confidence cap holds a thin-evidence
+                # winner to an observation-small share and only reaches WINNER_MAX_PCT
+                # near ~30 live trades. Non-winners get $100 for signal discovery only.
                 _winners_running = [r for r in running if r.name in _WINNER_SET]
-                _winner_unit = (
+                _equal_split = (
                     round(investable / max(len(_winners_running), 1), 2)
                 ) if _winners_running else 100.0
-                _WINNER_MAX_PCT = float(os.getenv("WINNER_MAX_PCT", "0.75"))  # 2026-06-05 operator: lean harder into the proven winner (was 0.50); ~25% reserve; env-overridable
-                _WINNER_MAX_USD = balance * _WINNER_MAX_PCT
-                _winner_unit = min(_winner_unit, _WINNER_MAX_USD)
                 _OTHER_SIZE = 100.0
 
                 # Kelly guard: do not compound a strategy beyond $500 until it has
@@ -891,7 +907,13 @@ async def lifespan(app: FastAPI):
                 _COMPOUND_MAX_UNPROVEN = 500.0
 
                 for _cinst in running:
-                    new_size = _winner_unit if _cinst.name in _WINNER_SET else _OTHER_SIZE
+                    if _cinst.name in _WINNER_SET:
+                        # confidence-scaled per-winner cap (U6 / R5): observation-small
+                        # at thin evidence, ~WINNER_MAX_PCT only near full confidence.
+                        _conf = float(_cinst.edge_confidence_score or 0.0)
+                        new_size = min(_equal_split, _winner_cap_usd(balance, _conf))
+                    else:
+                        new_size = _OTHER_SIZE
                     _trade_count = _live_stats.get(_cinst.name, {}).get("trades", 0)
                     if new_size > _COMPOUND_MAX_UNPROVEN and _trade_count < _COMPOUND_MIN_TRADES:
                         logger.warning(
@@ -905,11 +927,11 @@ async def lifespan(app: FastAPI):
                         if _cstrat:
                             _cstrat.config.size_usd = new_size
                 _cdb.commit()
-                winner_size = _winner_unit
-                other_size = _OTHER_SIZE
                 logger.info(
-                    "Compounder: balance=$%.2f | investable=$%.2f | winners=$%.2f | others=$%.2f | n_winners=%d/%d | winner_set=%s",
-                    balance, investable, winner_size, other_size, len(_winners_running), n, sorted(_WINNER_SET),
+                    "Compounder: balance=$%.2f | investable=$%.2f | equal_split_cap=$%.2f | "
+                    "others=$%.2f | n_winners=%d/%d | winner_set=%s (sizes confidence-scaled)",
+                    balance, investable, _equal_split, _OTHER_SIZE,
+                    len(_winners_running), n, sorted(_WINNER_SET),
                 )
             finally:
                 _cdb.close()
@@ -970,12 +992,16 @@ async def lifespan(app: FastAPI):
                     if _live.get(r.name, {}).get("pnl", r.total_pnl) > 0
                     and _live.get(r.name, {}).get("trades", r.total_trades) >= _WINNER_MIN_TRADES
                 }
-                # Union, NOT fallback: a confirmed static winner must stay
-                # protected even when dynamic detection is non-empty AND its own
-                # in-memory PnL momentarily reads <=0 (e.g. right after a redeploy
-                # resets executor trade history). Fallback-only left flip-flop-btc
-                # exposed in exactly that window.
-                _WINNER_SET = dynamic_winners | _STATIC_WINNERS
+                # U6 (R10/F3): de-freeze. A static winner is protected from the
+                # cull UNLESS it shows a sustained recent live loss (>= N recent
+                # closed trades AND negative recent realized PnL) — then it becomes
+                # cullable, so a frozen 2026-06-07 survivor that has since decayed
+                # into a bleeder is finally demotable. Thin recent data keeps it
+                # protected (safe degradation). recent_realized_pnl is redeploy-proof.
+                _recent_fn = (executor.recent_realized_pnl
+                              if hasattr(executor, "recent_realized_pnl")
+                              else lambda _n: (0.0, 0))
+                _WINNER_SET = _defrosted_winner_set(_STATIC_WINNERS, dynamic_winners, _recent_fn)
 
                 # Stats dict in the shape _select_cull_candidates expects, scoped
                 # to RUNNING strategies only.

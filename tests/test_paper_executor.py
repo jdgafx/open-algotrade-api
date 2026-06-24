@@ -228,11 +228,12 @@ class TestPaperExecutorPosition:
         signal_btc = Signal(signal_type=SignalType.LONG, symbol="BTC", size_usd=500.0, reason="test")
         await executor.execute_signal(signal_btc, strategy)
 
-        # Create ETH strategy
-        eth_config = StrategyConfig(name="test-eth", symbol="ETH", size_usd=500.0)
-        eth_strategy = create_strategy("rsi", eth_config)
-        signal_eth = Signal(signal_type=SignalType.SHORT, symbol="ETH", size_usd=500.0, reason="test")
-        await executor.execute_signal(signal_eth, eth_strategy)
+        # Create SOL strategy (a DIFFERENT correlation cluster from BTC, so the
+        # U6 cluster cap allows both to open — BTC+ETH would be one 'majors' cluster).
+        sol_config = StrategyConfig(name="test-sol", symbol="SOL", size_usd=500.0)
+        sol_strategy = create_strategy("rsi", sol_config)
+        signal_sol = Signal(signal_type=SignalType.SHORT, symbol="SOL", size_usd=500.0, reason="test")
+        await executor.execute_signal(signal_sol, sol_strategy)
 
         positions = await executor.get_all_positions()
         assert len(positions) == 2
@@ -368,10 +369,11 @@ class TestPaperExecutorOrphanFlush:
         signal_a = Signal(signal_type=SignalType.LONG, symbol="BTC", size_usd=500.0, reason="a-entry")
         await executor.execute_signal(signal_a, strategy)
 
-        # Open a position for "other-strat" on ETH
-        other_config = StrategyConfig(name="other-strat", symbol="ETH", size_usd=500.0)
+        # Open a position for "other-strat" on SOL (a different correlation cluster
+        # from BTC, so the U6 cluster cap permits the second open).
+        other_config = StrategyConfig(name="other-strat", symbol="SOL", size_usd=500.0)
         other = create_strategy("rsi", other_config)
-        signal_b = Signal(signal_type=SignalType.SHORT, symbol="ETH", size_usd=500.0, reason="b-entry")
+        signal_b = Signal(signal_type=SignalType.SHORT, symbol="SOL", size_usd=500.0, reason="b-entry")
         await executor.execute_signal(signal_b, other)
 
         assert len(executor._positions) == 2

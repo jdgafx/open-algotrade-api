@@ -39,6 +39,19 @@ logger = logging.getLogger(__name__)
 
 _OBSERVATION_FLOOR = 0.10  # fresh/edgeless strategies size at 10% until confidence accrues
 
+# U6 (R6) — correlation-cluster + total-exposure caps. A book of 5 crypto longs
+# behaves like ~1.5 independent bets, so losses compound; bound the correlation.
+# Symbols mapped to the same cluster may hold at most ONE open position between
+# them at a time. Symbols absent from the map are uncorrelated (no cluster limit).
+_CORRELATION_CLUSTERS = {
+    "BTC": "majors", "ETH": "majors",
+    "SOL": "l1alts", "AVAX": "l1alts",
+    "DOGE": "memes",  "WIF": "memes",
+}
+# Total committed margin across all open positions may not exceed this share of
+# the wallet — leaves a buffer so one adverse cluster cannot consume the account.
+_MAX_TOTAL_EXPOSURE_PCT = float(os.getenv("MAX_TOTAL_EXPOSURE_PCT", "0.80"))
+
 # Last N closed trades that define a strategy's "recent" realized performance —
 # the window F1 champion-challenger promotion decides on (not lifetime PnL).
 RECENT_PNL_WINDOW = 20
@@ -433,6 +446,31 @@ class PaperTradingExecutor:
                 return ExecutionResult(
                     success=False,
                     error=f"Already in position for {config.name}:{symbol}",
+                )
+
+            # U6 (R6): correlation-cluster cap — block a new open in a cluster that
+            # already holds an open position (a correlated long book compounds losses).
+            _cluster = _CORRELATION_CLUSTERS.get(symbol.upper())
+            if _cluster is not None:
+                for _p in self._positions.values():
+                    if (_CORRELATION_CLUSTERS.get(_p.symbol.upper()) == _cluster
+                            and _p.symbol.upper() != symbol.upper()):
+                        return ExecutionResult(
+                            success=False,
+                            error=f"Cluster cap: {_cluster} already open via {_p.symbol}",
+                        )
+
+            # U6 (R6): total-exposure cap — block when committed margin (notional /
+            # leverage = capital actually at risk) across all open positions would
+            # exceed the wallet share cap, leaving a buffer against a cluster blowup.
+            _open_margin = sum(
+                p.size_usd / max(p.leverage, 1) for p in self._positions.values()
+            )
+            if _open_margin + margin_required > self.balance * _MAX_TOTAL_EXPOSURE_PCT:
+                return ExecutionResult(
+                    success=False,
+                    error=(f"Total-exposure cap: ${_open_margin + margin_required:.0f} margin "
+                           f"> {_MAX_TOTAL_EXPOSURE_PCT:.0%} of ${self.balance:.0f}"),
                 )
 
             self._positions[pos_key] = PaperPosition(
