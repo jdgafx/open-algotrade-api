@@ -581,6 +581,22 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning("Auto-start: could not restore strategies — %s", e)
 
+    # ── Restore per-strategy circuit-breaker state from the durable ledger (F5/R11/R8) ──
+    # Runs after load_state() (ledger rehydrated) AND auto-start (strategies built).
+    # Without this, a strategy that tripped its circuit breaker (e.g. 5 consecutive
+    # losses) silently re-enables on every redeploy because StrategyState is in-memory.
+    if paper_mode and executor is not None and orchestrator is not None:
+        try:
+            for _strat in orchestrator._strategies.values():
+                _n = executor.replay_strategy_state(_strat)
+                if _n:
+                    logger.info(
+                        "Strategy-state rehydrate: %s replayed %d trades | cb=%s",
+                        _strat.config.name, _n, _strat.state.circuit_breaker_triggered,
+                    )
+        except Exception as e:
+            logger.warning("Strategy-state rehydrate failed: %s", e)
+
     # ── Periodic paper state saver (every 5 minutes) ──
     async def _paper_state_saver():
         while True:

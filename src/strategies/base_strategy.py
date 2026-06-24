@@ -280,8 +280,16 @@ class BaseStrategy(ABC):
             await self.on_error(e)
             return None
 
-    def record_trade(self, pnl: float) -> None:
-        now = datetime.now(timezone.utc)
+    def _apply_trade_accounting(self, pnl: float) -> None:
+        """Update the durable trade counters + circuit-breaker state from one
+        realized pnl.
+
+        Shared by record_trade() (live exits) and restore_from_pnls() (redeploy
+        rehydration). Deliberately excludes the wall-clock anti-overtrading state
+        (last_trade_close_time / trades_this_hour / hour_start) so that replaying
+        historical trades on boot does not impose a spurious cooldown or inflate
+        the hourly trade counter.
+        """
         self.state.total_trades += 1
         self.state.total_pnl += pnl
 
@@ -327,6 +335,11 @@ class BaseStrategy(ABC):
                 self.state.circuit_breaker_reason,
             )
 
+    def record_trade(self, pnl: float) -> None:
+        now = datetime.now(timezone.utc)
+
+        self._apply_trade_accounting(pnl)
+
         # Anti-overtrading: update close time and hourly counter
         self.state.last_trade_close_time = now
         if self.state.hour_start is None:
@@ -336,6 +349,18 @@ class BaseStrategy(ABC):
             self.state.hour_start = now
         else:
             self.state.trades_this_hour += 1
+
+    def restore_from_pnls(self, pnls: List[float]) -> None:
+        """Rebuild durable StrategyState (trade counters + circuit-breaker state)
+        by replaying realized pnls in chronological order after a redeploy.
+
+        Used by the paper executor on boot to restore per-strategy state — most
+        importantly a tripped circuit breaker — that would otherwise reset to zero
+        every redeploy. Excludes wall-clock anti-overtrading state by construction
+        (see _apply_trade_accounting), so a restart imposes no spurious cooldown.
+        """
+        for pnl in pnls:
+            self._apply_trade_accounting(pnl)
 
     @property
     def win_rate(self) -> float:

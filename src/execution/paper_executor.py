@@ -199,6 +199,83 @@ class PaperTradingExecutor:
         data_dir.mkdir(parents=True, exist_ok=True)
         return data_dir / "paper_state.json"
 
+    def _ledger_path(self) -> Path:
+        """Append-only durable trade ledger on the persistent volume.
+
+        The paper_state.json snapshot keeps only the last 500 trades (a fast-boot
+        hot cache); this JSONL ledger is the uncapped, redeploy-proof source of
+        truth for the realized track record that feeds every live-edge / Wilson-CI
+        / champion-challenger / de-freeze decision. F5 (R11).
+        """
+        return self._state_path().parent / "paper_trades.jsonl"
+
+    @staticmethod
+    def _trade_to_dict(t: "PaperTrade") -> dict:
+        return {
+            "id": t.id, "symbol": t.symbol, "side": t.side,
+            "action": t.action, "price": t.price, "size": t.size,
+            "size_usd": t.size_usd, "pnl": t.pnl,
+            "pnl_pct": t.pnl_pct, "reason": t.reason,
+            "strategy_name": t.strategy_name,
+            "timestamp": t.timestamp.isoformat(),
+        }
+
+    @staticmethod
+    def _trade_from_dict(t: dict) -> "PaperTrade":
+        return PaperTrade(
+            id=t["id"], symbol=t["symbol"], side=t["side"],
+            action=t["action"], price=t["price"], size=t["size"],
+            size_usd=t["size_usd"], pnl=t.get("pnl", 0),
+            pnl_pct=t.get("pnl_pct", 0), reason=t.get("reason", ""),
+            strategy_name=t.get("strategy_name", ""),
+            timestamp=datetime.fromisoformat(t["timestamp"]),
+        )
+
+    def _append_ledger(self, trade: "PaperTrade") -> None:
+        """Append one realized trade to the durable JSONL ledger. Best-effort:
+        a ledger write must never break trade execution."""
+        try:
+            line = json.dumps(self._trade_to_dict(trade))
+            with self._ledger_path().open("a") as fh:
+                fh.write(line + "\n")
+        except Exception as e:
+            logger.warning("[PAPER] Failed to append trade to ledger: %s", e)
+
+    def _seed_ledger_from(self, trades: List["PaperTrade"]) -> None:
+        """One-time migration: when no ledger exists yet (first boot after F5
+        ships) but the snapshot carries trades, write them so the ledger becomes
+        the durable base that future exits append to. Cannot recover trades the
+        500-cap already truncated historically; prevents all FUTURE truncation."""
+        if not trades:
+            return
+        try:
+            with self._ledger_path().open("w") as fh:
+                for t in trades:
+                    fh.write(json.dumps(self._trade_to_dict(t)) + "\n")
+            logger.info("[PAPER] Seeded trade ledger with %d snapshot trades", len(trades))
+        except Exception as e:
+            logger.warning("[PAPER] Failed to seed ledger: %s", e)
+
+    def _load_ledger(self) -> List["PaperTrade"]:
+        """Read the full (uncapped) trade ledger. Tolerant of a malformed or
+        truncated final line — skip-and-log, never throw."""
+        path = self._ledger_path()
+        if not path.exists():
+            return []
+        trades: List[PaperTrade] = []
+        skipped = 0
+        for raw in path.read_text().splitlines():
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                trades.append(self._trade_from_dict(json.loads(raw)))
+            except Exception:
+                skipped += 1
+        if skipped:
+            logger.warning("[PAPER] Ledger load skipped %d malformed line(s)", skipped)
+        return trades
+
     def save_state(self) -> None:
         """Persist paper trading state to disk so it survives redeploys."""
         try:
@@ -262,14 +339,27 @@ class PaperTradingExecutor:
 
             self._trades.clear()
             for t in state.get("trades", []):
-                self._trades.append(PaperTrade(
-                    id=t["id"], symbol=t["symbol"], side=t["side"],
-                    action=t["action"], price=t["price"], size=t["size"],
-                    size_usd=t["size_usd"], pnl=t.get("pnl", 0),
-                    pnl_pct=t.get("pnl_pct", 0), reason=t.get("reason", ""),
-                    strategy_name=t.get("strategy_name", ""),
-                    timestamp=datetime.fromisoformat(t["timestamp"]),
-                ))
+                self._trades.append(self._trade_from_dict(t))
+
+            # ── Durable ledger rehydration (F5/R11) ──
+            # The snapshot above is capped at the last 500 trades. If a durable
+            # ledger exists, it is the uncapped source of truth — replace the
+            # snapshot trades with the full history so live-edge / Wilson-CI /
+            # champion-challenger / de-freeze decisions read the complete record.
+            # If no ledger exists yet (first boot after F5 ships), seed it from
+            # the snapshot so future exits append to a durable base.
+            ledger_trades = self._load_ledger()
+            if ledger_trades:
+                self._trades = ledger_trades
+            else:
+                self._seed_ledger_from(self._trades)
+
+            # Keep the trade counter ahead of every known id so new trades never
+            # collide with a rehydrated one.
+            if self._trades:
+                self._trade_counter = max(
+                    self._trade_counter, max(t.id for t in self._trades)
+                )
 
             logger.info(
                 "[PAPER] State restored | %d trades | %d positions | balance=$%.2f (saved %s)",
@@ -280,6 +370,35 @@ class PaperTradingExecutor:
         except Exception as e:
             logger.warning("[PAPER] Failed to load state: %s", e)
             return False
+
+    def replay_strategy_state(self, strategy) -> int:
+        """Rebuild a freshly-constructed strategy's durable StrategyState from the
+        executor's realized-trade ledger so per-strategy circuit-breaker state
+        (consecutive losses, max drawdown) survives a redeploy instead of resetting
+        to zero. Reads the in-memory `self._trades` (already rehydrated from the
+        uncapped ledger in load_state). Returns the number of trades replayed. F5/R11/R8.
+        """
+        # Idempotency / race guard: only rehydrate a freshly-constructed strategy.
+        # restore_from_pnls is additive, so replaying onto a strategy that already
+        # carries live state (a second call, or a trade recorded between construction
+        # and this call) would double its counters. Skip when state is already non-empty.
+        if strategy.state.total_trades:
+            return 0
+        name = strategy.config.name
+        # Only REALIZED exits carry pnl and belong in the track record. Entry rows
+        # (action="entry", pnl=0) live in self._trades too and would each be
+        # miscounted as a loss — so filter to exits, mirroring _live_edge_stats /
+        # _recent_realized. Trades are append-ordered, i.e. chronological.
+        pnls = [t.pnl for t in self._trades
+                if t.strategy_name == name and t.action == "exit"]
+        if pnls:
+            strategy.restore_from_pnls(pnls)
+            if strategy.state.circuit_breaker_triggered:
+                logger.warning(
+                    "[PAPER] Restored TRIPPED circuit breaker for %s after replay of %d trades | %s",
+                    name, len(pnls), strategy.state.circuit_breaker_reason,
+                )
+        return len(pnls)
 
     def _fetch_mid_price(self, symbol: str) -> float:
         """Fetch current mid price from HL public API."""
@@ -519,6 +638,7 @@ class PaperTradingExecutor:
                 strategy_name=config.name,
             )
             self._trades.append(trade)
+            self._append_ledger(trade)  # durable, uncapped (F5/R11) — ledger mirrors self._trades
 
             order_result = PaperOrderResult(
                 success=True,
@@ -603,6 +723,7 @@ class PaperTradingExecutor:
                 strategy_name=config.name,
             )
             self._trades.append(trade)
+            self._append_ledger(trade)  # durable, uncapped (F5/R11)
 
             # Remove position
             del self._positions[pos_key]
@@ -781,6 +902,7 @@ class PaperTradingExecutor:
                     strategy_name=pos.strategy_name,
                 )
                 self._trades.append(trade)
+                self._append_ledger(trade)  # durable realized exit (F5/R11)
                 del self._positions[pos_key]
                 results.append(ExecutionResult(success=True, realized_pnl=realized_pnl))
                 logger.info("[PAPER] Risk close | %s | pnl=$%.2f (%.2f%%)", symbol, realized_pnl, pnl_pct)
@@ -827,6 +949,7 @@ class PaperTradingExecutor:
                     strategy_name=pos.strategy_name,
                 )
                 self._trades.append(trade)
+                self._append_ledger(trade)  # durable realized exit (F5/R11)
                 del self._positions[pos_key]
                 results.append(ExecutionResult(success=True, realized_pnl=realized_pnl))
                 logger.info(
@@ -872,6 +995,7 @@ class PaperTradingExecutor:
                     strategy_name=pos.strategy_name,
                 )
                 self._trades.append(trade)
+                self._append_ledger(trade)  # durable realized exit (F5/R11)
                 del self._positions[pos_key]
 
                 results.append(ExecutionResult(success=True, realized_pnl=realized_pnl))
