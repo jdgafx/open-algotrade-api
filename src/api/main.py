@@ -68,6 +68,7 @@ CULL_MIN_RUNNING = int(os.getenv("CULL_MIN_RUNNING", "12"))      # floor: never 
 WINNER_OBS_PCT = float(os.getenv("WINNER_OBS_PCT", "0.10"))      # per-winner share at ZERO earned confidence (observation-small)
 WINNER_MAX_PCT = float(os.getenv("WINNER_MAX_PCT", "0.75"))      # per-winner ceiling, reached only near FULL confidence (~30 live trades)
 DEFREEZE_MIN_RECENT_TRADES = int(os.getenv("DEFREEZE_MIN_RECENT_TRADES", "10"))  # recent closed trades before a static winner can be demoted
+PROVEN_REALIZED_CONF = float(os.getenv("PROVEN_REALIZED_CONF", "0.5"))  # confidence floor for a strategy with sustained POSITIVE realized PnL — so an asymmetric fat-tail winner (low win-rate, real money) is not pinned at the observation floor by its hit-rate
 
 
 def _winner_cap_usd(balance: float, confidence: float,
@@ -911,6 +912,15 @@ async def lifespan(app: FastAPI):
                         # confidence-scaled per-winner cap (U6 / R5): observation-small
                         # at thin evidence, ~WINNER_MAX_PCT only near full confidence.
                         _conf = float(_cinst.edge_confidence_score or 0.0)
+                        # A strategy with SUSTAINED positive realized PnL is proven by
+                        # real money; floor its allocation confidence so an asymmetric
+                        # fat-tail winner (low win-rate, real edge) is not pinned near
+                        # the observation floor purely by its hit-rate. The per-entry
+                        # half-Kelly still sizes each bet proportional to edge thickness.
+                        if hasattr(executor, "recent_realized_pnl"):
+                            _rp, _rn = executor.recent_realized_pnl(_cinst.name)
+                            if _rn >= DEFREEZE_MIN_RECENT_TRADES and _rp > 0:
+                                _conf = max(_conf, PROVEN_REALIZED_CONF)
                         new_size = min(_equal_split, _winner_cap_usd(balance, _conf))
                     else:
                         new_size = _OTHER_SIZE

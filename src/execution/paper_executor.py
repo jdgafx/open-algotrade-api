@@ -41,15 +41,22 @@ _OBSERVATION_FLOOR = 0.10  # fresh/edgeless strategies size at 10% until confide
 
 # U6 (R6) — correlation-cluster + total-exposure caps. A book of 5 crypto longs
 # behaves like ~1.5 independent bets, so losses compound; bound the correlation.
-# Symbols mapped to the same cluster may hold at most ONE open position between
-# them at a time. Symbols absent from the map are uncorrelated (no cluster limit).
+# Symbols in the same cluster share a committed-margin BUDGET (not a one-position
+# gate — the live winner book is entirely BTC, so a one-per-cluster rule would lock
+# 3 of 4 winners out of the market; a margin budget bounds correlated exposure while
+# letting several small correlated winners coexist). Symbols absent from the map are
+# uncorrelated (no cluster limit).
 _CORRELATION_CLUSTERS = {
     "BTC": "majors", "ETH": "majors",
     "SOL": "l1alts", "AVAX": "l1alts",
     "DOGE": "memes",  "WIF": "memes",
 }
-# Total committed margin across all open positions may not exceed this share of
-# the wallet — leaves a buffer so one adverse cluster cannot consume the account.
+# Aggregate committed margin within a single correlation cluster may not exceed
+# this share of the wallet (correlated-exposure budget).
+_MAX_CLUSTER_EXPOSURE_PCT = float(os.getenv("MAX_CLUSTER_EXPOSURE_PCT", "0.50"))
+# Total committed margin across ALL open positions may not exceed this share of
+# CURRENT EQUITY (balance + unrealized) — measured against equity, not stale cash,
+# so the buffer does not loosen as open positions bleed.
 _MAX_TOTAL_EXPOSURE_PCT = float(os.getenv("MAX_TOTAL_EXPOSURE_PCT", "0.80"))
 
 # Last N closed trades that define a strategy's "recent" realized performance —
@@ -448,29 +455,42 @@ class PaperTradingExecutor:
                     error=f"Already in position for {config.name}:{symbol}",
                 )
 
-            # U6 (R6): correlation-cluster cap — block a new open in a cluster that
-            # already holds an open position (a correlated long book compounds losses).
+            # Current equity (cash + unrealized) is the base for BOTH exposure
+            # budgets, so neither loosens as open positions bleed (a stale-cash base
+            # would permit MORE margin exactly when the account is underwater).
+            _equity = self.balance + sum(p.unrealized_pnl for p in self._positions.values())
+
+            # U6 (R6): correlation-cluster margin BUDGET — bound aggregate committed
+            # margin WITHIN a cluster to a share of equity. Not a one-position gate:
+            # the live winner book is all-BTC, so a binary one-per-cluster rule would
+            # lock 3 of 4 winners out of the market; a margin budget lets several
+            # small correlated winners coexist while still capping correlated exposure.
             _cluster = _CORRELATION_CLUSTERS.get(symbol.upper())
             if _cluster is not None:
-                for _p in self._positions.values():
-                    if (_CORRELATION_CLUSTERS.get(_p.symbol.upper()) == _cluster
-                            and _p.symbol.upper() != symbol.upper()):
-                        return ExecutionResult(
-                            success=False,
-                            error=f"Cluster cap: {_cluster} already open via {_p.symbol}",
-                        )
+                _cluster_margin = sum(
+                    p.size_usd / max(p.leverage, 1)
+                    for p in self._positions.values()
+                    if _CORRELATION_CLUSTERS.get(p.symbol.upper()) == _cluster
+                )
+                if _cluster_margin + margin_required > _equity * _MAX_CLUSTER_EXPOSURE_PCT:
+                    return ExecutionResult(
+                        success=False,
+                        error=(f"Cluster cap: {_cluster} margin "
+                               f"${_cluster_margin + margin_required:.0f} > "
+                               f"{_MAX_CLUSTER_EXPOSURE_PCT:.0%} of ${_equity:.0f} equity"),
+                    )
 
-            # U6 (R6): total-exposure cap — block when committed margin (notional /
-            # leverage = capital actually at risk) across all open positions would
-            # exceed the wallet share cap, leaving a buffer against a cluster blowup.
+            # U6 (R6): total-exposure cap — committed margin (notional / leverage =
+            # capital actually at risk) across ALL open positions bounded to a share
+            # of equity, leaving a buffer against a broad drawdown.
             _open_margin = sum(
                 p.size_usd / max(p.leverage, 1) for p in self._positions.values()
             )
-            if _open_margin + margin_required > self.balance * _MAX_TOTAL_EXPOSURE_PCT:
+            if _open_margin + margin_required > _equity * _MAX_TOTAL_EXPOSURE_PCT:
                 return ExecutionResult(
                     success=False,
                     error=(f"Total-exposure cap: ${_open_margin + margin_required:.0f} margin "
-                           f"> {_MAX_TOTAL_EXPOSURE_PCT:.0%} of ${self.balance:.0f}"),
+                           f"> {_MAX_TOTAL_EXPOSURE_PCT:.0%} of ${_equity:.0f} equity"),
                 )
 
             self._positions[pos_key] = PaperPosition(

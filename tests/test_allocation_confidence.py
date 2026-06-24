@@ -7,7 +7,9 @@ confidence approaches 1 (~30 live trades). Replaces the old flat 0.75-of-balance
 
 import pytest
 
-from src.api.main import _winner_cap_usd, WINNER_OBS_PCT, WINNER_MAX_PCT
+from src.api.main import (
+    _winner_cap_usd, WINNER_OBS_PCT, WINNER_MAX_PCT, PROVEN_REALIZED_CONF,
+)
 
 
 def test_zero_confidence_caps_at_observation_floor():
@@ -35,6 +37,20 @@ def test_confidence_is_monotonic():
     caps = [_winner_cap_usd(balance, c) for c in (0.0, 0.25, 0.5, 0.75, 1.0)]
     assert caps == sorted(caps)                    # more confidence -> more capital
     assert caps[0] < caps[-1]
+
+
+def test_proven_realized_tier_lifts_a_low_winrate_winner_off_the_floor():
+    """Finding #1 fix: a strategy proven by SUSTAINED realized profit gets the
+    PROVEN_REALIZED_CONF allocation floor, so an asymmetric fat-tail winner (low
+    win-rate -> low edge_confidence_score) is not pinned near the observation
+    floor. The compounder floors confidence to PROVEN_REALIZED_CONF; this pins the
+    resulting allocation well above the thin-evidence cap."""
+    balance = 10000.0
+    proven_cap = _winner_cap_usd(balance, PROVEN_REALIZED_CONF)
+    thin_cap = _winner_cap_usd(balance, 0.12)   # what a 30%-WR winner's raw confidence gives
+    assert proven_cap > thin_cap
+    assert proven_cap > balance * WINNER_OBS_PCT * 2   # comfortably off the floor
+    assert proven_cap < balance * WINNER_MAX_PCT       # still below the full ceiling
 
 
 def test_confidence_is_clamped():
