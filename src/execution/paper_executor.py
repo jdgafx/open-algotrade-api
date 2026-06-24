@@ -381,8 +381,16 @@ class PaperTradingExecutor:
             # Confidence-scaled leverage + half-Kelly sizing from live edge (docs/adr/0001).
             # Fresh/edgeless strategies trade at observation size (10%) and 1x leverage;
             # leverage + size ramp up only as live edge confidence accrues.
-            win_rate, payoff, n_trades, *_ = self._live_edge_stats(config.name)
-            effective_leverage = ladder_leverage(symbol, n_trades, win_rate, payoff)
+            # F2 (R9): size on the Wilson LOWER-BOUND win-rate, not the point
+            # estimate. A lucky streak (high point WR but a wide CI on thin data)
+            # must not ramp Kelly/leverage before the edge's confidence interval
+            # clears breakeven. The lower bound converges to the point estimate as
+            # the sample grows, so a genuine sustained edge still ramps fully — only
+            # under-proven luck is held back. payoff stays the point estimate (its
+            # tail noise is already bounded by the _NO_LOSS_PAYOFF cap).
+            win_rate, payoff, n_trades, wr_lower_90, _ = self._live_edge_stats(config.name)
+            sizing_wr = wr_lower_90
+            effective_leverage = ladder_leverage(symbol, n_trades, sizing_wr, payoff)
 
             # Realtime adaptation (ADR-0002): scale ladder leverage by the per-entry multiplier
             # the orchestrator computed from live regime/vol/funding. Default 1.0 if absent —
@@ -392,9 +400,15 @@ class PaperTradingExecutor:
             _lev_cap = HL_MAX_LEVERAGE.get(symbol.upper(), 5)
             effective_leverage = max(1, min(int(round(effective_leverage * _adapt)), _lev_cap))
 
-            hk = half_kelly_fraction(win_rate, payoff)
+            hk = half_kelly_fraction(sizing_wr, payoff)
             kelly_mult = max(_OBSERVATION_FLOOR, min(hk / STRONG_EDGE_HK, 1.0)) if hk > 0 else _OBSERVATION_FLOOR
             size_usd = size_usd * kelly_mult
+            logger.debug(
+                "[PAPER] Sizing %s | point_wr=%.2f lower_wr=%.2f payoff=%.2f n=%d "
+                "-> lev=%dx kelly_mult=%.2f",
+                config.name, win_rate, wr_lower_90, payoff, n_trades,
+                effective_leverage, kelly_mult,
+            )
 
             # Leverage scales the notional (how leverage amplifies exposure).
             # Apply AFTER compound+kelly so the cap bounds TRUE leveraged exposure.
