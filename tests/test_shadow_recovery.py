@@ -13,13 +13,17 @@ def _sig(stype, size_usd=1000.0, price=None):
 
 
 class TestShadowFillAccounting:
+    # Round-trip cost on a $1000 notional at default 0.2% = $2.00, charged per close.
+    _COST = 1000.0 * 0.002
+
     def test_long_win_records_positive_pnl(self):
         ev = ShadowRecoveryEvaluator()
         ev.observe("s", _sig(SignalType.LONG, price=100.0), mid_price=100.0)
         ev.observe("s", _sig(SignalType.CLOSE_LONG, price=110.0), mid_price=110.0)
         n, wr, wr_lo, recent = ev.edge_stats("s")
         assert n == 1
-        assert recent > 0          # +10% of $1000 = +$100
+        # +10% of $1000 = +$100 gross, minus $2 round-trip cost = +$98 net.
+        assert recent == pytest.approx(100.0 - self._COST)
         assert wr == 1.0
 
     def test_long_loss_records_negative_pnl(self):
@@ -28,17 +32,51 @@ class TestShadowFillAccounting:
         ev.observe("s", _sig(SignalType.CLOSE_LONG, price=90.0), mid_price=90.0)
         n, wr, wr_lo, recent = ev.edge_stats("s")
         assert n == 1
-        assert recent < 0
+        assert recent == pytest.approx(-100.0 - self._COST)   # -$100 gross - $2 cost
         assert wr == 0.0
 
     def test_short_sign_flips(self):
         ev = ShadowRecoveryEvaluator()
-        # Short, price falls -> profit
+        # Short, price falls -> profit. Exact pin guards the sign-flip math.
         ev.observe("s", _sig(SignalType.SHORT, price=100.0), mid_price=100.0)
         ev.observe("s", _sig(SignalType.CLOSE_SHORT, price=90.0), mid_price=90.0)
         n, _wr, _lo, recent = ev.edge_stats("s")
         assert n == 1
-        assert recent > 0          # short into a -10% move is a win
+        assert recent == pytest.approx(100.0 - self._COST)   # +$98, not +$50k etc.
+
+    def test_close_all_realizes_open_position(self):
+        ev = ShadowRecoveryEvaluator()
+        ev.observe("s", _sig(SignalType.LONG, price=100.0), mid_price=100.0)
+        ev.observe("s", _sig(SignalType.CLOSE_ALL, price=110.0), mid_price=110.0)
+        n, _wr, _lo, recent = ev.edge_stats("s")
+        assert n == 1
+        assert recent == pytest.approx(100.0 - self._COST)
+
+    def test_size_fallback_used_when_signal_size_missing(self):
+        """A size-less signal must use the default size, not yield zero PnL (which
+        would silently block recovery forever)."""
+        ev = ShadowRecoveryEvaluator()
+        ev.observe("s", _sig(SignalType.LONG, size_usd=None, price=100.0),
+                   mid_price=100.0, default_size_usd=1000.0)
+        ev.observe("s", _sig(SignalType.CLOSE_LONG, size_usd=None, price=110.0),
+                   mid_price=110.0, default_size_usd=1000.0)
+        n, _wr, _lo, recent = ev.edge_stats("s")
+        assert n == 1
+        assert recent == pytest.approx(100.0 - self._COST)
+
+    def test_sub_cost_wins_become_losses_and_block_recovery(self):
+        """The gaming vector: a stream of tiny gross 'wins' below round-trip cost nets
+        negative and must NOT certify edge (closes the frictionless-payoff hole)."""
+        ev = ShadowRecoveryEvaluator()
+        for _ in range(15):
+            # +0.1% gross = +$1 on $1000, minus $2 cost = -$1 net -> a loss.
+            ev.observe("s", _sig(SignalType.LONG, price=100.0), mid_price=100.0)
+            ev.observe("s", _sig(SignalType.CLOSE_LONG, price=100.1), mid_price=100.1)
+        n, wr, _lo, recent = ev.edge_stats("s")
+        assert n == 15
+        assert wr == 0.0           # every sub-cost "win" is a net loss
+        assert recent < 0
+        assert ev.is_real_edge("s", min_trades=10) is False
 
     def test_close_without_open_is_noop(self):
         ev = ShadowRecoveryEvaluator()

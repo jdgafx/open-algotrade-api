@@ -2792,7 +2792,8 @@ async def reset_paper_trading(request: Request):
 
 # Threshold constants — never hardcode in logic below
 _DIVERGENCE_ALERT_THRESHOLD = 5.0   # USD: alert when live vs DB portfolio PnL diverge more than this
-_EDGE_MIN_TRADES_REAL = 10          # minimum closed trades before declaring real edge
+# Single source shared with circuit-breaker auto-recovery (src/engine/shadow_recovery.py).
+from src.execution.paper_executor import EDGE_MIN_TRADES_REAL as _EDGE_MIN_TRADES_REAL
 _EDGE_BREAKEVEN_PRECISION = 6       # decimal places for breakeven_wr display
 
 
@@ -2862,10 +2863,12 @@ def paper_edge(request: Request):
     trade_history = executor.get_trade_history() if hasattr(executor, "get_trade_history") else []
     strategy_names = {t.get("strategy", "") for t in trade_history if t.get("strategy")}
 
+    from src.execution.paper_executor import breakeven_wr as _breakeven_wr
+
     result = []
     for name in sorted(strategy_names):
         wr, payoff, n, wr_lo, wr_hi = executor._live_edge_stats(name)
-        breakeven_wr = round(1 / (1 + payoff), _EDGE_BREAKEVEN_PRECISION) if payoff > 0 else 1.0
+        breakeven_wr = round(_breakeven_wr(payoff), _EDGE_BREAKEVEN_PRECISION)
         is_real_edge = (n >= _EDGE_MIN_TRADES_REAL) and (wr_lo > breakeven_wr)
 
         if n < _EDGE_MIN_TRADES_REAL:

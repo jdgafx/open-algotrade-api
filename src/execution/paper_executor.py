@@ -63,6 +63,11 @@ _MAX_TOTAL_EXPOSURE_PCT = float(os.getenv("MAX_TOTAL_EXPOSURE_PCT", "0.80"))
 # the window F1 champion-challenger promotion decides on (not lifetime PnL).
 RECENT_PNL_WINDOW = 20
 
+# Minimum closed trades before a strategy's edge is called "real" (vs still-building
+# sample). Single source for the bar used by /paper/edge AND circuit-breaker
+# auto-recovery, so raising it via env moves both in lockstep.
+EDGE_MIN_TRADES_REAL = int(os.getenv("EDGE_MIN_TRADES_REAL", "10"))
+
 # Wilson score interval constants
 _WILSON_Z_90 = 1.645  # z-score for 90% confidence interval
 
@@ -79,6 +84,17 @@ def _wilson_interval(wins: int, n: int, z: float = _WILSON_Z_90) -> tuple[float,
     centre = (p + z2 / (2 * n)) / (1 + z2 / n)
     half_width = (z / (1 + z2 / n)) * math.sqrt(p * (1 - p) / n + z2 / (4 * n * n))
     return max(0.0, centre - half_width), min(1.0, centre + half_width)
+
+
+# No losses observed -> capped high payoff ratio so Kelly ~ win_rate (not a raw $ amount).
+_NO_LOSS_PAYOFF = 10.0
+
+
+def breakeven_wr(payoff: float) -> float:
+    """Break-even win-rate for a given payoff ratio: a strategy with win-rate above
+    this is net-positive. Single source for the edge bar used by /paper/edge and the
+    circuit-breaker auto-recovery gate. Payoff <= 0 means no upside -> unreachable 1.0."""
+    return (1.0 / (1.0 + payoff)) if payoff > 0 else 1.0
 
 DEFAULT_RUIN_GUARD_BUFFER_PCT = 1.0  # force-close ~1 wick before liquidation; overridable via RiskConfig.ruin_guard_buffer_pct
 
@@ -466,7 +482,6 @@ class PaperTradingExecutor:
         win_rate = len(wins) / n
         avg_win = sum(wins) / len(wins) if wins else 0.0
         avg_loss = sum(losses) / len(losses) if losses else 0.0
-        _NO_LOSS_PAYOFF = 10.0  # no losses observed -> capped high payoff ratio so Kelly ~ win_rate (not a raw $ amount)
         payoff = (avg_win / avg_loss) if avg_loss > 0 else (_NO_LOSS_PAYOFF if avg_win > 0 else 0.0)
         wr_lo, wr_hi = _wilson_interval(len(wins), n)
         return win_rate, payoff, n, wr_lo, wr_hi

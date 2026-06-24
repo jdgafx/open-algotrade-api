@@ -11,9 +11,27 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, TypedDict
 
 import pandas as pd
+
+
+class PositionDict(TypedDict, total=False):
+    """Shape of the per-strategy position dict that ``should_exit`` consumes.
+
+    The canonical producer is ``PaperTradingExecutor.get_position``; the
+    circuit-breaker shadow evaluator (``ShadowRecoveryEvaluator.synthetic_position``)
+    builds the same shape for halted-strategy recovery eval. Declaring it once keeps
+    the two producers from silently drifting. ``total=False`` because some failure
+    branches omit ``mark_price``/``unrealized_pnl``."""
+    symbol: str
+    size: float
+    entry_px: float
+    mark_price: Optional[float]
+    pnl_perc: float
+    unrealized_pnl: float
+    is_long: bool
+    side: str
 
 
 class SignalType(Enum):

@@ -25,8 +25,14 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Deque, Dict, Optional, Tuple
 
-from src.execution.paper_executor import RECENT_PNL_WINDOW, _wilson_interval
-from src.strategies.base_strategy import Signal, SignalType
+from src.execution.paper_executor import (
+    _NO_LOSS_PAYOFF,
+    EDGE_MIN_TRADES_REAL,
+    RECENT_PNL_WINDOW,
+    _wilson_interval,
+    breakeven_wr,
+)
+from src.strategies.base_strategy import PositionDict, Signal, SignalType
 
 logger = logging.getLogger(__name__)
 
@@ -34,10 +40,18 @@ logger = logging.getLogger(__name__)
 # the real RECENT_PNL_WINDOW so recovery judges the same horizon live promotion does.
 SHADOW_WINDOW = int(os.getenv("SHADOW_RECOVERY_WINDOW", str(RECENT_PNL_WINDOW)))
 
-# Minimum shadow trades before recovery can fire. Mirrors main._EDGE_MIN_TRADES_REAL
-# (the bar /paper/edge uses to call an edge "real"); kept here as the single source
-# for recovery so the orchestrator needn't import from the API layer.
-RECOVERY_MIN_TRADES = int(os.getenv("RECOVERY_MIN_TRADES", "10"))
+# Minimum shadow trades before recovery can fire — the SAME bar /paper/edge uses to
+# call an edge "real" (single-sourced from paper_executor). An env override moves
+# both in lockstep. A separate RECOVERY_MIN_TRADES override can raise ONLY the
+# recovery bar above the shared floor when desired.
+RECOVERY_MIN_TRADES = int(os.getenv("RECOVERY_MIN_TRADES", str(EDGE_MIN_TRADES_REAL)))
+
+# Round-trip frictions (taker fees + slippage, both legs) charged against every shadow
+# trade so the shadow edge reflects REAL paper-trading economics rather than a
+# frictionless ideal. Without this, a stream of tiny "wins" that would be net-negative
+# after fees could clear the recovery bar and wrongly re-enable a losing strategy.
+# Conservative blend of the paper executor's commission + slippage defaults.
+SHADOW_ROUNDTRIP_COST_PCT = float(os.getenv("SHADOW_ROUNDTRIP_COST_PCT", "0.002"))
 
 # Master toggle for condition-aware auto-recovery (KTD-4). Default ON. When off, a
 # halted strategy is never shadow-evaluated or auto-re-enabled — manual reset only.
@@ -45,11 +59,6 @@ def auto_recovery_enabled() -> bool:
     return os.getenv("CIRCUIT_BREAKER_AUTO_RECOVERY", "1").strip().lower() in (
         "1", "true", "yes", "on",
     )
-
-
-# No-loss payoff cap, mirrors paper_executor._live_edge_stats so a clean win streak
-# yields a high (not infinite) payoff ratio rather than a raw dollar amount.
-_NO_LOSS_PAYOFF = 10.0
 
 
 @dataclass
@@ -78,19 +87,25 @@ class ShadowRecoveryEvaluator:
         self._pnls: Dict[str, Deque[float]] = {}
 
     # ── feed ────────────────────────────────────────────────────────────────
-    def observe(self, name: str, signal: Optional[Signal], mid_price: float) -> None:
+    def observe(self, name: str, signal: Optional[Signal], mid_price: float,
+                default_size_usd: float = 0.0) -> None:
         """Advance the shadow ledger for ``name`` by one live signal.
 
         Entry signals open a hypothetical position (ignored if one is already open).
         Close signals realize PnL against the live ``mid_price`` and append it to the
         recovery window. NONE / None signals and unmatched closes are no-ops.
+        ``default_size_usd`` (the strategy's configured size) is used when a signal
+        omits ``size_usd`` — mirroring the real executor's ``signal.size_usd or
+        config.size_usd`` fallback, so size-less signals don't yield all-zero shadow
+        PnL that would silently block recovery forever.
         """
         if signal is None or mid_price is None or mid_price <= 0:
             return
         st = signal.signal_type
         if st in (SignalType.LONG, SignalType.SHORT):
             self._open(name, is_long=(st == SignalType.LONG),
-                       price=signal.price or mid_price, size_usd=signal.size_usd,
+                       price=signal.price or mid_price,
+                       size_usd=signal.size_usd or default_size_usd,
                        symbol=signal.symbol)
         elif st in (SignalType.CLOSE_LONG, SignalType.CLOSE_SHORT, SignalType.CLOSE_ALL):
             self._close(name, exit_price=signal.price or mid_price)
@@ -111,7 +126,10 @@ class ShadowRecoveryEvaluator:
         move_pct = (exit_price - pos.entry_price) / pos.entry_price
         if not pos.is_long:
             move_pct = -move_pct
-        pnl = pos.size_usd * move_pct
+        # Charge round-trip frictions so a frictionless ideal can't certify edge that
+        # real fees/slippage would erase (a stream of sub-cost "wins" nets negative).
+        cost = pos.size_usd * SHADOW_ROUNDTRIP_COST_PCT
+        pnl = pos.size_usd * move_pct - cost
         self._pnls.setdefault(name, deque(maxlen=self._window)).append(pnl)
 
     # ── stats ─────────────────────────────────────────────────────────────--
@@ -129,8 +147,8 @@ class ShadowRecoveryEvaluator:
         wr_lo, _ = _wilson_interval(wins, n)
         return n, wr, wr_lo, round(sum(pnls), 2)
 
-    def _payoff(self, name: str) -> float:
-        pnls = list(self._pnls.get(name, ()))
+    @staticmethod
+    def _payoff(pnls: list) -> float:
         wins = [p for p in pnls if p > 0]
         losses = [-p for p in pnls if p < 0]
         avg_win = sum(wins) / len(wins) if wins else 0.0
@@ -141,14 +159,20 @@ class ShadowRecoveryEvaluator:
 
     def is_real_edge(self, name: str, min_trades: int) -> bool:
         """Renewed positive edge under the SAME bar /paper/edge uses for "real edge":
-        enough sample AND Wilson lower-bound win-rate above breakeven for the payoff.
+        enough sample, Wilson lower-bound win-rate above breakeven for the payoff, AND
+        net-positive realized PnL over the window. The net-PnL clause is defense in
+        depth — it rejects a high-win-rate stream whose realized total is still
+        negative, so win-rate alone can never certify recovery.
         """
-        n, _wr, wr_lo, _recent = self.edge_stats(name)
+        pnls = list(self._pnls.get(name, ()))
+        n = len(pnls)
         if n < min_trades:
             return False
-        payoff = self._payoff(name)
-        breakeven_wr = (1.0 / (1.0 + payoff)) if payoff > 0 else 1.0
-        return wr_lo > breakeven_wr
+        if sum(pnls) <= 0:
+            return False
+        wins = sum(1 for p in pnls if p > 0)
+        wr_lo, _ = _wilson_interval(wins, n)
+        return wr_lo > breakeven_wr(self._payoff(pnls))
 
     # ── lifecycle ───────────────────────────────────────────────────────────
     def clear(self, name: str) -> None:
@@ -162,10 +186,11 @@ class ShadowRecoveryEvaluator:
     def window_count(self, name: str) -> int:
         return len(self._pnls.get(name, ()))
 
-    def synthetic_position(self, name: str, mid_price: float) -> Optional[Dict[str, object]]:
+    def synthetic_position(self, name: str, mid_price: float) -> Optional[PositionDict]:
         """Build a position dict mirroring ``executor.get_position`` for the open
         shadow position so a strategy's ``should_exit`` can be driven against it.
-        Returns None when there is no open shadow position."""
+        Returns None when there is no open shadow position. Shape is the shared
+        ``PositionDict`` contract — keep it in sync with ``get_position``."""
         pos = self._positions.get(name)
         if pos is None or mid_price is None or mid_price <= 0 or pos.entry_price <= 0:
             return None

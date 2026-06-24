@@ -180,6 +180,7 @@ class StrategyOrchestrator:
         if name in self._strategies:
             del self._strategies[name]
         self._strategy_types.pop(name, None)
+        self._shadow.clear(name)  # drop any shadow-recovery state for the removed strategy
         logger.info("Removed strategy: %s", name)
 
     def _compute_entry_adaptation(self, name: str, symbol: str, side: str) -> float:
@@ -767,13 +768,15 @@ class StrategyOrchestrator:
                 # than idle forever, shadow-evaluate it on live bars (simulated fills,
                 # no real orders) and auto-re-enable ONLY on renewed positive edge. No
                 # edge => stays halted. KTD-C: live forward evidence, never a backtest.
-                if strategy.state.circuit_breaker_triggered:
-                    if auto_recovery_enabled():
-                        try:
-                            await self._try_shadow_recovery(name, strategy, data)
-                        except Exception as _rec_err:  # noqa: BLE001 - never crash the loop
-                            logger.warning(
-                                "Shadow recovery error (skipping) | %s | %s", name, _rec_err)
+                # Gated on the toggle so that with auto-recovery OFF the halted strategy
+                # falls through to the legacy auto-disable path (loop stops — see below).
+                if strategy.state.circuit_breaker_triggered and auto_recovery_enabled():
+                    try:
+                        await self._try_shadow_recovery(name, strategy, data)
+                    except Exception as _rec_err:  # noqa: BLE001 - never crash the loop
+                        logger.warning(
+                            "Shadow recovery error (skipping) | %s | %s", name, _rec_err,
+                            exc_info=True)
                     await asyncio.sleep(sleep_seconds * 4)  # halted: idle longer
                     continue
 
@@ -1068,7 +1071,20 @@ class StrategyOrchestrator:
                         )
 
                 # ── Per-strategy circuit breaker check ──
+                # A trade just tripped the breaker. With auto-recovery ON, keep the loop
+                # ALIVE so the top-of-loop shadow-recovery branch can evaluate this
+                # strategy for renewed edge each tick — without this `continue`, a live
+                # trip would `break` the loop task and recovery would ONLY ever reach
+                # redeploy-rehydrated halts, never strategies that trip during a session.
+                # With auto-recovery OFF, preserve the legacy behavior: stop the loop.
                 if strategy.state.circuit_breaker_triggered:
+                    if auto_recovery_enabled():
+                        logger.warning(
+                            "CIRCUIT BREAKER: %s halted | reason: %s | shadow-recovery active",
+                            name, strategy.state.circuit_breaker_reason,
+                        )
+                        await asyncio.sleep(sleep_seconds)
+                        continue
                     logger.critical(
                         "CIRCUIT BREAKER: %s auto-disabled | reason: %s",
                         name, strategy.state.circuit_breaker_reason,
@@ -1110,24 +1126,32 @@ class StrategyOrchestrator:
             return
 
         # Compute the raw signal against the shadow position (mirrors the live loop's
-        # has-position branch), then feed it to the shadow ledger.
+        # has-position branch), then feed it to the shadow ledger. The configured size
+        # is the fallback for size-less signals (mirrors the executor) so shadow PnL is
+        # never silently zero.
         if self._shadow.has_open_position(name):
             shadow_pos = self._shadow.synthetic_position(name, mid_price)
             signal = await strategy.should_exit(data, shadow_pos)
         else:
             signal = await strategy.should_enter(data)
-        self._shadow.observe(name, signal, mid_price)
+        self._shadow.observe(name, signal, mid_price,
+                             default_size_usd=strategy.config.size_usd)
 
         # ── Recovery gate ──
         if self._shadow.is_real_edge(name, RECOVERY_MIN_TRADES):
             n, wr, wr_lo, recent = self._shadow.edge_stats(name)
-            logger.critical(
+            # WARNING, not CRITICAL: a re-enable is a return to health, not a crisis —
+            # CRITICAL is reserved for the trip/disable direction so alerting keyed on
+            # it doesn't page on every routine recovery.
+            logger.warning(
                 "CIRCUIT BREAKER AUTO-RECOVERY | %s | renewed edge over %d shadow trades "
                 "| win_rate=%.1f%% wr_lo=%.2f recent_pnl=$%.2f | re-enabling",
                 name, n, wr * 100.0, wr_lo, recent,
             )
-            strategy.state.reset_circuit_breaker()
+            # Clear shadow state BEFORE re-enabling so no stale hypothetical position can
+            # linger attached to a now-live strategy.
             self._shadow.clear(name)
+            strategy.state.reset_circuit_breaker()
 
     def get_recovery_status(self) -> List[Dict]:
         """Observability for halted strategies under shadow recovery: per halted
