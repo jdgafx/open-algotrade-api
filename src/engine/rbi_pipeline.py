@@ -36,6 +36,26 @@ def _incumbent_live_edge(current: dict) -> dict:
     }
 
 
+def _rejected_candidate_metrics(best: Any, failing_criterion: str) -> dict:
+    """The best (highest-composite) rejected candidate's OOS metrics plus the
+    first gate criterion it failed (U5 / T032). Persisted into a
+    `no_passing_candidates` event's after_metrics so a reject is auditable:
+    "the search found no real edge" (a near-miss with sensible metrics) is
+    distinguishable from "the gate is structurally unpassable" (e.g. a candidate
+    that clears every edge bar but can never reach the OOS-trade floor)."""
+    return {
+        "oos_sharpe": best.out_sample_sharpe,
+        "oos_profit_factor": best.out_sample_profit_factor,
+        "oos_win_rate": best.out_sample_win_rate,
+        "oos_trades": best.out_sample_total_trades,
+        "oos_max_drawdown": best.out_sample_max_drawdown,
+        "dsr": best.out_sample_dsr,
+        "cpcv_frac_positive": best.cpcv_frac_positive,
+        "composite_score": best.composite_score,
+        "failing_criterion": failing_criterion,
+    }
+
+
 def _challenger_metrics(best: Any) -> dict:
     """The backtest OOS metrics of a candidate, recorded on the event so a
     declined or accepted challenger is auditable."""
@@ -186,15 +206,31 @@ class RBIPipeline:
 
         passing = [c for c in candidates if self._optimizer._passes_promotion_gate(c)]
         if not passing:
+            # Explainable reject (U5 / T032): record the best candidate's OOS
+            # metrics + the first gate criterion it failed, so a correct reject
+            # (the search genuinely found no real edge) is distinguishable from a
+            # structurally-unpassable gate. reason stays "no_passing_candidates"
+            # for back-compat; the explanation lives in after_metrics.
+            if candidates:
+                best_rejected = max(candidates, key=lambda c: c.composite_score)
+                failing = self._optimizer.gate_failure_reason(best_rejected) or "unknown"
+                after_metrics = _rejected_candidate_metrics(best_rejected, failing)
+            else:
+                after_metrics = {"failing_criterion": "no_candidates"}
             event = PromotionEvent(
                 strategy_type=strategy_type, strategy_id=strategy_id, timestamp=ts,
                 promoted=False, reason="no_passing_candidates",
                 before_params=current_params, after_params={},
-                before_metrics={}, after_metrics={},
+                before_metrics={}, after_metrics=after_metrics,
             )
             self._history.append(event)
             self._run_count += 1
             self._persist_event(event)
+            logger.info(
+                "RBI no promotion for %s (id=%d): best candidate %s",
+                strategy_type, strategy_id,
+                after_metrics.get("failing_criterion", "no_candidates"),
+            )
             return event
 
         best = passing[0]

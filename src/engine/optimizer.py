@@ -269,6 +269,38 @@ class OptimizationEngine:
             and result.cpcv_frac_positive > self.CPCV_MIN_FRAC_POSITIVE
         )
 
+    def gate_failure_reason(self, result: "OptimizationResult") -> Optional[str]:
+        """The first promotion criterion `result` fails, as a human-readable
+        string, or None if it would be promoted (U5 / T032).
+
+        Order matches _passes_promotion_gate exactly — the six cheap checks
+        (_passes_pre_cpcv_gate) then CPCV — so the reported criterion is the
+        same one the gate tripped on. This lets an explainable reject
+        distinguish a correct "the search found no real edge" from a
+        structurally-unpassable gate (e.g. an OOS-trade floor no live-cadence
+        strategy can ever clear). It NEVER changes the gate decision; it only
+        explains it.
+        """
+        checks = [
+            ("oos_trades", result.out_sample_total_trades, self.PROMOTION_MIN_OOS_TRADES, ">="),
+            ("profit_factor", result.out_sample_profit_factor, self.PROMOTION_MIN_PROFIT_FACTOR, ">="),
+            ("win_rate", result.out_sample_win_rate, self.PROMOTION_MIN_WIN_RATE, ">="),
+            ("max_drawdown", result.out_sample_max_drawdown, self.PROMOTION_MAX_DRAWDOWN, "<="),
+            ("oos_sharpe", result.out_sample_sharpe, self.PROMOTION_MIN_SHARPE, ">="),
+            ("dsr", result.out_sample_dsr, self.PROMOTION_MIN_DSR, ">="),
+            ("cpcv_frac_positive", result.cpcv_frac_positive, self.CPCV_MIN_FRAC_POSITIVE, ">"),
+        ]
+        for name, actual, threshold, op in checks:
+            if op == ">=":
+                passed = actual >= threshold
+            elif op == "<=":
+                passed = actual <= threshold
+            else:  # ">"
+                passed = actual > threshold
+            if not passed:
+                return f"{name}={actual:.3f} fails {op}{threshold}"
+        return None
+
     async def _run_backtest(self, strategy_type, symbol, timeframe, data, params):
         bt = Backtester(initial_capital=self._initial_capital, commission_pct=self._commission_pct)
         return await bt.run(
