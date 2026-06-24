@@ -28,6 +28,11 @@ from src.services.funding_monitor import FUNDING_LONG_SUPPRESS_THRESHOLD
 from src.services.adaptation import adaptation_multiplier
 from src.execution.hl_executor import HyperliquidVaultExecutor
 from src.execution.paper_executor import DEFAULT_RUIN_GUARD_BUFFER_PCT
+from src.engine.shadow_recovery import (
+    RECOVERY_MIN_TRADES,
+    ShadowRecoveryEvaluator,
+    auto_recovery_enabled,
+)
 from src.lib.nice_funcs import HyperliquidClient
 from src.services.hlp_gate import HLPSentimentGate
 from src.services.liquidation_guard import LiquidationGuard
@@ -108,6 +113,12 @@ class StrategyOrchestrator:
         self._strategy_types: Dict[str, str] = {}  # name -> strategy_type
         self._tasks: Dict[str, asyncio.Task] = {}
         self._running = False
+
+        # ── Condition-aware circuit-breaker recovery (PART B) ──
+        # Shadow-evaluates halted strategies on live data (simulated fills, no real
+        # orders) and auto-re-enables only on renewed positive edge. KTD-C: no
+        # backtest->live bridge. See src/engine/shadow_recovery.py.
+        self._shadow = ShadowRecoveryEvaluator()
 
         # ── MoonDev Profitability Controls ──
         self.max_global_trades_per_hour = max_global_trades_per_hour
@@ -751,6 +762,21 @@ class StrategyOrchestrator:
                     await asyncio.sleep(sleep_seconds)
                     continue
 
+                # ── Circuit-breaker recovery (PART B) ──
+                # A halted strategy stops trading and produces no new live data. Rather
+                # than idle forever, shadow-evaluate it on live bars (simulated fills,
+                # no real orders) and auto-re-enable ONLY on renewed positive edge. No
+                # edge => stays halted. KTD-C: live forward evidence, never a backtest.
+                if strategy.state.circuit_breaker_triggered:
+                    if auto_recovery_enabled():
+                        try:
+                            await self._try_shadow_recovery(name, strategy, data)
+                        except Exception as _rec_err:  # noqa: BLE001 - never crash the loop
+                            logger.warning(
+                                "Shadow recovery error (skipping) | %s | %s", name, _rec_err)
+                    await asyncio.sleep(sleep_seconds * 4)  # halted: idle longer
+                    continue
+
                 # Run strategy iteration (includes per-strategy anti-overtrading)
                 signal = await strategy.run_iteration(data, position)
 
@@ -1066,6 +1092,64 @@ class StrategyOrchestrator:
                     break
 
                 await asyncio.sleep(sleep_seconds)
+
+    async def _try_shadow_recovery(self, name: str, strategy: BaseStrategy, data) -> None:
+        """Advance the shadow ledger for a halted strategy by one live signal and
+        auto-re-enable it iff its shadow track record shows renewed positive edge.
+
+        Drives the strategy's own ``should_enter`` / ``should_exit`` against the SHADOW
+        position state (not the real executor), so the strategy's raw signals are
+        measured on live data without placing real orders or touching the real balance.
+        The recovery bar mirrors /paper/edge: n >= RECOVERY_MIN_TRADES AND Wilson
+        lower-bound win-rate above breakeven. Below the bar, the strategy stays halted.
+        """
+        if data is None or getattr(data, "empty", True):
+            return
+        mid_price = float(data["close"].iloc[-1])
+        if mid_price <= 0:
+            return
+
+        # Compute the raw signal against the shadow position (mirrors the live loop's
+        # has-position branch), then feed it to the shadow ledger.
+        if self._shadow.has_open_position(name):
+            shadow_pos = self._shadow.synthetic_position(name, mid_price)
+            signal = await strategy.should_exit(data, shadow_pos)
+        else:
+            signal = await strategy.should_enter(data)
+        self._shadow.observe(name, signal, mid_price)
+
+        # ── Recovery gate ──
+        if self._shadow.is_real_edge(name, RECOVERY_MIN_TRADES):
+            n, wr, wr_lo, recent = self._shadow.edge_stats(name)
+            logger.critical(
+                "CIRCUIT BREAKER AUTO-RECOVERY | %s | renewed edge over %d shadow trades "
+                "| win_rate=%.1f%% wr_lo=%.2f recent_pnl=$%.2f | re-enabling",
+                name, n, wr * 100.0, wr_lo, recent,
+            )
+            strategy.state.reset_circuit_breaker()
+            self._shadow.clear(name)
+
+    def get_recovery_status(self) -> List[Dict]:
+        """Observability for halted strategies under shadow recovery: per halted
+        strategy, its shadow-window progress and whether it currently clears the
+        recovery edge bar. Empty when nothing is halted."""
+        out: List[Dict] = []
+        for name, strat in self._strategies.items():
+            if not strat.state.circuit_breaker_triggered:
+                continue
+            n, wr, wr_lo, recent = self._shadow.edge_stats(name)
+            out.append({
+                "strategy": name,
+                "circuit_breaker_reason": strat.state.circuit_breaker_reason,
+                "auto_recovery_enabled": auto_recovery_enabled(),
+                "shadow_trades": n,
+                "shadow_win_rate": round(wr, 4),
+                "shadow_wr_lower_90": round(wr_lo, 4),
+                "shadow_recent_pnl": recent,
+                "recovery_min_trades": RECOVERY_MIN_TRADES,
+                "clears_recovery_bar": self._shadow.is_real_edge(name, RECOVERY_MIN_TRADES),
+            })
+        return out
 
     def get_strategy(self, name: str) -> Optional[BaseStrategy]:
         return self._strategies.get(name)

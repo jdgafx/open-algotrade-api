@@ -34,6 +34,19 @@ logger = logging.getLogger(__name__)
 # the real RECENT_PNL_WINDOW so recovery judges the same horizon live promotion does.
 SHADOW_WINDOW = int(os.getenv("SHADOW_RECOVERY_WINDOW", str(RECENT_PNL_WINDOW)))
 
+# Minimum shadow trades before recovery can fire. Mirrors main._EDGE_MIN_TRADES_REAL
+# (the bar /paper/edge uses to call an edge "real"); kept here as the single source
+# for recovery so the orchestrator needn't import from the API layer.
+RECOVERY_MIN_TRADES = int(os.getenv("RECOVERY_MIN_TRADES", "10"))
+
+# Master toggle for condition-aware auto-recovery (KTD-4). Default ON. When off, a
+# halted strategy is never shadow-evaluated or auto-re-enabled — manual reset only.
+def auto_recovery_enabled() -> bool:
+    return os.getenv("CIRCUIT_BREAKER_AUTO_RECOVERY", "1").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
 # No-loss payoff cap, mirrors paper_executor._live_edge_stats so a clean win streak
 # yields a high (not infinite) payoff ratio rather than a raw dollar amount.
 _NO_LOSS_PAYOFF = 10.0
@@ -46,6 +59,7 @@ class _ShadowPosition:
     is_long: bool
     entry_price: float
     size_usd: float
+    symbol: str
 
 
 class ShadowRecoveryEvaluator:
@@ -76,16 +90,18 @@ class ShadowRecoveryEvaluator:
         st = signal.signal_type
         if st in (SignalType.LONG, SignalType.SHORT):
             self._open(name, is_long=(st == SignalType.LONG),
-                       price=signal.price or mid_price, size_usd=signal.size_usd)
+                       price=signal.price or mid_price, size_usd=signal.size_usd,
+                       symbol=signal.symbol)
         elif st in (SignalType.CLOSE_LONG, SignalType.CLOSE_SHORT, SignalType.CLOSE_ALL):
             self._close(name, exit_price=signal.price or mid_price)
         # SignalType.NONE -> no-op
 
-    def _open(self, name: str, is_long: bool, price: float, size_usd: Optional[float]) -> None:
+    def _open(self, name: str, is_long: bool, price: float,
+              size_usd: Optional[float], symbol: str = "") -> None:
         if name in self._positions or price <= 0:
             return  # already in a shadow position; one at a time
         self._positions[name] = _ShadowPosition(
-            is_long=is_long, entry_price=price, size_usd=size_usd or 0.0,
+            is_long=is_long, entry_price=price, size_usd=size_usd or 0.0, symbol=symbol,
         )
 
     def _close(self, name: str, exit_price: float) -> None:
@@ -145,3 +161,26 @@ class ShadowRecoveryEvaluator:
 
     def window_count(self, name: str) -> int:
         return len(self._pnls.get(name, ()))
+
+    def synthetic_position(self, name: str, mid_price: float) -> Optional[Dict[str, object]]:
+        """Build a position dict mirroring ``executor.get_position`` for the open
+        shadow position so a strategy's ``should_exit`` can be driven against it.
+        Returns None when there is no open shadow position."""
+        pos = self._positions.get(name)
+        if pos is None or mid_price is None or mid_price <= 0 or pos.entry_price <= 0:
+            return None
+        move_pct = (mid_price - pos.entry_price) / pos.entry_price
+        if not pos.is_long:
+            move_pct = -move_pct
+        coin_size = pos.size_usd / pos.entry_price
+        signed_size = coin_size if pos.is_long else -coin_size
+        return {
+            "symbol": pos.symbol,
+            "size": signed_size,
+            "entry_px": pos.entry_price,
+            "mark_price": mid_price,
+            "pnl_perc": move_pct * 100.0,
+            "unrealized_pnl": pos.size_usd * move_pct,
+            "is_long": pos.is_long,
+            "side": "long" if pos.is_long else "short",
+        }
