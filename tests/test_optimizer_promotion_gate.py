@@ -45,11 +45,11 @@ def test_promotion_gate_passes_at_all_thresholds():
 
 def test_promotion_gate_rejects_low_dsr():
     """A candidate clearing every classic threshold but with a Deflated Sharpe
-    below 0.95 (edge indistinguishable from the luckiest of N tries) is rejected."""
+    below 0.85 (edge indistinguishable from the luckiest of N tries) is rejected."""
     eng = OptimizationEngine()
     strong = dict(trades=40, pf=1.6, wr=45.0, dd=8.0, sharpe=1.5)
-    assert eng._passes_promotion_gate(_result(**strong, dsr=0.94)) is False
-    assert eng._passes_promotion_gate(_result(**strong, dsr=0.95)) is True
+    assert eng._passes_promotion_gate(_result(**strong, dsr=0.84)) is False
+    assert eng._passes_promotion_gate(_result(**strong, dsr=0.85)) is True
 
 
 def test_promotion_gate_rejects_unstable_cpcv():
