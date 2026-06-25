@@ -242,12 +242,21 @@ async def test_run_cycle_persists_no_passing_candidates():
 
 
 @pytest.mark.asyncio
-async def test_run_cycle_persists_active_position():
-    """run_cycle writes a record for the active_position skip case."""
+async def test_run_cycle_persists_staged_active_position():
+    """run_cycle writes a staged_active_position record when position is open and candidate passes."""
+    from src.engine.optimizer import OptimizationResult
     SessionLocal = _make_session_factory()
     get_fn = AsyncMock(return_value=_mock_strategy(active_positions=1))
     patch_fn = AsyncMock(return_value={})
     optimizer = OptimizationEngine()
+    passing = OptimizationResult(
+        params={"zscore_entry": 2.0}, in_sample_sharpe=1.2, out_sample_sharpe=1.1,
+        out_sample_profit_factor=1.5, out_sample_win_rate=48.0,
+        out_sample_total_trades=30, out_sample_max_drawdown=8.0,
+        composite_score=0.72, passed_walkforward=True,
+        out_sample_dsr=0.99, cpcv_frac_positive=0.8,
+    )
+    optimizer.optimize = AsyncMock(return_value=[passing])
 
     pipeline = RBIPipeline(
         get_strategy_fn=get_fn,
@@ -257,14 +266,16 @@ async def test_run_cycle_persists_active_position():
     )
 
     event = await pipeline.run_cycle("mean_reversion", 8, "BTC", "1h")
-    assert event.reason == "active_position"
+    assert event.reason == "staged_active_position"
+    assert event.promoted is True
     assert pipeline.run_count == 1
+    patch_fn.assert_not_called()
 
     db = SessionLocal()
     try:
         rows = db.query(PromotionEventRecord).all()
         assert len(rows) == 1
-        assert rows[0].reason == "active_position"
+        assert rows[0].reason == "staged_active_position"
     finally:
         db.close()
 

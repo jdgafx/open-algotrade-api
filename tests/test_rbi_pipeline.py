@@ -21,11 +21,23 @@ def pipeline():
 
 
 @pytest.mark.asyncio
-async def test_skips_when_active_position(pipeline):
+async def test_stages_when_active_position(pipeline):
+    """With active position, optimization runs but param application is staged."""
+    from src.engine.optimizer import OptimizationResult
+    passing = OptimizationResult(
+        params={"zscore_entry": 2.0}, in_sample_sharpe=1.2, out_sample_sharpe=1.1,
+        out_sample_profit_factor=1.5, out_sample_win_rate=48.0,
+        out_sample_total_trades=30, out_sample_max_drawdown=8.0,
+        composite_score=0.72, passed_walkforward=True,
+        out_sample_dsr=0.99, cpcv_frac_positive=0.8,
+    )
+    pipeline._optimizer.optimize = AsyncMock(return_value=[passing])
     pipeline._get_strategy_fn = AsyncMock(return_value=_mock_strategy(active_positions=1))
     result = await pipeline.run_cycle("mean_reversion", 8, "BTC", "1h")
-    assert result.promoted is False
-    assert result.reason == "active_position"
+    assert result.promoted is True
+    assert result.reason == "staged_active_position"
+    assert result.after_params == {"zscore_entry": 2.0}
+    pipeline._patch_strategy_fn.assert_not_called()
 
 
 @pytest.mark.asyncio
