@@ -70,7 +70,12 @@ class TriggerRequest(BaseModel):
     strategy_id: int
     symbol: str = "BTC"
     timeframe: str = "1h"
-    lookback_days: int = Field(default=14, ge=5, le=365)
+    # Match OptimizationEngine.optimize()'s own 90d default. 14d starves
+    # sparse-trigger strategies (liquidation_dip ~1 trade/8d, consolidation_pop):
+    # at 14d every Optuna trial takes <5 in-sample trades -> -inf -> no_candidates
+    # (proven: 14d 0/30 configs reach >=5 trades, 90d 26/30). ge floor raised to
+    # 30 so a caller can't re-create the starvation by hand.
+    lookback_days: int = Field(default=90, ge=30, le=365)
     n_trials: int = Field(default=100, ge=10, le=300)
 
 
