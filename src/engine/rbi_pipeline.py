@@ -186,18 +186,7 @@ class RBIPipeline:
         ts = datetime.now(timezone.utc).isoformat()
 
         current = await self._get_strategy_fn(strategy_id)
-        if current.get("active_positions", 0) > 0:
-            event = PromotionEvent(
-                strategy_type=strategy_type, strategy_id=strategy_id, timestamp=ts,
-                promoted=False, reason="active_position",
-                before_params=current.get("params", {}), after_params={},
-                before_metrics={}, after_metrics={},
-            )
-            self._history.append(event)
-            self._run_count += 1
-            self._persist_event(event)
-            return event
-
+        has_active_position = current.get("active_positions", 0) > 0
         current_params = current.get("params", {})
         candidates = await self._optimizer.optimize(
             strategy_type=strategy_type, symbol=symbol,
@@ -260,12 +249,14 @@ class RBIPipeline:
             )
             return event
 
-        reason = ("promoted_over_live_loser"
-                  if proven_record and live["recent_pnl"] < 0
-                  else "promotion_gate_passed")
-
         self._previous_params[strategy_type] = current_params.copy()
-        await self._patch_strategy_fn(strategy_id, {"params": best.params})
+        if not has_active_position:
+            await self._patch_strategy_fn(strategy_id, {"params": best.params})
+            reason = ("promoted_over_live_loser"
+                      if proven_record and live["recent_pnl"] < 0
+                      else "promotion_gate_passed")
+        else:
+            reason = "staged_active_position"
 
         event = PromotionEvent(
             strategy_type=strategy_type, strategy_id=strategy_id, timestamp=ts,
