@@ -238,9 +238,9 @@ PARAM_SPACES: dict[str, dict[str, tuple]] = {
 }
 
 
-def suggest_params(trial: Any, strategy_type: str) -> dict[str, Any]:
+def suggest_params(trial: Any, strategy_type: str, space_override: dict | None = None) -> dict[str, Any]:
     """Suggest a param set for an Optuna trial given a strategy type."""
-    space = PARAM_SPACES.get(strategy_type, {})
+    space = space_override if space_override is not None else PARAM_SPACES.get(strategy_type, {})
     params: dict[str, Any] = {}
     for name, spec in space.items():
         kind = spec[0]

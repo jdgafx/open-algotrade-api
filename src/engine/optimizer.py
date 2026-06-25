@@ -79,6 +79,7 @@ class OptimizationEngine:
         timeframe: str = "1h",
         lookback_days: int = 90,
         n_trials: int = 100,
+        param_space_override: dict | None = None,
     ) -> list[OptimizationResult]:
         data = await self._get_data(symbol, timeframe, lookback_days)
         if data is None or len(data) < 50:
@@ -137,7 +138,7 @@ class OptimizationEngine:
             await asyncio.sleep(0)  # yield to event loop between trials so concurrent runs interleave
             trial = study.ask()
             try:
-                params = suggest_params(trial, strategy_type)
+                params = suggest_params(trial, strategy_type, space_override=param_space_override)
                 bt_result = await self._run_backtest(strategy_type, symbol, timeframe, in_sample, params)
                 value = bt_result.sharpe_ratio if bt_result.total_trades >= 5 else float("-inf")
                 study.tell(trial, value)

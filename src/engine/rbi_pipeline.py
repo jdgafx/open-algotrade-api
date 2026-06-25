@@ -114,6 +114,8 @@ class RBIPipeline:
         self._history: list[PromotionEvent] = []
         self._previous_params: dict[str, dict] = {}
         self._run_count: int = 0
+        self._consecutive_no_pass: dict[str, int] = {}
+        self._adapted_spaces: dict[str, dict] = {}
 
         # Rebuild in-memory cache from DB on construction if a session factory
         # is provided.  This survives Railway redeploys.
@@ -174,6 +176,99 @@ class RBIPipeline:
         except Exception as exc:
             logger.error("RBIPipeline: failed to persist event to DB: %s", exc)
 
+
+    async def _adapt_param_space(self, strategy_type: str, rejection_history: list[dict]) -> dict:
+        """Call LLM to narrow Optuna search space after repeated gate failures.
+
+        Returns a narrowed param space dict (same format as PARAM_SPACES values),
+        or {} on any error (safe degradation — optimizer uses original space).
+        """
+        import os, json
+        from .param_spaces import PARAM_SPACES
+
+        api_key = os.getenv("OPENROUTER_API_KEY", "")
+        if not api_key:
+            return {}
+
+        current_bounds = PARAM_SPACES.get(strategy_type, {})
+        if not current_bounds:
+            return {}
+
+        # Format rejection history as readable context
+        rejection_lines = []
+        for i, r in enumerate(rejection_history[-3:], 1):
+            reason = r.get("failing_criterion", "unknown")
+            sharpe = r.get("oos_sharpe", 0)
+            trades = r.get("oos_trades", 0)
+            dsr = r.get("dsr", 0)
+            rejection_lines.append(
+                f"Run {i}: failing={reason}, oos_sharpe={sharpe:.3f}, oos_trades={trades}, dsr={dsr:.3f}"
+            )
+
+        bounds_str = json.dumps({
+            k: list(v[1:]) for k, v in current_bounds.items()
+        }, indent=2)
+
+        prompt = (
+            f"Strategy type: {strategy_type}\n"
+            f"Last {len(rejection_lines)} optimizer runs all failed the promotion gate:\n"
+            + "\n".join(rejection_lines) +
+            f"\n\nCurrent Optuna search bounds:\n{bounds_str}\n\n"
+            "Return JSON with narrowed bounds for the next search to focus on regions "
+            "more likely to pass (higher OOS trades, better DSR). Only include params "
+            "where narrowing is justified. Stay within the original bounds. "
+            'Format: {"param_name": [low, high], ...}. Return only the JSON object.'
+        )
+
+        try:
+            import httpx
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            }
+            payload = {
+                "model": "meta-llama/llama-3.3-70b-instruct:free",
+                "max_tokens": 300,
+                "messages": [
+                    {"role": "system", "content": "You are an Optuna hyperparameter search advisor. Respond only with valid JSON."},
+                    {"role": "user", "content": prompt},
+                ],
+            }
+            async with httpx.AsyncClient(timeout=8.0) as client:
+                r = await client.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers=headers, json=payload,
+                )
+                r.raise_for_status()
+                content_str = r.json()["choices"][0]["message"]["content"]
+                raw = json.loads(content_str)
+
+            # Validate: must be a dict of param -> [low, high], within original bounds
+            if not isinstance(raw, dict):
+                return {}
+            adapted = {}
+            for param, bounds in raw.items():
+                if param not in current_bounds:
+                    continue
+                orig = current_bounds[param]
+                kind = orig[0]
+                try:
+                    lo, hi = float(bounds[0]), float(bounds[1])
+                    orig_lo, orig_hi = float(orig[1]), float(orig[2])
+                    if lo < orig_lo: lo = orig_lo
+                    if hi > orig_hi: hi = orig_hi
+                    if lo >= hi:
+                        continue
+                    adapted[param] = (kind, lo, hi) if kind in ("float", "int") else orig
+                except (TypeError, IndexError, ValueError):
+                    continue
+
+            if adapted:
+                logger.info("RBI: LLM adapted param space for %s: %d params narrowed", strategy_type, len(adapted))
+            return adapted
+        except Exception as e:
+            logger.debug("RBI: LLM param adaptation failed for %s: %s", strategy_type, e)
+            return {}
     async def run_cycle(
         self,
         strategy_type: str,
@@ -191,6 +286,7 @@ class RBIPipeline:
         candidates = await self._optimizer.optimize(
             strategy_type=strategy_type, symbol=symbol,
             timeframe=timeframe, lookback_days=lookback_days, n_trials=n_trials,
+            param_space_override=self._adapted_spaces.get(strategy_type) or None,
         )
 
         passing = [c for c in candidates if self._optimizer._passes_promotion_gate(c)]
@@ -206,6 +302,20 @@ class RBIPipeline:
                 after_metrics = _rejected_candidate_metrics(best_rejected, failing)
             else:
                 after_metrics = {"failing_criterion": "no_candidates"}
+            # Track consecutive no_pass for LLM param adaptation (C6)
+            self._consecutive_no_pass[strategy_type] = self._consecutive_no_pass.get(strategy_type, 0) + 1
+            consecutive = self._consecutive_no_pass[strategy_type]
+            if consecutive == 3:
+                adapted = await self._adapt_param_space(strategy_type, [
+                    e.after_metrics for e in self._history
+                    if e.strategy_type == strategy_type and e.reason == "no_passing_candidates"
+                ][-3:])
+                if adapted:
+                    self._adapted_spaces[strategy_type] = adapted
+            elif consecutive >= 9:
+                # Stop adapting — no real edge in current regime
+                self._consecutive_no_pass[strategy_type] = 0
+                self._adapted_spaces.pop(strategy_type, None)
             event = PromotionEvent(
                 strategy_type=strategy_type, strategy_id=strategy_id, timestamp=ts,
                 promoted=False, reason="no_passing_candidates",
@@ -249,6 +359,9 @@ class RBIPipeline:
             )
             return event
 
+        # Reset adaptation counter on any promotion
+        self._consecutive_no_pass[strategy_type] = 0
+        self._adapted_spaces.pop(strategy_type, None)
         self._previous_params[strategy_type] = current_params.copy()
         if not has_active_position:
             await self._patch_strategy_fn(strategy_id, {"params": best.params})
