@@ -711,7 +711,7 @@ async def lifespan(app: FastAPI):
         _rbi_db = _RBI_SL()
         try:
             _running_instances = _rbi_db.query(models.StrategyInstance).filter(
-                models.StrategyInstance.status == "running"
+                models.StrategyInstance.enabled == True
             ).all()
         finally:
             _rbi_db.close()
