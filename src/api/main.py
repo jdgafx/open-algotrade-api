@@ -880,7 +880,6 @@ async def lifespan(app: FastAPI):
                 # plus flip-flop-btc-v2 (paper test — do not cull during trial period).
                 # Only these run at all — the purge block already stopped everything else.
                 _STATIC_WINNERS = {
-                    'flip-flop-btc',      # confirmed live winner (+$16.66, trend asymmetry)
                     'vwap-btc',           # confirmed live winner (VWAP probability bias)
                     'closed-mkt-btc',     # survivor: overnight/weekend breakout
                     'liqdip-btc',         # survivor: liquidation double-dip
@@ -1006,7 +1005,6 @@ async def lifespan(app: FastAPI):
                 # already stopped everything else; the cull is a safety net only.
                 # flip-flop-btc-v2 is included so the cull never stops the paper test.
                 _STATIC_WINNERS = {
-                    'flip-flop-btc',      # confirmed live winner (+$16.66, trend asymmetry)
                     'vwap-btc',           # confirmed live winner (VWAP probability bias)
                     'closed-mkt-btc',     # survivor: overnight/weekend breakout
                     'liqdip-btc',         # survivor: liquidation double-dip
