@@ -210,12 +210,6 @@ def _auto_deploy_winners(db, orchestrator):
             logger.warning("Auto-deploy: failed to create %s — %s", w["name"], e)
 
 
-# Strategies that must remain running after every deploy.
-# Any DB instance with status="running" not in this set is flipped to
-# status="stopped" in the DB BEFORE the auto-start loop, so it is never
-# loaded by the orchestrator.
-_SURVIVOR_SET = frozenset({"flip-flop-btc", "vwap-btc", "closed-mkt-btc", "liqdip-btc", "flip-flop-btc-v2"})
-
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -461,37 +455,6 @@ async def lifespan(app: FastAPI):
     except Exception as _rh_e:
         logger.warning("PnL rehydrate failed (non-fatal): %s", _rh_e)
 
-    # ── Survivor purge (DB-only, BEFORE auto-start) ──
-    # Mark non-survivors as stopped in the DB so the auto-start loop never
-    # loads them.  No orchestrator calls needed here — the orchestrator hasn't
-    # touched these instances yet.
-    if orchestrator is not None:
-        try:
-            from .database import SessionLocal as _PurgeSL
-            _purge_db = _PurgeSL()
-            try:
-                _all_running = _purge_db.query(models.StrategyInstance).filter(
-                    models.StrategyInstance.status == "running"
-                ).all()
-                _purged = 0
-                for _inst in _all_running:
-                    if _inst.name in _SURVIVOR_SET:
-                        continue
-                    _inst.status = "stopped"
-                    _purged += 1
-                if _purged:
-                    _purge_db.commit()
-                    logger.warning(
-                        "Survivor purge (DB-only): marked %d non-survivor instances as stopped (survivors: %s)",
-                        _purged, sorted(_SURVIVOR_SET),
-                    )
-                else:
-                    logger.info("Survivor purge: all running instances are survivors — no purge needed")
-            finally:
-                _purge_db.close()
-        except Exception as _pe:
-            logger.warning("Survivor purge failed (non-fatal): %s", _pe)
-
     # ── Auto-start strategies that were running before shutdown ──
     if orchestrator is not None:
         try:
@@ -501,41 +464,21 @@ async def lifespan(app: FastAPI):
 
             db = SessionLocal()
             try:
-                running_instances = db.query(models.StrategyInstance).filter(
-                    models.StrategyInstance.status == "running"
-                ).all()
-
                 # If DB is empty (fresh deploy), auto-deploy winner strategies
                 all_instances = db.query(models.StrategyInstance).count()
                 if all_instances == 0:
                     logger.info("Auto-deploy: empty DB detected — deploying winner strategies")
                     _auto_deploy_winners(db, orchestrator)
-                    running_instances = db.query(models.StrategyInstance).filter(
-                        models.StrategyInstance.status == "running"
-                    ).all()
-                else:
-                    # Ensure any newly-added survivors exist in the DB (idempotent upsert
-                    # for instances added after the initial deploy, e.g. flip-flop-btc-v2).
-                    # _auto_deploy_winners rolls back silently on unique-constraint errors,
-                    # so it's safe to call on an existing DB — only missing entries are created.
-                    _existing_names = {
-                        r.name for r in db.query(models.StrategyInstance.name).all()
-                    }
-                    _winners_names = set(_SURVIVOR_SET)  # single source of truth
-                    if not _winners_names.issubset(_existing_names):
-                        logger.info("Auto-ensure: creating missing survivors: %s",
-                                    _winners_names - _existing_names)
-                        _auto_deploy_winners(db, orchestrator)
-                        running_instances = db.query(models.StrategyInstance).filter(
-                            models.StrategyInstance.status == "running"
-                        ).all()
+                instances_to_start = db.query(models.StrategyInstance).filter(
+                    models.StrategyInstance.enabled == True
+                ).all()
 
-                if running_instances:
-                    logger.info("Auto-start: found %d strategies with status=running", len(running_instances))
+                if instances_to_start:
+                    logger.info("Auto-start: found %d enabled strategies", len(instances_to_start))
                     tier_map = {"A": StrategyTier.A, "B": StrategyTier.B, "C": StrategyTier.C, "D": StrategyTier.D}
                     available = [s["strategy_type"] for s in list_strategies()]
 
-                    for inst in running_instances:
+                    for inst in instances_to_start:
                         try:
                             if inst.strategy_type not in available:
                                 logger.warning(
@@ -567,15 +510,9 @@ async def lifespan(app: FastAPI):
                             inst.error_message = f"Auto-start failed: {e}"
                             db.commit()
                 else:
-                    logger.info("Auto-start: no strategies with status=running")
+                    logger.info("Auto-start: no enabled strategies found")
 
-                # Audit: warn if any survivor is not loaded after startup
-                _loaded = set(orchestrator._strategies.keys())
-                for _s in _SURVIVOR_SET:
-                    if _s not in _loaded:
-                        logger.error(
-                            "STARTUP AUDIT: survivor %s NOT loaded — check DB and registry", _s
-                        )
+                logger.info("Auto-start: started %d enabled strategies", len(instances_to_start))
             finally:
                 db.close()
         except Exception as e:
