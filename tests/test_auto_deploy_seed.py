@@ -48,3 +48,28 @@ def test_seed_excludes_registry_disabled_types():
         f"fresh DB. Remove them from _auto_deploy_winners or re-enable in "
         f"strategies/registry.py."
     )
+
+
+def test_auto_start_persists_running_status():
+    """The boot auto-start loop must persist status='running'/started_at to the
+    DB after start_strategy — same as the manual /strategies/{name}/start path.
+
+    Regression for 2026-06-25: the boot loop started strategies in-memory only
+    and never wrote status, so GET /strategies (and the cull/compounder, which
+    scope to status=='running') under-counted the live book as 3 instead of ~42.
+    With running < CULL_MIN_RUNNING the cull is hard-capped at 0 and a known
+    loser (flip-flop-btc) can never be culled.
+    """
+    src = (Path(__file__).resolve().parent.parent / "src" / "api" / "main.py").read_text()
+    anchor = 'Auto-start: started %s (%s on %s)'
+    assert anchor in src, "Auto-start success log line moved — update this test."
+    block = src[: src.index(anchor)]
+    success_branch = block[block.rindex("await orchestrator.start_strategy(inst.name)"):]
+    assert 'inst.status = "running"' in success_branch, (
+        "Boot auto-start no longer persists status='running' after start_strategy. "
+        "Cull/compounder scope to status=='running'; without this the running book "
+        "is under-counted and culling is disabled below CULL_MIN_RUNNING."
+    )
+    assert "inst.started_at = datetime.utcnow()" in success_branch, (
+        "Boot auto-start no longer persists started_at after start_strategy."
+    )

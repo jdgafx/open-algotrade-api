@@ -503,12 +503,16 @@ async def lifespan(app: FastAPI):
                             )
                             orchestrator.add_strategy(inst.name, inst.strategy_type, config)
                             await orchestrator.start_strategy(inst.name)
+                            inst.status = "running"          # persist so cull/compounder see the real running book (≥CULL_MIN_RUNNING)
+                            inst.started_at = datetime.utcnow()
+                            inst.error_message = None
                             logger.info("Auto-start: started %s (%s on %s)", inst.name, inst.strategy_type, inst.symbol)
                         except Exception as e:
                             logger.warning("Auto-start: failed to start %s — %s", inst.name, e)
                             inst.status = "error"
                             inst.error_message = f"Auto-start failed: {e}"
                             db.commit()
+                    db.commit()
                 else:
                     logger.info("Auto-start: no enabled strategies found")
 
