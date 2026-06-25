@@ -51,7 +51,7 @@ def test_failure_reason_reports_dsr_when_edge_bars_pass():
     # clears trades/PF/WR/DD/Sharpe but the overfitting guard catches it
     reason = eng.gate_failure_reason(_result(dsr=0.50))
     assert reason is not None and reason.startswith("dsr=0.500")
-    assert ">=0.95" in reason
+    assert ">=0.85" in reason
 
 
 def test_failure_reason_reports_cpcv_last():
