@@ -93,17 +93,17 @@ def test_dsr_rejects_overfit_accepts_genuine_edge():
 
     from src.engine.rigor import deflated_sharpe_ratio
 
-    # Genuine edge among few trials -> DSR high (>= the 0.95 gate).
+    # Genuine edge among few trials -> DSR high (>= the 0.85 gate).
     rng = np.random.default_rng(0)
     good = rng.normal(0.02, 0.05, size=500)
     sr_good = float(good.mean() / good.std())
-    assert deflated_sharpe_ratio(sr_good, [sr_good, 0.01, -0.02, 0.0], good)["DSR"] > 0.95
+    assert deflated_sharpe_ratio(sr_good, [sr_good, 0.01, -0.02, 0.0], good)["DSR"] > 0.85
 
     # Luckiest of many noise trials -> DSR low.
     noise = rng.normal(0.001, 0.05, size=200)
     sr_noise = float(noise.mean() / noise.std())
     sr_trials = rng.normal(0.0, 0.1, size=200)
-    assert deflated_sharpe_ratio(sr_noise, sr_trials, noise)["DSR"] < 0.95
+    assert deflated_sharpe_ratio(sr_noise, sr_trials, noise)["DSR"] < 0.85
 
 
 def test_cpcv_stability_frac_positive():
