@@ -227,7 +227,10 @@ class RBIPipeline:
                 "Content-Type": "application/json",
             }
             payload = {
-                "model": "meta-llama/llama-3.3-70b-instruct:free",
+                # Config-driven (no magic hardcode); default is a live, non-rate-limited
+                # free model — the old hardcoded llama-3.3-70b:free 429s upstream, silently
+                # degrading every adaptation to a no-op (proven live 2026-06-26).
+                "model": os.getenv("RBI_ADAPT_MODEL", "openai/gpt-oss-120b:free"),
                 "max_tokens": 300,
                 "messages": [
                     {"role": "system", "content": "You are an Optuna hyperparameter search advisor. Respond only with valid JSON."},
@@ -240,7 +243,12 @@ class RBIPipeline:
                     headers=headers, json=payload,
                 )
                 r.raise_for_status()
-                content_str = r.json()["choices"][0]["message"]["content"]
+                content_str = r.json()["choices"][0]["message"]["content"].strip()
+                # Some models wrap JSON in ```json ... ``` fences — strip before parsing.
+                if content_str.startswith("```"):
+                    content_str = content_str.split("```")[1]
+                    if content_str.startswith("json"):
+                        content_str = content_str[4:]
                 raw = json.loads(content_str)
 
             # Validate: must be a dict of param -> [low, high], within original bounds
