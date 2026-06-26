@@ -722,7 +722,12 @@ class StrategyOrchestrator:
                     continue
 
                 # ── Gate 2: Regime Detection ──
-                regime_allows = self._check_regime_gate(name, symbol, data)
+                # ponytail: HMM fit (hmmlearn, n_iter=500) is sync CPU — offload so
+                # the boot-time fit burst across all booted strategies doesn't block
+                # the event loop. Keeps /health responsive during the cold start.
+                regime_allows = await asyncio.to_thread(
+                    self._check_regime_gate, name, symbol, data
+                )
 
                 # Get current position (keyed per strategy for isolation)
                 position = await self.executor.get_position(symbol, strategy_name=name)

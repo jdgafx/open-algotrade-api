@@ -313,14 +313,25 @@ class OptimizationEngine:
         return None
 
     async def _run_backtest(self, strategy_type, symbol, timeframe, data, params):
+        # ponytail: bt.run is async-wrapped but pure CPU when `data` is passed in
+        # (no real awaits — strategy.should_enter/exit just crunch indicators). On
+        # the main loop it never yields, so the boot-time RBI burst (trials + OOS +
+        # CPCV, all routed here) starves /health and /strategies for 15-20 min.
+        # Run it in a worker thread: the GIL round-robins every ~5ms, keeping the
+        # event loop responsive. One offload point covers all three callers.
+        return await asyncio.to_thread(
+            self._run_backtest_sync, strategy_type, symbol, timeframe, data, params
+        )
+
+    def _run_backtest_sync(self, strategy_type, symbol, timeframe, data, params):
         bt = Backtester(initial_capital=self._initial_capital, commission_pct=self._commission_pct)
-        return await bt.run(
+        return asyncio.run(bt.run(
             strategy_type=strategy_type,
             symbol=symbol,
             timeframe=timeframe,
             params=params,
             data=data,
-        )
+        ))
 
     async def _get_data(self, symbol: str, timeframe: str, lookback_days: int) -> Optional[pd.DataFrame]:
         cached = candle_cache.get(symbol, timeframe, lookback_days)
