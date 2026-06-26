@@ -312,6 +312,15 @@ class RBIPipeline:
                 ][-3:])
                 if adapted:
                     self._adapted_spaces[strategy_type] = adapted
+                # Surface the adaptation outcome: persist it on the event (visible via
+                # /optimize/rbi/history, survives redeploy) AND log at WARNING so a
+                # silently-failing LLM call (no key / API error → {}) is never invisible.
+                after_metrics["param_space_adapted"] = len(adapted)
+                logger.warning(
+                    "RBI param-space adaptation triggered for %s after 3 consecutive "
+                    "no-pass: %d params narrowed (next run uses tightened bounds)",
+                    strategy_type, len(adapted),
+                )
             elif consecutive >= 9:
                 # Stop adapting — no real edge in current regime
                 self._consecutive_no_pass[strategy_type] = 0
