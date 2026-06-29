@@ -57,7 +57,7 @@ REGIME_STRATEGY_MAP = {
     MarketRegime.TRENDING_UP: [
         # Trend-following thrives here
         "turtle", "sma_crossover", "macd", "ichimoku", "adx",
-        "ema_bollinger", "vwma", "sma_adx_bb_vol", "donchian_channel",
+        "ema_bollinger", "vwma", "sma_adx_bb_vol", "donchian_channel", "trend_cross",
         # Momentum + volatility plays
         "consolidation_pop", "elliott_wave", "elliott_pivot",
         "gap_up_momentum", "consecutive_down",
@@ -75,7 +75,7 @@ REGIME_STRATEGY_MAP = {
     MarketRegime.TRENDING_DOWN: [
         # Trend-following works short
         "turtle", "sma_crossover", "macd", "ichimoku", "adx",
-        "ema_bollinger", "vwma", "sma_adx_bb_vol", "donchian_channel",
+        "ema_bollinger", "vwma", "sma_adx_bb_vol", "donchian_channel", "trend_cross",
         # Momentum plays
         "consolidation_pop", "elliott_wave", "elliott_pivot",
         "consecutive_down",
@@ -99,7 +99,7 @@ REGIME_STRATEGY_MAP = {
         "consolidation_pop", "consecutive_down",
         # Trend-following catches regime breakouts
         "turtle", "sma_crossover", "macd", "ichimoku", "adx",
-        "ema_bollinger", "vwma", "sma_adx_bb_vol", "donchian_channel",
+        "ema_bollinger", "vwma", "sma_adx_bb_vol", "donchian_channel", "trend_cross",
         # Liquidation dips in ranging markets are mean-reversion opportunities
         "liquidation_adx", "liquidation_dip", "liquidation_revisit",
         # Market-neutral / time-based (always allowed)
@@ -117,7 +117,7 @@ REGIME_STRATEGY_MAP = {
         "gap_up_momentum", "consecutive_down", "capitulation_reversal",
         # Trend-following works in vol (big directional moves)
         "turtle", "sma_crossover", "macd", "ichimoku", "adx",
-        "ema_bollinger", "vwma", "sma_adx_bb_vol", "donchian_channel",
+        "ema_bollinger", "vwma", "sma_adx_bb_vol", "donchian_channel", "trend_cross",
         # RSI/mean-rev at extremes during vol spikes
         "mean_reversion", "rsi", "bollinger", "rsi_vwap",
         "nadaraya_watson", "quarter_theory", "flip_flop",
