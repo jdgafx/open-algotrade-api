@@ -271,3 +271,17 @@ if __name__ == "__main__":
         t()
         print(f"PASS  {t.__name__}")
     print(f"\n{len(tests)} pure tests passed (endpoint tests require pytest).")
+
+
+def test_lifespan_sets_executor_and_client_on_app_state():
+    """Regression: POST /xsec/instances starts the engine at runtime via
+    app.state.executor + app.state.client. A missing app.state.client (the bug
+    that shipped engines as dead DB rows) must fail here. Entering the TestClient
+    context runs the real lifespan."""
+    from fastapi.testclient import TestClient
+    from src.api.main import app
+
+    with TestClient(app):
+        assert getattr(app.state, "executor", None) is not None, "lifespan did not set app.state.executor"
+        assert getattr(app.state, "client", None) is not None, "lifespan did not set app.state.client"
+        assert hasattr(app.state, "loop"), "lifespan did not capture app.state.loop"

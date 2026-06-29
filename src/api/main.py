@@ -409,6 +409,7 @@ async def lifespan(app: FastAPI):
     app.state.trading_mode = trading_mode
     app.state.paper_mode = paper_mode
     app.state.executor = executor
+    app.state.client = client   # needed by POST /xsec/instances to start engines at runtime
     app.state.solana_scanner = solana_scanner
     app.state.funding_monitor = funding_monitor
 
