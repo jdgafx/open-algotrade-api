@@ -176,6 +176,26 @@ def _auto_deploy_winners(db, orchestrator):
                     "adx_period": 14, "adx_threshold": 25.0},
          "target_pct": 12.0, "max_loss_pct": -5.0},
         # NOTE: conspop-btc is INTENTIONALLY EXCLUDED — paper data is stale, do not re-add.
+        # ── TREND BASKET: the validated dual-MA always-in edge (sma 30/50), diversified
+        #    across liquid perps × {1h,4h}. Each (coin,tf) cleared edge_probe OOS Sharpe
+        #    >0.5 walk-forward (scripts/edge_probe.py, 2026-06-28). The snowball lever:
+        #    many semi-independent trend bets -> smoother equity. SOL/BNB/DOGE 4h and
+        #    AVAX dropped (OOS Sharpe <=0.5). Paper-first; live champion-challenger +
+        #    oos_trades>=30 gate decides promotion to real capital. ──
+        *[
+            {"name": f"trend-{coin.lower()}-{tf}", "strategy_type": "trend_cross",
+             "symbol": coin, "timeframe": tf, "size_usd": 50, "leverage": 3,
+             "target_pct": 100.0, "max_loss_pct": -20.0,
+             "params": {"ma_type": "sma", "fast_period": 30, "slow_period": 50,
+                        "cooldown_seconds": 0, "max_trades_per_hour": 24,
+                        "min_hold_bars": 1, "min_signal_strength": 0.80}}
+            for coin, tf in [
+                ("BTC", "1h"), ("ETH", "1h"), ("SOL", "1h"), ("BNB", "1h"),
+                ("XRP", "1h"), ("DOGE", "1h"), ("LINK", "1h"), ("SUI", "1h"), ("ARB", "1h"),
+                ("BTC", "4h"), ("ETH", "4h"), ("SOL", "4h"), ("XRP", "4h"),
+                ("SUI", "4h"), ("ARB", "4h"),
+            ]
+        ],
         # Formerly-running strategies (mm-eth, mm-sol, arb-eth, nw-eth, nw-sol, adx-eth,
         # mean-rev-eth, turtle-btc, bollinger-btc, conspop-btc, sdz-btc, rsi-btc, pivot-btc,
         # rsivwap-btc, sma-btc, vwma-btc, macd-btc, ichimoku-btc, emabb-btc, combo-btc,

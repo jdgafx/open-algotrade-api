@@ -112,6 +112,7 @@ def _register_all():
     from .liquidation_revisit_strategy import LiquidationRevisitStrategy
     from .gap_up_momentum_strategy import GapUpMomentumStrategy
     from .consecutive_down_strategy import ConsecutiveDownStrategy
+    from .trend_cross_strategy import TrendCrossStrategy
 
     # ═══════════════════════════════════════════════════════════════════
     # TIER A — Battle-tested HL native strategies
@@ -122,6 +123,21 @@ def _register_all():
     # trailing stops, and regime-appropriate parameters.
     # Reference: MoonDev Videos 49, 53, 71, 74, 104, 115, 164, 191
 
+    # ── THE validated trend edge (scripts/edge_probe.py): position = sign(MA_fast -
+    #    MA_slow), always-in long/short. OOS Sharpe +2..+3 BTC/ETH/SOL @1h, sma 30/50.
+    #    Pure dual-MA cross — no overlays (alpha-doctrine-snowball: overlays on close
+    #    add correlation, not alpha). The snowball's base trend bet, diversified wide. ──
+    register_strategy(
+        "trend_cross", TrendCrossStrategy, StrategyTier.A,
+        "Validated dual-MA always-in trend cross (sign(fast-slow), long/short) — OOS Sharpe +2..+3",
+        "BTC", "1h",
+        {
+            "ma_type": "sma", "fast_period": 30, "slow_period": 50,
+            "cooldown_seconds": 0, "max_trades_per_hour": 24,
+            "min_hold_bars": 1, "min_signal_strength": 0.80,
+        },
+        category="trend", risk_level="medium",
+    )
     register_strategy(
         "turtle", TurtleHLStrategy, StrategyTier.A,
         "55-bar breakout with ATR trailing stops and take profit",
