@@ -577,3 +577,33 @@ class HealthResponse(BaseModel):
     registry_ok: bool
     orchestrator_ok: bool
     execution_stats: Optional[Dict[str, Any]] = None
+
+
+# ──────────────────────────────────────────────
+# XsecDriverEngine runtime management
+# ──────────────────────────────────────────────
+
+class XsecDriverCreate(BaseModel):
+    name: str
+    driver: str  # "realized_vol_carry" | "dollar_volume"
+    lookback: int = 24
+    q: float = 0.30
+    sign: int = -1
+    coins: Optional[List[str]] = None   # None = use engine default
+    per_leg_usd: float = 50.0
+    timeframe: str = "1h"
+    rebalance_secs: int = 3600
+    enabled: bool = True
+
+
+class XsecDriverInstanceOut(BaseModel):
+    name: str
+    driver: str
+    lookback: int
+    q: float
+    sign: int
+    coins: List[str]
+    per_leg_usd: float
+    rebalance_secs: int
+    timeframe: str
+    running: bool

@@ -231,6 +231,18 @@ def _auto_deploy_winners(db, orchestrator):
 
 
 
+import concurrent.futures as _cf
+
+
+def _await_xsec_task(task):
+    """Return an asyncio-awaitable for an xsec engine handle. Boot-restart yields an
+    asyncio.Task; the sync POST endpoint schedules via run_coroutine_threadsafe and
+    yields a concurrent.futures.Future, which asyncio.gather can't await directly."""
+    if isinstance(task, _cf.Future):
+        return asyncio.wrap_future(task)
+    return task
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize all services on startup, clean up on shutdown."""
@@ -1106,6 +1118,48 @@ async def lifespan(app: FastAPI):
     except Exception as _xe:
         logger.warning("XsecCarryEngine failed to start (non-fatal): %s", _xe)
 
+    # ── XsecDriverEngine: boot-restart persisted enabled instances ──────────
+    app.state.xsec_driver_engines = {}  # name -> (engine, task)
+    # Capture the main event loop so the SYNC POST /xsec/instances endpoint (which
+    # FastAPI runs in a threadpool thread with no running loop) can schedule engine
+    # tasks back onto it via run_coroutine_threadsafe.
+    app.state.loop = asyncio.get_running_loop()
+    if executor is not None and client is not None:
+        try:
+            from .database import SessionLocal as _XDSL
+            from src.engine.xsec_driver_engine import XsecDriverEngine as _XsecDE
+            _xd_db = _XDSL()
+            try:
+                _xd_rows = _xd_db.query(models.StrategyInstance).filter(
+                    models.StrategyInstance.strategy_type == "xsec_driver",
+                    models.StrategyInstance.enabled == True,
+                    models.StrategyInstance.status == "running",
+                ).all()
+            finally:
+                _xd_db.close()
+            for _xdr in _xd_rows:
+                try:
+                    _p = _xdr.params or {}
+                    _eng = _XsecDE(
+                        executor=executor, client=client,
+                        name=_xdr.name,
+                        driver=_p.get("driver", "realized_vol_carry"),
+                        lookback=int(_p.get("lookback", 24)),
+                        q=float(_p.get("q", 0.30)),
+                        sign=int(_p.get("sign", -1)),
+                        coins=_p.get("coins") or None,
+                        per_leg_usd=float(_p.get("per_leg_usd", 50.0)),
+                        rebalance_secs=int(_p.get("rebalance_secs", 3600)),
+                        timeframe=_xdr.timeframe or "1h",
+                    )
+                    _task = asyncio.create_task(_eng.run())
+                    app.state.xsec_driver_engines[_xdr.name] = (_eng, _task)
+                    logger.info("xsec_driver: resumed %s (%s)", _xdr.name, _p.get("driver"))
+                except Exception as _xe2:
+                    logger.warning("xsec_driver: failed to resume %s — %s", _xdr.name, _xe2)
+        except Exception as _xde:
+            logger.warning("xsec_driver: boot-restart failed (non-fatal) — %s", _xde)
+
     yield
 
     _scheduler.shutdown(wait=False)
@@ -1170,6 +1224,18 @@ async def lifespan(app: FastAPI):
             logger.info("XsecCarryEngine shut down cleanly")
         except Exception as e:
             logger.error("Error shutting down XsecCarryEngine: %s", e)
+
+    # Shutdown all xsec_driver engine tasks
+    _xd_running = getattr(app.state, "xsec_driver_engines", {})
+    for _xd_name, (_xd_eng, _xd_task) in list(_xd_running.items()):
+        if not _xd_task.done():
+            try:
+                _xd_eng.stop()
+                _xd_task.cancel()
+                await asyncio.gather(_await_xsec_task(_xd_task), return_exceptions=True)
+                logger.info("xsec_driver(%s) shut down cleanly", _xd_name)
+            except Exception as _xde2:
+                logger.error("xsec_driver(%s) shutdown error — %s", _xd_name, _xde2)
 
 
 app = FastAPI(title="Open Algotrade API", version="2.0.0", lifespan=lifespan)
@@ -1870,6 +1936,27 @@ def get_strategy_registry():
     """List all available strategy types with their default configs."""
     from src.strategies.registry import list_strategies
     strategies = list_strategies()
+    # xsec_driver is a standalone engine (not a BaseStrategy), so append it explicitly
+    strategies.append({
+        "strategy_type": "xsec_driver",
+        "tier": "A",
+        "description": (
+            "Generic runtime-instantiable cross-sectional driver "
+            "(realized_vol/dollar_volume) — dollar-neutral basket"
+        ),
+        "default_symbol": "BTC",
+        "default_timeframe": "1h",
+        "default_params": {
+            "driver": "realized_vol_carry",
+            "lookback": 24,
+            "q": 0.30,
+            "sign": -1,
+            "per_leg_usd": 50.0,
+            "rebalance_secs": 3600,
+        },
+        "category": "cross_sectional",
+        "risk_level": "medium",
+    })
     return schemas.StrategyRegistryOut(
         available_strategies=[
             schemas.StrategyTypeInfo(**s) for s in strategies
@@ -3411,6 +3498,155 @@ def market_overview(
         timestamp=datetime.now(timezone.utc).isoformat(),
         symbols=results,
     )
+
+
+# ──────────────────────────────────────────────
+# XsecDriverEngine runtime management
+# ──────────────────────────────────────────────
+
+_XSEC_DRIVER_SUPPORTED = {"realized_vol_carry", "dollar_volume"}
+_XSEC_DRIVER_DEFAULT_COINS = [
+    "BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "AVAX", "LINK", "SUI", "ARB"
+]
+
+
+@app.post("/xsec/instances", response_model=schemas.StrategyInstanceOut)
+def create_xsec_driver_instance(
+    data: schemas.XsecDriverCreate,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Create, persist, and immediately start a new XsecDriverEngine instance.
+
+    The instance appears in GET /strategies, survives Railway redeploys (boot-restart),
+    and is controllable via POST /xsec/instances/{name}/stop.
+    """
+    if data.driver not in _XSEC_DRIVER_SUPPORTED:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown driver '{data.driver}'. Supported: {sorted(_XSEC_DRIVER_SUPPORTED)}",
+        )
+
+    existing = db.query(models.StrategyInstance).filter(
+        models.StrategyInstance.name == data.name
+    ).first()
+    if existing:
+        raise HTTPException(status_code=400, detail=f"Name '{data.name}' already exists")
+
+    coins = list(data.coins) if data.coins else _XSEC_DRIVER_DEFAULT_COINS
+
+    instance = models.StrategyInstance(
+        name=data.name,
+        strategy_type="xsec_driver",
+        tier="A",
+        status="running",
+        symbol=coins[0] if coins else "BTC",
+        timeframe=data.timeframe,
+        leverage=1,
+        size_usd=data.per_leg_usd,
+        enabled=data.enabled,
+        params={
+            "driver": data.driver,
+            "lookback": data.lookback,
+            "q": data.q,
+            "sign": data.sign,
+            "coins": coins,
+            "per_leg_usd": data.per_leg_usd,
+            "rebalance_secs": data.rebalance_secs,
+        },
+    )
+    db.add(instance)
+    db.commit()
+    db.refresh(instance)
+
+    # Start the engine task immediately (non-fatal if executor not available)
+    executor = getattr(request.app.state, "executor", None)
+    client = getattr(request.app.state, "client", None)
+    if executor is not None and client is not None:
+        try:
+            from src.engine.xsec_driver_engine import XsecDriverEngine
+            eng = XsecDriverEngine(
+                executor=executor, client=client,
+                name=data.name,
+                driver=data.driver,
+                lookback=data.lookback,
+                q=data.q,
+                sign=data.sign,
+                coins=coins,
+                per_leg_usd=data.per_leg_usd,
+                rebalance_secs=data.rebalance_secs,
+                timeframe=data.timeframe,
+            )
+            import asyncio as _aio
+            loop = getattr(request.app.state, "loop", None)
+            if loop is not None:
+                # sync endpoint runs in a threadpool thread — schedule onto the main loop
+                task = _aio.run_coroutine_threadsafe(eng.run(), loop)
+            else:
+                task = _aio.get_event_loop().create_task(eng.run())
+            request.app.state.xsec_driver_engines[data.name] = (eng, task)
+            logger.info("xsec_driver: started %s (%s)", data.name, data.driver)
+        except Exception as exc:
+            logger.warning("xsec_driver: failed to start engine for %s — %s", data.name, exc)
+    else:
+        logger.warning("xsec_driver: created %s but no executor/client — engine not started", data.name)
+
+    return instance
+
+
+@app.get("/xsec/instances", response_model=List[schemas.XsecDriverInstanceOut])
+def list_xsec_driver_instances(request: Request, db: Session = Depends(get_db)):
+    """List all xsec_driver instances with live running status."""
+    rows = db.query(models.StrategyInstance).filter(
+        models.StrategyInstance.strategy_type == "xsec_driver"
+    ).all()
+    running_map = getattr(request.app.state, "xsec_driver_engines", {})
+    result = []
+    for row in rows:
+        p = row.params or {}
+        result.append(schemas.XsecDriverInstanceOut(
+            name=row.name,
+            driver=p.get("driver", ""),
+            lookback=int(p.get("lookback", 24)),
+            q=float(p.get("q", 0.30)),
+            sign=int(p.get("sign", -1)),
+            coins=p.get("coins") or _XSEC_DRIVER_DEFAULT_COINS,
+            per_leg_usd=float(p.get("per_leg_usd", 50.0)),
+            rebalance_secs=int(p.get("rebalance_secs", 3600)),
+            timeframe=row.timeframe or "1h",
+            running=row.name in running_map and not running_map[row.name][1].done(),
+        ))
+    return result
+
+
+@app.post("/xsec/instances/{name}/stop")
+async def stop_xsec_driver_instance(
+    name: str, request: Request, db: Session = Depends(get_db)
+):
+    """Stop a running XsecDriverEngine and mark it stopped in the DB."""
+    row = db.query(models.StrategyInstance).filter(
+        models.StrategyInstance.name == name,
+        models.StrategyInstance.strategy_type == "xsec_driver",
+    ).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"xsec_driver instance '{name}' not found")
+
+    running_map = getattr(request.app.state, "xsec_driver_engines", {})
+    if name in running_map:
+        eng, task = running_map.pop(name)
+        eng.stop()
+        task.cancel()
+        try:
+            await asyncio.gather(_await_xsec_task(task), return_exceptions=True)
+        except Exception:
+            pass
+        logger.info("xsec_driver(%s): stopped via API", name)
+    else:
+        logger.info("xsec_driver(%s): stop requested but was not in running map", name)
+
+    row.status = "stopped"
+    db.commit()
+    return {"status": "stopped", "name": name}
 
 
 # ──────────────────────────────────────────────
