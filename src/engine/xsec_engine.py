@@ -15,6 +15,7 @@ Uses a thin _StratShim to satisfy executor.execute_signal's duck-type.
 import asyncio
 import logging
 import os
+import time
 from collections import deque
 from typing import Dict, Optional, Set, Tuple
 
@@ -129,6 +130,41 @@ class XsecCarryEngine:
             logger.warning("xsec_carry: funding fetch failed — %s", exc)
             return None
 
+    def _seed_history(self) -> None:
+        """Pre-fill history from HL fundingHistory so the FIRST live tick has full
+        lb24 smoothing — matches the validated edge_probe backtest exactly and
+        removes the 24h deque warm-up. Builds LB hourly snapshots keyed by coin.
+        Best-effort: on any failure, fall back to live tick-built history."""
+        try:
+            per_coin: Dict[str, list] = {}
+            end = int(time.time() * 1000)
+            start = end - (LB + 2) * 3600 * 1000  # hourly funding -> LB+2 bars
+            for coin in self._coins:
+                try:
+                    r = requests.post(
+                        f"{self._client.base_url}/info",
+                        headers={"Content-Type": "application/json"},
+                        json={"type": "fundingHistory", "coin": coin, "startTime": start},
+                        timeout=10,
+                    )
+                    r.raise_for_status()
+                    rows = r.json()
+                    if isinstance(rows, list) and rows:
+                        per_coin[coin] = [float(x["fundingRate"]) for x in rows[-LB:]]
+                except Exception as exc:
+                    logger.debug("xsec_carry: seed fetch %s failed — %s", coin, exc)
+            if len(per_coin) < 4:
+                logger.warning("xsec_carry: seed got <4 coins — falling back to live warm-up")
+                return
+            depth = min(len(v) for v in per_coin.values())
+            for j in range(depth):
+                # align from the most-recent backwards so the last snapshot is newest
+                self._history.append({c: per_coin[c][len(per_coin[c]) - depth + j] for c in per_coin})
+            logger.info("xsec_carry: seeded %d funding snapshots across %d coins",
+                        depth, len(per_coin))
+        except Exception as exc:
+            logger.warning("xsec_carry: history seed failed (non-fatal) — %s", exc)
+
     def _smoothed(self) -> Optional[Dict[str, float]]:
         """Rolling mean of funding over accumulated history (up to LB bars)."""
         if not self._history:
@@ -239,6 +275,8 @@ class XsecCarryEngine:
             "XsecCarryEngine started | coins=%s | interval=%ds | lb=%d | q=%.0f%% | per_leg=$%.0f",
             self._coins, REBALANCE_INTERVAL, LB, XSEC_Q * 100, PER_LEG_USD,
         )
+        # Seed lb24 history up-front so the first tick trades with full smoothing.
+        await asyncio.to_thread(self._seed_history)
         try:
             while not self._stop_event.is_set():
                 try:
