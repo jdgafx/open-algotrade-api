@@ -51,6 +51,7 @@ _ALL_STRATEGIES = [
     "flip_flop", "gap_up_momentum", "capitulation_reversal",
     "timeinality", "consecutive_down", "day_of_week_bias",
     "donchian_channel", "closed_market_overnight",
+    "xsec_carry",   # market-neutral carry — regime-agnostic
 ]
 
 REGIME_STRATEGY_MAP = {
@@ -70,7 +71,7 @@ REGIME_STRATEGY_MAP = {
         # Market-neutral / time-based (always allowed)
         "vwap_bot", "funding_arb", "market_maker", "pivot_lines",
         "correlation", "quarter_theory", "timeinality",
-        "day_of_week_bias", "closed_market_overnight",
+        "day_of_week_bias", "closed_market_overnight", "xsec_carry",
     ],
     MarketRegime.TRENDING_DOWN: [
         # Trend-following works short
@@ -88,7 +89,7 @@ REGIME_STRATEGY_MAP = {
         # Market-neutral / time-based (always allowed)
         "vwap_bot", "funding_arb", "market_maker", "pivot_lines",
         "correlation", "quarter_theory", "timeinality",
-        "day_of_week_bias", "closed_market_overnight",
+        "day_of_week_bias", "closed_market_overnight", "xsec_carry",
     ],
     MarketRegime.MEAN_REVERTING: [
         # Mean reversion strategies thrive here
@@ -105,7 +106,7 @@ REGIME_STRATEGY_MAP = {
         # Market-neutral / time-based (always allowed)
         "vwap_bot", "funding_arb", "market_maker", "pivot_lines",
         "correlation", "quarter_theory", "timeinality",
-        "day_of_week_bias", "closed_market_overnight",
+        "day_of_week_bias", "closed_market_overnight", "xsec_carry",
     ],
     MarketRegime.HIGH_VOLATILITY: [
         # Volatility strategies
@@ -124,7 +125,7 @@ REGIME_STRATEGY_MAP = {
         # Market-neutral / time-based (always allowed)
         "vwap_bot", "funding_arb", "market_maker",
         "correlation", "pivot_lines", "timeinality",
-        "day_of_week_bias", "closed_market_overnight",
+        "day_of_week_bias", "closed_market_overnight", "xsec_carry",
     ],
     MarketRegime.LOW_VOLATILITY: [
         # Mean reversion + range strategies
@@ -136,7 +137,7 @@ REGIME_STRATEGY_MAP = {
         # Market-neutral / time-based (always allowed)
         "vwap_bot", "funding_arb", "market_maker", "pivot_lines",
         "correlation", "quarter_theory", "timeinality",
-        "day_of_week_bias", "closed_market_overnight",
+        "day_of_week_bias", "closed_market_overnight", "xsec_carry",
     ],
     MarketRegime.UNKNOWN: _ALL_STRATEGIES,  # Unknown regime = allow all
 }

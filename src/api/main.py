@@ -1091,6 +1091,21 @@ async def lifespan(app: FastAPI):
     app.state.compound_reserve_pct = _COMPOUND_RESERVE_PCT
     logger.info("RBI scheduler started with %d jobs + compounder + bleeder-cull", len(_scheduler.get_jobs()) - 2)
 
+    # ── XsecCarryEngine (cross-sectional funding carry — standalone, regime-agnostic) ──
+    xsec_engine = None
+    xsec_task = None
+    try:
+        if executor is not None and client is not None:
+            from src.engine.xsec_engine import XsecCarryEngine
+            xsec_engine = XsecCarryEngine(executor=executor, client=client)
+            xsec_task = asyncio.create_task(xsec_engine.run())
+            app.state.xsec_engine = xsec_engine
+            logger.info("XsecCarryEngine started")
+        else:
+            logger.warning("XsecCarryEngine skipped — no executor/client")
+    except Exception as _xe:
+        logger.warning("XsecCarryEngine failed to start (non-fatal): %s", _xe)
+
     yield
 
     _scheduler.shutdown(wait=False)
@@ -1145,6 +1160,16 @@ async def lifespan(app: FastAPI):
             logger.info("FundingMonitor shut down cleanly")
         except Exception as e:
             logger.error("Error shutting down funding monitor: %s", e)
+
+    if xsec_task is not None and not xsec_task.done():
+        try:
+            if xsec_engine is not None:
+                xsec_engine.stop()
+            xsec_task.cancel()
+            await asyncio.gather(xsec_task, return_exceptions=True)
+            logger.info("XsecCarryEngine shut down cleanly")
+        except Exception as e:
+            logger.error("Error shutting down XsecCarryEngine: %s", e)
 
 
 app = FastAPI(title="Open Algotrade API", version="2.0.0", lifespan=lifespan)
