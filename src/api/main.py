@@ -2121,6 +2121,15 @@ def list_strategy_instances(request: Request, db: Session = Depends(get_db)):
                     inst.total_pnl = round(sd["pnl"], 4)
                 if inst.name in strat_positions:
                     inst.last_signal = strat_positions[inst.name].get("side", inst.last_signal)
+                # Live open-position count + recent realized PnL from the executor's
+                # in-memory state — the SAME source the single GET /strategies/{name}
+                # uses (main.py get_strategy). Without this the LIST served the stale
+                # active_positions DB column (0) while instances were actually holding.
+                # ponytail: in-memory dict/list scans only — no per-instance network fetch.
+                if hasattr(executor, "open_position_count"):
+                    inst.active_positions = executor.open_position_count(inst.name)
+                if hasattr(executor, "recent_realized_pnl"):
+                    inst.recent_pnl, inst.recent_trades = executor.recent_realized_pnl(inst.name)
         except Exception as e:
             logger.warning("Failed to merge paper stats: %s", e)
 
