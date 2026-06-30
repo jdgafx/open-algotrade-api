@@ -70,6 +70,16 @@ WINNER_MAX_PCT = float(os.getenv("WINNER_MAX_PCT", "0.75"))      # per-winner ce
 DEFREEZE_MIN_RECENT_TRADES = int(os.getenv("DEFREEZE_MIN_RECENT_TRADES", "10"))  # recent closed trades before a static winner can be demoted
 PROVEN_REALIZED_CONF = float(os.getenv("PROVEN_REALIZED_CONF", "0.5"))  # confidence floor for a strategy with sustained POSITIVE realized PnL — so an asymmetric fat-tail winner (low win-rate, real money) is not pinned at the observation floor by its hit-rate
 
+# T010 conditional-edge allocation (slice 2): the compounder tilts size by the
+# leaderboard POSTERIOR. Non-winners get a Thompson exploration stake ∝ upside
+# (ci_high) — a promising wide-CI maybe-edge is probed, a dead loser shrinks to the
+# floor (never 0, so a real-but-young edge is never starved). Winners' confidence
+# cap is scaled by prob_edge. The executor's exposure/cluster/max-position caps
+# (paper_executor) remain the hard safety net on the resulting notionals.
+EXPLORE_MIN_USD = float(os.getenv("EXPLORE_MIN_USD", "25.0"))        # exploration floor — never starve a maybe-edge to 0
+EXPLORE_UPSIDE_REF = float(os.getenv("EXPLORE_UPSIDE_REF", "0.8"))   # ci_high ($/trade) at which exploration reaches full non-winner size
+ALLOC_RAMP_UP_MAX = float(os.getenv("ALLOC_RAMP_UP_MAX", "1.5"))     # max size INCREASE per compound cycle (no 10x jumps); cuts apply immediately
+
 
 def _winner_cap_usd(balance: float, confidence: float,
                     obs_pct: float = None, max_pct: float = None) -> float:
@@ -439,6 +449,12 @@ async def lifespan(app: FastAPI):
     app.state.paper_mode = paper_mode
     app.state.executor = executor
     app.state.client = client   # needed by POST /xsec/instances to start engines at runtime
+
+    # T010: stamp each paper trade with the current regime at entry, so
+    # regime-conditional edge history accrues durably (sharpens the leaderboard
+    # posterior over time). Fail-safe: a None/lookup miss just leaves it untagged.
+    if executor is not None and regime_detector is not None and hasattr(executor, "_regime_fn"):
+        executor._regime_fn = lambda _sym: (regime_detector.get_current_regime(_sym) or {}).get("regime")
     app.state.solana_scanner = solana_scanner
     app.state.funding_monitor = funding_monitor
 
@@ -925,7 +941,18 @@ async def lifespan(app: FastAPI):
                 _COMPOUND_MIN_TRADES = 100
                 _COMPOUND_MAX_UNPROVEN = 500.0
 
+                # T010: conditional-edge posterior per instance — drives BOTH the
+                # winner tilt (prob_edge) and the non-winner exploration stake (ci_high).
+                try:
+                    _post = _posterior_scores(executor, regime_detector, running, window=30)
+                except Exception as _pe:  # noqa: BLE001 - allocation must fall back, never crash the job
+                    logger.warning("Compounder: posterior scores unavailable (%s); using flat sizing", _pe)
+                    _post = {}
+
                 for _cinst in running:
+                    _p = _post.get(_cinst.name, {})
+                    _prob = float(_p.get("prob_edge", 0.5))
+                    _ci_high = float(_p.get("ci_high", 0.0))
                     if _cinst.name in _WINNER_SET:
                         # confidence-scaled per-winner cap (U6 / R5): observation-small
                         # at thin evidence, ~WINNER_MAX_PCT only near full confidence.
@@ -939,9 +966,18 @@ async def lifespan(app: FastAPI):
                             _rp, _rn = executor.recent_realized_pnl(_cinst.name)
                             if _rn >= DEFREEZE_MIN_RECENT_TRADES and _rp > 0:
                                 _conf = max(_conf, PROVEN_REALIZED_CONF)
+                        # T010: tilt the winner cap by posterior confidence — a high
+                        # prob_edge winner grows toward the cap, a marginal one stays
+                        # smaller (blend, so the existing confidence machinery still holds).
+                        _conf = _conf * (0.5 + 0.5 * _prob)
                         new_size = min(_equal_split, _winner_cap_usd(balance, _conf))
                     else:
-                        new_size = _OTHER_SIZE
+                        # T010 Thompson exploration: non-winner stake ∝ UPSIDE (ci_high),
+                        # floored at EXPLORE_MIN_USD (never 0 — a real-but-young edge keeps
+                        # probing), capped at _OTHER_SIZE. A dead loser (ci_high<=0) shrinks
+                        # to the floor, freeing the loser-tail capital the flat $100 wasted.
+                        _upside = min(max(_ci_high, 0.0) / EXPLORE_UPSIDE_REF, 1.0)
+                        new_size = EXPLORE_MIN_USD + (_OTHER_SIZE - EXPLORE_MIN_USD) * _upside
                     _trade_count = _live_stats.get(_cinst.name, {}).get("trades", 0)
                     if new_size > _COMPOUND_MAX_UNPROVEN and _trade_count < _COMPOUND_MIN_TRADES:
                         logger.warning(
@@ -949,6 +985,12 @@ async def lifespan(app: FastAPI):
                             _cinst.name, _trade_count, _COMPOUND_MIN_TRADES, _COMPOUND_MAX_UNPROVEN, _COMPOUND_MAX_UNPROVEN,
                         )
                         new_size = _COMPOUND_MAX_UNPROVEN
+                    # T010 ramp: grow gradually (no >ALLOC_RAMP_UP_MAX× jump per cycle);
+                    # cuts apply immediately so the bleed stops fast.
+                    _prev = float(_cinst.size_usd or _OTHER_SIZE)
+                    if new_size > _prev * ALLOC_RAMP_UP_MAX:
+                        new_size = round(_prev * ALLOC_RAMP_UP_MAX, 2)
+                    new_size = max(new_size, EXPLORE_MIN_USD)  # exploration floor — never 0
                     _cinst.size_usd = new_size
                     if orchestrator:
                         _cstrat = orchestrator.get_strategy(_cinst.name)
@@ -2441,6 +2483,50 @@ def get_strategies_performance(request: Request, db: Session = Depends(get_db)):
     )
 
 
+def _posterior_scores(executor, detector, running, window: int = 30) -> dict:
+    """Posterior P(edge) per running (strategy×symbol) — the T009 conditional-edge
+    signal, reused by GET /strategies/leaderboard AND the T010 allocator (compounder).
+
+    Returns name -> {current_regime, prob_edge, posterior_mean_edge, ci_low, ci_high,
+    n_own, n_pool, pool_mean}. PRIOR = sibling pool (same strategy_type on symbols
+    currently in the same regime); LIKELIHOOD = the instance's own recent trades.
+    """
+    from src.execution.paper_executor import posterior_edge
+
+    by_strat: dict = {}
+    if executor is not None and hasattr(executor, "get_trade_history"):
+        for t in executor.get_trade_history():
+            if t.get("action") == "exit":
+                by_strat.setdefault(t.get("strategy", ""), []).append(t.get("pnl", 0.0))
+
+    regime_cache: dict = {}
+    def _regime(sym):
+        if sym not in regime_cache:
+            r = detector.get_current_regime(sym) if detector is not None else None
+            regime_cache[sym] = (r or {}).get("regime", "unknown")
+        return regime_cache[sym]
+
+    own_map: dict = {}
+    pool_map: dict = {}  # (strategy_type, regime) -> {name: recent_pnls}
+    for s in running:
+        recent = by_strat.get(s.name, [])[-window:]
+        own_map[s.name] = recent
+        pool_map.setdefault((s.strategy_type, _regime(s.symbol)), {})[s.name] = recent
+
+    out: dict = {}
+    for s in running:
+        regime = _regime(s.symbol)
+        own = own_map[s.name]
+        siblings = pool_map.get((s.strategy_type, regime), {})
+        pool = [p for nm, pnls in siblings.items() if nm != s.name for p in pnls]
+        post = posterior_edge(own, pool)
+        post["current_regime"] = regime
+        post["pool_mean"] = (sum(pool) / len(pool)) if pool else 0.0
+        post["raw_recent_pnl"] = sum(own)
+        out[s.name] = post
+    return out
+
+
 @app.get("/strategies/leaderboard")
 async def strategy_leaderboard(request: Request, window: int = 30):
     """Conditional-edge ranker (T009 slice 1, READ-ONLY — drives nothing yet).
@@ -2462,8 +2548,6 @@ async def strategy_leaderboard(request: Request, window: int = 30):
     (Thompson-style — small-and-growing for high-uncertainty maybe-edges + an
     exploration floor), so wide-CI thin winners get probed, not dropped.
     """
-    from src.execution.paper_executor import posterior_edge
-
     executor = getattr(request.app.state, "executor", None)
     detector = getattr(request.app.state, "regime_detector", None)
 
@@ -2473,54 +2557,29 @@ async def strategy_leaderboard(request: Request, window: int = 30):
             models.StrategyInstance.status == "running"
         ).all()
 
-        # Recent exit PnLs per strategy from the durable ledger (append order == chronological).
-        by_strat: dict = {}
-        if executor is not None and hasattr(executor, "get_trade_history"):
-            for t in executor.get_trade_history():
-                if t.get("action") == "exit":
-                    by_strat.setdefault(t.get("strategy", ""), []).append(t.get("pnl", 0.0))
-
-        regime_cache: dict = {}
-        def _regime(sym):
-            if sym not in regime_cache:
-                r = detector.get_current_regime(sym) if detector is not None else None
-                regime_cache[sym] = (r or {}).get("regime", "unknown")
-            return regime_cache[sym]
-
-        # Own recent window per instance + the sibling pool keyed by (type, current regime).
-        own_map: dict = {}
-        pool_map: dict = {}  # (strategy_type, regime) -> {name: recent_pnls}
-        for s in running:
-            recent = by_strat.get(s.name, [])[-window:]
-            own_map[s.name] = recent
-            pool_map.setdefault((s.strategy_type, _regime(s.symbol)), {})[s.name] = recent
+        scores = _posterior_scores(executor, detector, running, window=window)
 
         rows = []
         for s in running:
-            regime = _regime(s.symbol)
-            own = own_map[s.name]
-            # Sibling pool = same strategy_type, same CURRENT regime, EXCLUDING self.
-            siblings = pool_map.get((s.strategy_type, regime), {})
-            pool = [p for nm, pnls in siblings.items() if nm != s.name for p in pnls]
-            post = posterior_edge(own, pool)
-            pool_mean = (sum(pool) / len(pool)) if pool else 0.0
+            post = scores.get(s.name, {})
+            pool_mean = post.get("pool_mean", 0.0)
             rows.append({
                 "name": s.name,
                 "type": s.strategy_type,
                 "symbol": s.symbol,
-                "current_regime": regime,
-                "trades": post["n_own"],
-                "raw_recent_pnl": round(sum(own), 2),
-                "prob_edge": round(post["prob_edge"], 3),
-                "posterior_mean_edge": round(post["posterior_mean_edge"], 4),
-                "ci_low": round(post["ci_low"], 4),
-                "ci_high": round(post["ci_high"], 4),
+                "current_regime": post.get("current_regime", "unknown"),
+                "trades": post.get("n_own", 0),
+                "raw_recent_pnl": round(post.get("raw_recent_pnl", 0.0), 2),
+                "prob_edge": round(post.get("prob_edge", 0.5), 3),
+                "posterior_mean_edge": round(post.get("posterior_mean_edge", 0.0), 4),
+                "ci_low": round(post.get("ci_low", 0.0), 4),
+                "ci_high": round(post.get("ci_high", 0.0), 4),
                 "family_corroboration": {
-                    "n_pool": post["n_pool"],
+                    "n_pool": post.get("n_pool", 0),
                     "pool_mean_pnl": round(pool_mean, 4),
                     "positive": pool_mean > 0,
                 },
-                "rank_score": round(post["prob_edge"] * post["posterior_mean_edge"], 4),
+                "rank_score": round(post.get("prob_edge", 0.5) * post.get("posterior_mean_edge", 0.0), 4),
             })
 
         # Primary: confidence-weighted expected edge. Tie-break: raw posterior mean,

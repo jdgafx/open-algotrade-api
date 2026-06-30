@@ -176,6 +176,7 @@ class PaperPosition:
     size_usd: float = 0.0
     strategy_name: str = ""
     unrealized_pnl: float = 0.0
+    regime: Optional[str] = None  # market regime at entry (T010 regime-conditional history)
 
 
 @dataclass
@@ -192,6 +193,7 @@ class PaperTrade:
     reason: str = ""
     strategy_name: str = ""
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    regime: Optional[str] = None  # market regime at entry (carried to the exit trade)
 
 
 @dataclass
@@ -243,6 +245,10 @@ class PaperTradingExecutor:
         self._trades: List[PaperTrade] = []
         self._trade_counter = 0
         self._execution_history: List[ExecutionResult] = []
+        # Optional symbol->regime lookup, set by the app (lifespan) to the live
+        # regime_detector. Stamps each trade with the regime at entry so
+        # regime-conditional edge history accrues durably (T010). None -> untagged.
+        self._regime_fn = None
 
         # Price cache (refreshed on each call)
         self._mid_prices: Dict[str, float] = {}
@@ -300,6 +306,7 @@ class PaperTradingExecutor:
             "pnl_pct": t.pnl_pct, "reason": t.reason,
             "strategy_name": t.strategy_name,
             "timestamp": t.timestamp.isoformat(),
+            "regime": t.regime,
         }
 
     @staticmethod
@@ -311,6 +318,7 @@ class PaperTradingExecutor:
             pnl_pct=t.get("pnl_pct", 0), reason=t.get("reason", ""),
             strategy_name=t.get("strategy_name", ""),
             timestamp=datetime.fromisoformat(t["timestamp"]),
+            regime=t.get("regime"),
         )
 
     def _append_ledger(self, trade: "PaperTrade") -> None:
@@ -374,20 +382,11 @@ class PaperTradingExecutor:
                         "leverage": p.leverage, "size_usd": p.size_usd,
                         "strategy_name": p.strategy_name,
                         "unrealized_pnl": p.unrealized_pnl,
+                        "regime": p.regime,
                     }
                     for k, p in self._positions.items()
                 },
-                "trades": [
-                    {
-                        "id": t.id, "symbol": t.symbol, "side": t.side,
-                        "action": t.action, "price": t.price, "size": t.size,
-                        "size_usd": t.size_usd, "pnl": t.pnl,
-                        "pnl_pct": t.pnl_pct, "reason": t.reason,
-                        "strategy_name": t.strategy_name,
-                        "timestamp": t.timestamp.isoformat(),
-                    }
-                    for t in self._trades[-500:]  # keep last 500 trades
-                ],
+                "trades": [self._trade_to_dict(t) for t in self._trades[-500:]],  # last 500; carries regime
                 "saved_at": datetime.now(timezone.utc).isoformat(),
             }
             self._state_path().write_text(json.dumps(state, indent=2))
@@ -417,6 +416,7 @@ class PaperTradingExecutor:
                     size_usd=p.get("size_usd", 0),
                     strategy_name=p.get("strategy_name", ""),
                     unrealized_pnl=p.get("unrealized_pnl", 0),
+                    regime=p.get("regime"),
                 )
 
             self._trades.clear()
@@ -693,6 +693,15 @@ class PaperTradingExecutor:
                            f"> {_MAX_TOTAL_EXPOSURE_PCT:.0%} of ${_equity:.0f} equity"),
                 )
 
+            # Regime at entry (T010): stamped on the position and carried to the
+            # exit trade, so realized PnL can later be conditioned on regime.
+            _entry_regime = None
+            if self._regime_fn is not None:
+                try:
+                    _entry_regime = self._regime_fn(symbol)
+                except Exception:  # noqa: BLE001 - never let a tag lookup block a fill
+                    _entry_regime = None
+
             self._positions[pos_key] = PaperPosition(
                 symbol=symbol,
                 side="long" if is_buy else "short",
@@ -702,6 +711,7 @@ class PaperTradingExecutor:
                 leverage=effective_leverage,
                 size_usd=size_usd,
                 strategy_name=config.name,
+                regime=_entry_regime,
             )
 
             self.balance -= commission
@@ -717,6 +727,7 @@ class PaperTradingExecutor:
                 size_usd=size_usd,
                 reason=signal.reason,
                 strategy_name=config.name,
+                regime=_entry_regime,
             )
             self._trades.append(trade)
             self._append_ledger(trade)  # durable, uncapped (F5/R11) — ledger mirrors self._trades
@@ -802,6 +813,7 @@ class PaperTradingExecutor:
                 pnl_pct=pnl_pct,
                 reason=signal.reason,
                 strategy_name=config.name,
+                regime=getattr(pos, "regime", None),  # regime at entry -> conditions this realized PnL
             )
             self._trades.append(trade)
             self._append_ledger(trade)  # durable, uncapped (F5/R11)
@@ -1220,6 +1232,7 @@ class PaperTradingExecutor:
                 "reason": t.reason,
                 "strategy": t.strategy_name,
                 "timestamp": t.timestamp.isoformat(),
+                "regime": t.regime,
             }
             for t in self._trades
         ]
