@@ -227,7 +227,10 @@ class PaperTradingExecutor:
     def __init__(
         self,
         base_url: str = "https://api.hyperliquid.xyz",
-        default_slippage: float = 0.0005,  # Reduced: assume maker orders (MoonDev: "maker only")
+        default_slippage: float = 0.00015,  # 1.5bps. Empirically anchored 2026-06-30: real HL
+        #   top-of-book half-spread on traded coins is 0.1-1.6bps at $25-500 size (zero impact),
+        #   and hl_executor is maker-first (post at bid/ask). Old 5bps was ~10x too high. 1.5bps
+        #   keeps conservative margin for adverse selection + occasional taker fallback.
         max_position_usd: float = 5000.0,  # Reduced: cap per-position exposure
         initial_balance: float = 10000.0,
         commission_pct: float = 0.0002,  # HL maker fee: 0.02% expressed as decimal fraction
