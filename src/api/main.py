@@ -1836,6 +1836,69 @@ def _get_live_positions() -> List[schemas.Position]:
         return []
 
 
+def _paper_positions_out(executor) -> List[schemas.Position]:
+    """Map the paper executor's live PaperPositions onto schemas.Position.
+    Kept sync (no per-position mid fetch) so /positions stays cheap."""
+    out = []
+    for pos in executor._positions.values():
+        abs_size = abs(pos.size)
+        # PaperPosition has no live mark field; derive it from the executor's last
+        # unrealized_pnl. ponytail: falls back to entry_price when pnl is 0/stale.
+        if abs_size > 0 and pos.unrealized_pnl:
+            delta = pos.unrealized_pnl / abs_size
+            mark = pos.entry_price + delta if pos.side == "long" else pos.entry_price - delta
+        else:
+            mark = pos.entry_price
+        out.append(schemas.Position(
+            symbol=pos.symbol,
+            size=abs_size,
+            side=pos.side,
+            entry_price=pos.entry_price,
+            mark_price=mark,
+            unrealized_pnl=pos.unrealized_pnl,
+            leverage=pos.leverage,
+        ))
+    return out
+
+
+def _paper_trades_out(executor, limit: int, open_only: bool) -> List[schemas.TradeOut]:
+    """Reconstruct entry/exit-paired TradeOut rows from the executor's per-action
+    trade log (get_trade_history returns one row per entry AND per exit). Entries
+    are FIFO-matched to exits by (symbol, strategy, side)."""
+    from collections import defaultdict, deque
+
+    open_lots = defaultdict(deque)  # (symbol, strategy, side) -> unmatched entry rows
+    closed = []
+    for r in executor.get_trade_history():  # chronological
+        key = (r["symbol"], r["strategy"], r["side"])
+        if r["action"] == "entry":
+            open_lots[key].append(r)
+            continue
+        # exit -> pair with oldest open entry; ponytail: if none (e.g. partial
+        # ledger rehydrate) fall back to the exit row for entry fields.
+        entry = open_lots[key].popleft() if open_lots[key] else r
+        closed.append(schemas.TradeOut(
+            id=r["id"], symbol=r["symbol"], side=r["side"], size=r["size"],
+            entry_price=entry["price"], exit_price=r["price"],
+            pnl=r.get("pnl"), exit_reason=r.get("reason"), strategy=r["strategy"],
+            opened_at=entry["timestamp"], closed_at=r["timestamp"], is_open=False,
+        ))
+
+    open_trades = [
+        schemas.TradeOut(
+            id=e["id"], symbol=e["symbol"], side=e["side"], size=e["size"],
+            entry_price=e["price"], exit_price=None, pnl=None,
+            exit_reason=None, strategy=e["strategy"],
+            opened_at=e["timestamp"], closed_at=None, is_open=True,
+        )
+        for q in open_lots.values() for e in q
+    ]
+
+    trades = open_trades if open_only else open_trades + closed
+    trades.sort(key=lambda t: t.opened_at, reverse=True)
+    return trades[:limit]
+
+
 def _get_market_price(symbol: str) -> Optional[schemas.MarketPrice]:
     try:
         from hyperliquid.info import Info
@@ -2468,12 +2531,20 @@ def get_portfolio(user_id: int, db: Session = Depends(get_db)):
 # ──────────────────────────────────────────────
 
 @app.get("/positions", response_model=List[schemas.Position])
-def get_positions():
+def get_positions(request: Request):
+    executor = getattr(request.app.state, "executor", None)
+    paper_mode = getattr(request.app.state, "paper_mode", False)
+    if paper_mode and executor is not None and hasattr(executor, "_positions"):
+        return _paper_positions_out(executor)
     return _get_live_positions()
 
 
 @app.get("/trades", response_model=List[schemas.TradeOut])
-def get_trades(limit: int = 50, open_only: bool = False, db: Session = Depends(get_db)):
+def get_trades(request: Request, limit: int = 50, open_only: bool = False, db: Session = Depends(get_db)):
+    executor = getattr(request.app.state, "executor", None)
+    paper_mode = getattr(request.app.state, "paper_mode", False)
+    if paper_mode and executor is not None and hasattr(executor, "get_trade_history"):
+        return _paper_trades_out(executor, limit, open_only)
     query = db.query(models.Trade)
     if open_only:
         query = query.filter(models.Trade.is_open == True)
