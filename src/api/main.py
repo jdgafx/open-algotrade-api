@@ -651,11 +651,12 @@ async def lifespan(app: FastAPI):
                     logger.info("Auto-deploy: empty DB detected — deploying winner strategies")
                     _auto_deploy_winners(db, orchestrator)
                 instances_to_start = db.query(models.StrategyInstance).filter(
-                    models.StrategyInstance.enabled == True
+                    models.StrategyInstance.enabled == True,
+                    models.StrategyInstance.status != "stopped",
                 ).all()
 
                 if instances_to_start:
-                    logger.info("Auto-start: found %d enabled strategies", len(instances_to_start))
+                    logger.info("Auto-start: found %d enabled, non-stopped strategies", len(instances_to_start))
                     tier_map = {"A": StrategyTier.A, "B": StrategyTier.B, "C": StrategyTier.C, "D": StrategyTier.D}
                     available = [s["strategy_type"] for s in list_strategies()]
 
