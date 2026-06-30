@@ -81,6 +81,7 @@ EXPLORE_UPSIDE_REF = float(os.getenv("EXPLORE_UPSIDE_REF", "0.8"))   # ci_high (
 ALLOC_RAMP_UP_MAX = float(os.getenv("ALLOC_RAMP_UP_MAX", "1.5"))     # max size INCREASE per compound cycle (no 10x jumps); cuts apply immediately
 POSTERIOR_WINNER_PROB = float(os.getenv("POSTERIOR_WINNER_PROB", "0.9"))  # prob_edge >= this (and +mean) promotes an instance into the winner tier — the posterior is a better thin-sample filter than trades>=6 (funding-arb 4t prob 0.998 grows; gridfib 4t prob 0.59 does not). Ramp keeps the grow gradual; $500-unproven cap still bounds it.
 POSTERIOR_CULL_PROB = float(os.getenv("POSTERIOR_CULL_PROB", "0.3"))  # prob_edge < this AND negative posterior mean (with >= CULL_MIN_TRADES) is a confident loser — cull via the existing path to shed the tail faster than the pnl-only gate. gridfib (prob 0.59) is NOT culled — it's a probe, not a loser.
+POSTERIOR_DEMOTE_PROB = float(os.getenv("POSTERIOR_DEMOTE_PROB", "0.5"))  # hysteresis: an instance is winner-SIZED only while prob_edge holds >= this. A decayed winner the signal now rejects (vwap-btc prob 0.0) falls below it and shrinks to the exploration floor — even a static/de-frozen winner — stopping the $500-on-losers leak. Promote at POSTERIOR_WINNER_PROB(0.9), demote here(0.5) -> band avoids flapping.
 
 
 def _winner_cap_usd(balance: float, confidence: float,
@@ -946,7 +947,15 @@ async def lifespan(app: FastAPI):
                 # grab the whole ceiling); the confidence cap holds a thin-evidence
                 # winner to an observation-small share and only reaches WINNER_MAX_PCT
                 # near ~30 live trades. Non-winners get $100 for signal discovery only.
-                _winners_running = [r for r in running if r.name in _WINNER_SET]
+                # Symmetric demote (hysteresis): winner-SIZED only while the posterior
+                # prob_edge holds >= POSTERIOR_DEMOTE_PROB. A decayed winner (vwap-btc
+                # prob 0.0) falls out and shrinks to the exploration floor — the missing
+                # half of promotion. Missing posterior (failed) -> keep (fail-safe).
+                def _winner_sized(_nm):
+                    return (_nm in _WINNER_SET
+                            and _post.get(_nm, {}).get("prob_edge", 1.0) >= POSTERIOR_DEMOTE_PROB)
+
+                _winners_running = [r for r in running if _winner_sized(r.name)]
                 _equal_split = (
                     round(investable / max(len(_winners_running), 1), 2)
                 ) if _winners_running else 100.0
@@ -963,7 +972,7 @@ async def lifespan(app: FastAPI):
                     _p = _post.get(_cinst.name, {})
                     _prob = float(_p.get("prob_edge", 0.5))
                     _ci_high = float(_p.get("ci_high", 0.0))
-                    if _cinst.name in _WINNER_SET:
+                    if _winner_sized(_cinst.name):
                         # confidence-scaled per-winner cap (U6 / R5): observation-small
                         # at thin evidence, ~WINNER_MAX_PCT only near full confidence.
                         _conf = float(_cinst.edge_confidence_score or 0.0)
