@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import re
 import logging
 import random
 from typing import List, Optional
@@ -64,6 +65,14 @@ CULL_MAX_PER_RUN = int(os.getenv("CULL_MAX_PER_RUN", "6"))       # cap culls per
 CULL_INTERVAL_MIN = int(os.getenv("CULL_INTERVAL_MIN", "10"))    # scheduler cadence (2026-06-05: 15 -> 10 min)
 CULL_MIN_RUNNING = int(os.getenv("CULL_MIN_RUNNING", "12"))      # floor: never cull the running book below this (safety rail)
 
+# T028 — zombie killer: a strategy can sit just above the pnl/win-rate floors
+# (flat/breakeven) for a long sample with genuinely NO live edge — neither a
+# winner nor a clear loser. Scored the same way the compounder scores
+# confidence (half-Kelly edge_confidence on the live Wilson-lower-bound win
+# rate); a long, edgeless sample is culled even though pnl > CULL_MIN_PNL.
+CULL_ZOMBIE_MIN_TRADES = int(os.getenv("CULL_ZOMBIE_MIN_TRADES", "20"))  # need a real sample before declaring "no edge" (not early variance)
+CULL_ZOMBIE_MAX_CONF = float(os.getenv("CULL_ZOMBIE_MAX_CONF", "0.03"))  # edge_confidence_score <= this after the trade floor = zombie
+
 # U6 — confidence-governed allocation + winner-set de-freeze (T027 + F3 + F4).
 WINNER_OBS_PCT = float(os.getenv("WINNER_OBS_PCT", "0.10"))      # per-winner share at ZERO earned confidence (observation-small)
 WINNER_MAX_PCT = float(os.getenv("WINNER_MAX_PCT", "0.75"))      # per-winner ceiling, reached only near FULL confidence (~30 live trades)
@@ -82,6 +91,23 @@ ALLOC_RAMP_UP_MAX = float(os.getenv("ALLOC_RAMP_UP_MAX", "1.5"))     # max size 
 POSTERIOR_WINNER_PROB = float(os.getenv("POSTERIOR_WINNER_PROB", "0.9"))  # prob_edge >= this (and +mean) promotes an instance into the winner tier — the posterior is a better thin-sample filter than trades>=6 (funding-arb 4t prob 0.998 grows; gridfib 4t prob 0.59 does not). Ramp keeps the grow gradual; $500-unproven cap still bounds it.
 POSTERIOR_CULL_PROB = float(os.getenv("POSTERIOR_CULL_PROB", "0.3"))  # prob_edge < this AND negative posterior mean (with >= CULL_MIN_TRADES) is a confident loser — cull via the existing path to shed the tail faster than the pnl-only gate. gridfib (prob 0.59) is NOT culled — it's a probe, not a loser.
 POSTERIOR_DEMOTE_PROB = float(os.getenv("POSTERIOR_DEMOTE_PROB", "0.5"))  # hysteresis: an instance is winner-SIZED only while prob_edge holds >= this. A decayed winner the signal now rejects (vwap-btc prob 0.0) falls below it and shrinks to the exploration floor — even a static/de-frozen winner — stopping the $500-on-losers leak. Promote at POSTERIOR_WINNER_PROB(0.9), demote here(0.5) -> band avoids flapping.
+
+# T028 — REVIVE (cull-or-revive is never terminal). A stopped strategy is
+# continuously re-evaluated: REVIVE-BY-RETUNE re-optimizes its params against
+# recent data via the existing RBI pipeline/gate (deterministic Optuna only —
+# zero LLM/Opus in this path); REVIVE-BY-REGIME re-enables it unchanged if its
+# existing params now fit the CURRENT regime. Either path re-enters at
+# OBSERVATION tier (1x leverage, $REVIVE_BASE_USD, fresh live-evidence window)
+# — LIVE evidence decides whether it earns size, never the reviving backtest
+# (ADR-0001). Anti-flap cooldown reuses T031's PromotionEventRecord table
+# (reason prefixed "lifecycle_") as the persisted cull<->revive hysteresis —
+# no second persistence layer.
+REVIVE_INTERVAL_MIN = int(os.getenv("REVIVE_INTERVAL_MIN", "60"))        # scheduler cadence — retune is expensive (Optuna n_trials), so slower than the 10-min cull
+REVIVE_MAX_PER_RUN = int(os.getenv("REVIVE_MAX_PER_RUN", "3"))           # cap stopped strategies examined per tick (bounds optimizer compute + revive churn)
+REVIVE_COOLDOWN_HOURS = float(os.getenv("REVIVE_COOLDOWN_HOURS", "24"))  # anti-flap: no cull<->revive (or repeat retune attempt) for a strategy within this window
+REVIVE_BASE_USD = float(os.getenv("REVIVE_BASE_USD", "100.0"))           # OBSERVATION-tier re-entry size
+REVIVE_LOOKBACK_DAYS = int(os.getenv("REVIVE_LOOKBACK_DAYS", "90"))
+REVIVE_N_TRIALS = int(os.getenv("REVIVE_N_TRIALS", "100"))
 
 
 def _winner_cap_usd(balance: float, confidence: float,
@@ -163,6 +189,80 @@ def _select_cull_candidates(
             candidates.append((pnl, name))
     candidates.sort(key=lambda c: c[0])  # worst PnL first
     return [name for _pnl, name in candidates[:max_per_run]]
+
+
+def _record_lifecycle_event(
+    db, *, strategy_type: str, strategy_id: int, reason: str, promoted: bool,
+    before_params: dict | None = None, after_params: dict | None = None,
+    before_metrics: dict | None = None, after_metrics: dict | None = None,
+) -> None:
+    """T028 — persist a cull/revive state-transition as a PromotionEventRecord
+    row (reason prefixed "lifecycle_"). Reuses T031's existing DB persistence
+    layer instead of a second one: GET /optimize/rbi/history already surfaces
+    every row in this table, so lifecycle events are auditable for free, and
+    `_lifecycle_in_cooldown` reads the SAME table for anti-flap hysteresis.
+    """
+    from .models import PromotionEventRecord
+    row = PromotionEventRecord(
+        strategy_type=strategy_type, strategy_id=strategy_id,
+        timestamp=datetime.now(timezone.utc).isoformat(),
+        promoted=promoted, reason=reason,
+        before_params=before_params or {}, after_params=after_params or {},
+        before_metrics=before_metrics or {}, after_metrics=after_metrics or {},
+    )
+    db.add(row)
+    db.commit()
+
+
+def _lifecycle_in_cooldown(db, strategy_id: int, hours: float) -> bool:
+    """T028 ANTI-FLAP: true if this strategy (by DB row id — stable across a
+    revive rename) had a lifecycle event within the last `hours`. Blocks
+    cull<->revive churn AND throttles repeat optimizer attempts on a strategy
+    that just failed revive-by-retune. DB-backed (PromotionEventRecord) so the
+    cooldown survives a Railway redeploy, unlike an in-memory timer.
+    """
+    from .models import PromotionEventRecord
+    last = (
+        db.query(PromotionEventRecord)
+        .filter(
+            PromotionEventRecord.strategy_id == strategy_id,
+            PromotionEventRecord.reason.like("lifecycle_%"),
+        )
+        .order_by(PromotionEventRecord.timestamp.desc())
+        .first()
+    )
+    if last is None:
+        return False
+    try:
+        last_ts = datetime.fromisoformat(last.timestamp)
+    except (TypeError, ValueError):
+        return False
+    if last_ts.tzinfo is None:
+        last_ts = last_ts.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - last_ts) < timedelta(hours=hours)
+
+
+def _next_revive_name(current_name: str) -> str:
+    """T028 — generate a fresh instance NAME for a revived strategy.
+
+    executor.get_trade_history()/recent_realized_pnl/_live_edge_stats are all
+    keyed by strategy NAME (paper_executor.py — not in this task's allowed
+    files). Renaming the SAME DB row (same `id`, so PromotionEventRecord audit
+    history via strategy_id stays unbroken) is how the live-edge-stats RESET
+    is achieved with zero executor changes: a fresh name has zero trade
+    history, so total_trades/total_pnl/recent_pnl/edge_confidence_score all
+    read back as zero — genuinely OBSERVATION tier, not a relabeled veteran.
+    Pre-revive performance stays queryable under the old name for audit.
+    Idempotent suffix counter (vwap-btc -> vwap-btc-r1 -> vwap-btc-r2 ...).
+    """
+    m = re.search(r"-r(\d+)$", current_name)
+    if m:
+        base = current_name[: m.start()]
+        n = int(m.group(1)) + 1
+    else:
+        base = current_name
+        n = 1
+    return f"{base}-r{n}"
 
 
 def _auto_deploy_winners(db, orchestrator):
@@ -1158,6 +1258,7 @@ async def lifespan(app: FastAPI):
                 # AND negative posterior mean, with enough trades) the pnl-gate is slow to
                 # catch is unioned in, to shed the loser tail faster. Winners excluded;
                 # a wide-CI probe (gridfib, prob 0.59) is NOT a confident loser -> kept.
+                _cull_reason_tag: dict = {}  # name -> tag, for accurate lifecycle logging below
                 try:
                     _cpost = _posterior_scores(executor, regime_detector, running, window=30)
                 except Exception:  # noqa: BLE001 - cull must fall back to the pnl gate, never crash
@@ -1169,7 +1270,39 @@ async def lifespan(app: FastAPI):
                             and _pp.get("posterior_mean_edge", 0.0) < 0
                             and _pp.get("n_own", 0) >= CULL_MIN_TRADES):
                         _to_cull.append(r.name)
+                        _cull_reason_tag[r.name] = "posterior_loser"
 
+                # T028 zombie killer: conf~0 after a real sample (>=N trades) = no
+                # discernible live edge either way — cull even if pnl is still
+                # above CULL_MIN_PNL (a flat/breakeven bleeder of opportunity cost).
+                # Same confidence math as the compounder (edge_confidence on the
+                # live Wilson-lower-bound win rate) so it agrees with sizing.
+                if hasattr(executor, "_live_edge_stats"):
+                    for r in running:
+                        if r.name in _WINNER_SET or r.name in _to_cull:
+                            continue
+                        if _stats.get(r.name, {}).get("trades", 0) < CULL_ZOMBIE_MIN_TRADES:
+                            continue
+                        try:
+                            _zwr, _zpayoff, _zn, _zwr_lo, _ = executor._live_edge_stats(r.name)
+                        except Exception:
+                            continue
+                        if edge_confidence(_zn, _zwr_lo, _zpayoff) <= CULL_ZOMBIE_MAX_CONF:
+                            _to_cull.append(r.name)
+                            _cull_reason_tag[r.name] = "zombie_no_edge"
+
+                if not _to_cull:
+                    return
+
+                # T028 ANTI-FLAP: a strategy that was just revived (or culled) stays
+                # untouched within the cooldown window — never re-cull a fresh
+                # OBSERVATION-tier revival on its first noisy trades.
+                _by_name_all = {r.name: r for r in running}
+                _to_cull = [
+                    _n for _n in _to_cull
+                    if (_by_name_all.get(_n) is None
+                        or not _lifecycle_in_cooldown(_kdb, _by_name_all[_n].id, REVIVE_COOLDOWN_HOURS))
+                ]
                 if not _to_cull:
                     return
 
@@ -1196,7 +1329,7 @@ async def lifespan(app: FastAPI):
                     _pnl = _m.get("pnl", 0.0)
                     _trd = _m.get("trades", 0)
                     _wr = _m.get("win_rate", 0.0)
-                    _reason = (
+                    _reason = _cull_reason_tag.get(_name) or (
                         "pnl<=min" if _pnl <= CULL_MIN_PNL else "winrate<min"
                     )
                     # Exact reversible stop sequence from /strategies/{name}/stop.
@@ -1219,6 +1352,16 @@ async def lifespan(app: FastAPI):
                             )
                     _inst.status = "stopped"
                     _kdb.commit()
+                    try:
+                        _record_lifecycle_event(
+                            _kdb, strategy_type=_inst.strategy_type, strategy_id=_inst.id,
+                            reason=f"lifecycle_culled_{_reason}", promoted=False,
+                            before_params=dict(_inst.params or {}), after_params={},
+                            before_metrics={"pnl": _pnl, "trades": _trd, "win_rate": _wr},
+                            after_metrics={},
+                        )
+                    except Exception as _le:
+                        logger.warning("Cull: lifecycle event persist failed for %s: %s", _name, _le)
                     _culled += 1
                     logger.warning(
                         "Bleeder-cull: stopped %s | pnl=$%.2f | trades=%d | win_rate=%.2f | reason=%s",
@@ -1232,6 +1375,175 @@ async def lifespan(app: FastAPI):
                 _kdb.close()
         except Exception as _ke:
             logger.error("Cull job error: %s", _ke)
+
+    async def _revive_job():
+        """T028 — a running/stopped Strategy state is never terminal.
+
+        Continuously re-evaluates the STOPPED set (this IS the graveyard sweep
+        — it naturally walks the whole stopped pool over successive ticks
+        since REVIVE_MAX_PER_RUN bounds compute per tick):
+          1) REVIVE-BY-REGIME (cheap, no optimizer): existing params now fit
+             the CURRENT regime (regime_detector.should_trade) -> re-enable
+             unchanged.
+          2) REVIVE-BY-RETUNE (deterministic Optuna only, PARAM_SPACES types
+             only): re-optimize against recent data via the EXISTING RBI
+             pipeline/gate (lookback_days=90, n_trials=100) -> re-enable ONLY
+             if it clears the SAME walk-forward promotion gate live promotions
+             use (0.14 commission, held-out OOS split).
+        Either path re-enters at OBSERVATION tier ($REVIVE_BASE_USD, 1x
+        leverage) with a FRESH live-evidence window (see _next_revive_name) —
+        never sized off the reviving backtest (ADR-0001). Anti-flap cooldown
+        (DB-persisted) blocks repeat attempts on a strategy that just
+        culled/revived/failed-retune within REVIVE_COOLDOWN_HOURS.
+        """
+        try:
+            if not (paper_mode and executor and orchestrator):
+                return
+            from .database import SessionLocal as _RSL
+            from src.api.routes.rbi_optimize import _get_or_create_pipeline
+            from src.strategies.base_strategy import StrategyConfig, StrategyTier
+            from src.strategies.registry import list_strategies
+
+            async def _do_revive(db, inst, *, new_params: dict, reason: str, metrics: dict) -> bool:
+                old_name = inst.name
+                if hasattr(executor, "open_position_count") and executor.open_position_count(old_name) > 0:
+                    logger.warning("Revive: skipping %s — still shows an open position (should be 0 when stopped)", old_name)
+                    return False
+                before_params = dict(inst.params or {})
+                new_name = _next_revive_name(old_name)
+                inst.name = new_name
+                inst.params = new_params
+                inst.size_usd = REVIVE_BASE_USD
+                inst.leverage = 1  # OBSERVATION tier (confidence_ladder.py: <10 live trades -> 1x)
+                inst.total_trades = 0
+                inst.winning_trades = 0
+                inst.losing_trades = 0
+                inst.total_pnl = 0.0
+                inst.max_drawdown = 0.0
+                inst.edge_confidence_score = 0.0
+                inst.error_message = None
+                inst.status = "running"
+                inst.enabled = True
+                inst.started_at = datetime.now(timezone.utc)
+                db.commit()
+                try:
+                    config = StrategyConfig(
+                        name=new_name, symbol=inst.symbol, tier=StrategyTier.A,
+                        timeframe=inst.timeframe, leverage=1, size_usd=REVIVE_BASE_USD,
+                        target_pct=inst.target_pct, max_loss_pct=inst.max_loss_pct,
+                        lookback_days=inst.lookback_days, interval_seconds=inst.interval_seconds,
+                        enabled=True, params=new_params,
+                    )
+                    orchestrator.add_strategy(new_name, inst.strategy_type, config)
+                    await orchestrator.start_strategy(new_name)
+                except Exception as _se:
+                    logger.error("Revive: orchestrator start failed for %s (DB still updated): %s", new_name, _se)
+                _record_lifecycle_event(
+                    db, strategy_type=inst.strategy_type, strategy_id=inst.id,
+                    reason=reason, promoted=True,
+                    before_params=before_params, after_params=new_params,
+                    before_metrics={"old_name": old_name}, after_metrics=metrics,
+                )
+                return True
+
+            db = _RSL()
+            try:
+                stopped = db.query(models.StrategyInstance).filter(
+                    models.StrategyInstance.status == "stopped"
+                ).all()
+                if not stopped:
+                    return
+
+                available_types = {s["strategy_type"] for s in list_strategies()}
+                processed = 0
+                revived = 0
+                for inst in stopped:
+                    if processed >= REVIVE_MAX_PER_RUN:
+                        break
+                    if inst.strategy_type not in available_types:
+                        continue
+                    if _lifecycle_in_cooldown(db, inst.id, REVIVE_COOLDOWN_HOURS):
+                        continue  # anti-flap: recently culled/revived/rejected — wait out the window
+                    processed += 1
+
+                    # ---- REVIVE-BY-REGIME first (no optimizer cost) ----
+                    # should_trade() degrades to True when there's NO regime data yet
+                    # (safe default for live ENTRY gating — don't block trading on a
+                    # cold detector). That default is too permissive for a one-way
+                    # revive decision, so require an ACTUAL current regime reading
+                    # before trusting "fits the regime" (mirrors the T012 cold-regime
+                    # guard already used elsewhere in this file).
+                    regime_fit = False
+                    _regime_info = {}
+                    if regime_detector is not None:
+                        try:
+                            _regime_info = regime_detector.get_current_regime(inst.symbol) or {}
+                            regime_fit = bool(_regime_info) and regime_detector.should_trade(inst.symbol, inst.strategy_type)
+                        except Exception:
+                            regime_fit = False
+                    if regime_fit:
+                        if await _do_revive(
+                            db, inst, new_params=dict(inst.params or {}),
+                            reason="lifecycle_revived_regime",
+                            metrics={"regime": _regime_info.get("regime", "unknown")},
+                        ):
+                            revived += 1
+                            logger.warning(
+                                "Revive-by-regime: re-enabled %s -> %s (%s/%s) — existing params fit current regime %s",
+                                inst.id, inst.name, inst.strategy_type, inst.symbol, _regime_info.get("regime", "unknown"),
+                            )
+                        continue
+
+                    # ---- REVIVE-BY-RETUNE (deterministic Optuna; PARAM_SPACES types only) ----
+                    if inst.strategy_type not in PARAM_SPACES:
+                        logger.info(
+                            "Revive: skipping retune for %s — %s has no PARAM_SPACES entry (non-optimizable type)",
+                            inst.name, inst.strategy_type,
+                        )
+                        continue
+
+                    pipeline = _get_or_create_pipeline(inst.strategy_type)
+                    try:
+                        result = await pipeline.run_revive_eligibility(
+                            strategy_type=inst.strategy_type, symbol=inst.symbol,
+                            timeframe=inst.timeframe, lookback_days=REVIVE_LOOKBACK_DAYS,
+                            n_trials=REVIVE_N_TRIALS,
+                        )
+                    except Exception as _re_exc:
+                        logger.warning("Revive-by-retune: optimizer error for %s: %s", inst.name, _re_exc)
+                        continue
+
+                    if result["eligible"]:
+                        if await _do_revive(
+                            db, inst, new_params=result["params"],
+                            reason="lifecycle_revived_retune", metrics=result["metrics"],
+                        ):
+                            revived += 1
+                            logger.warning(
+                                "Revive-by-retune: re-enabled %s -> %s (%s/%s) — re-optimized params cleared the walk-forward gate",
+                                inst.id, inst.name, inst.strategy_type, inst.symbol,
+                            )
+                    else:
+                        _record_lifecycle_event(
+                            db, strategy_type=inst.strategy_type, strategy_id=inst.id,
+                            reason="lifecycle_revive_retune_rejected", promoted=False,
+                            before_params=dict(inst.params or {}), after_params={},
+                            before_metrics={}, after_metrics=result["metrics"],
+                        )
+                        logger.info(
+                            "Revive-by-retune: %s stays stopped — retune failed gate (%s)",
+                            inst.name, result["metrics"].get("failing_criterion", "unknown"),
+                        )
+
+                if processed:
+                    logger.info(
+                        "Revive job: examined %d/%d stopped strategies, revived %d",
+                        processed, len(stopped), revived,
+                    )
+            finally:
+                db.close()
+        except Exception as _rve:
+            logger.error("Revive job error: %s", _rve)
 
     from datetime import datetime as _dt
     _scheduler.add_job(
@@ -1248,12 +1560,20 @@ async def lifespan(app: FastAPI):
         replace_existing=True,
         next_run_time=_dt.now() + timedelta(minutes=3),
     )
+    # T028 revive: staggered after compounder + cull (slower cadence — retune
+    # is expensive) so the first tick doesn't contend with both on cold boot.
+    _scheduler.add_job(
+        _revive_job, "interval", minutes=REVIVE_INTERVAL_MIN,
+        id="strategy_revive",
+        replace_existing=True,
+        next_run_time=_dt.now() + timedelta(minutes=6),
+    )
 
     _scheduler.start()
     app.state.rbi_scheduler = _scheduler
     app.state.compound_initial_balance = _INITIAL_BALANCE
     app.state.compound_reserve_pct = _COMPOUND_RESERVE_PCT
-    logger.info("RBI scheduler started with %d jobs + compounder + bleeder-cull", len(_scheduler.get_jobs()) - 2)
+    logger.info("RBI scheduler started with %d jobs + compounder + bleeder-cull + revive", len(_scheduler.get_jobs()) - 3)
 
     # ── XsecCarryEngine (cross-sectional funding carry — standalone, regime-agnostic) ──
     xsec_engine = None

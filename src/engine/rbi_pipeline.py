@@ -411,6 +411,47 @@ class RBIPipeline:
         )
         return event
 
+    async def run_revive_eligibility(
+        self,
+        strategy_type: str,
+        symbol: str,
+        timeframe: str = "1h",
+        lookback_days: int = 90,
+        n_trials: int = 100,
+    ) -> dict:
+        """T028 REVIVE-BY-RETUNE: does a stopped strategy's re-optimized params
+        clear the SAME walk-forward promotion gate (held-out OOS split, 0.14
+        commission) as a live promotion?
+
+        Deliberately NOT run_cycle(): a stopped strategy has no incumbent live
+        record to protect, so there is no champion-challenger comparison here
+        — just "does the search find params that pass the gate on recent
+        data". Never touches the strategy record (no patch_strategy_fn call);
+        the caller decides re-enable + tier/size/stat-reset. Reuses the SAME
+        optimizer + gate as run_cycle (deterministic Optuna only — zero
+        LLM/Opus calls in this path, unlike the no-pass _adapt_param_space
+        branch of run_cycle which this method never reaches).
+
+        Returns {"eligible": bool, "params": dict|None, "metrics": dict}.
+        """
+        candidates = await self._optimizer.optimize(
+            strategy_type=strategy_type, symbol=symbol,
+            timeframe=timeframe, lookback_days=lookback_days, n_trials=n_trials,
+            param_space_override=self._adapted_spaces.get(strategy_type) or None,
+        )
+        passing = [c for c in candidates if self._optimizer._passes_promotion_gate(c)]
+        if not passing:
+            if candidates:
+                best_rejected = max(candidates, key=lambda c: c.composite_score)
+                failing = self._optimizer.gate_failure_reason(best_rejected) or "unknown"
+                metrics = _rejected_candidate_metrics(best_rejected, failing)
+            else:
+                metrics = {"failing_criterion": "no_candidates"}
+            return {"eligible": False, "params": None, "metrics": metrics}
+
+        best = passing[0]
+        return {"eligible": True, "params": best.params, "metrics": _challenger_metrics(best)}
+
     @property
     def run_count(self) -> int:
         return self._run_count
@@ -443,3 +484,58 @@ def build_rbi_job_specs(
             }
         )
     return specs
+
+
+if __name__ == "__main__":
+    # ponytail: smallest runnable check on run_revive_eligibility's branch
+    # logic (T028 revive-by-retune) — stubs the optimizer so it runs with no
+    # network/Optuna, asserting both the "clears the gate" and "rejected"
+    # paths return the contract the caller (main.py _revive_job) depends on.
+    import asyncio as _asyncio
+
+    class _StubCandidate:
+        def __init__(self, params, passes):
+            self.params = params
+            self.composite_score = 2.0 if passes else 1.0
+            self.out_sample_sharpe = 1.0
+            self.out_sample_profit_factor = 1.2
+            self.out_sample_win_rate = 0.55
+            self.out_sample_total_trades = 40
+            self.out_sample_max_drawdown = -0.1
+            self.out_sample_dsr = 0.5
+            self.cpcv_frac_positive = 0.6
+            self.lookback_days_used = 90
+            self._passes = passes
+
+    class _StubOptimizer:
+        def __init__(self, candidates):
+            self._candidates = candidates
+
+        async def optimize(self, **kwargs):
+            return self._candidates
+
+        def _passes_promotion_gate(self, c):
+            return c._passes
+
+        def gate_failure_reason(self, c):
+            return "oos_trades_floor"
+
+    async def _demo():
+        eligible = await RBIPipeline(
+            get_strategy_fn=None, patch_strategy_fn=None,
+            optimizer=_StubOptimizer([_StubCandidate({"a": 1}, True)]),
+        ).run_revive_eligibility("turtle", "BTC", "1h")
+        assert eligible["eligible"] is True
+        assert eligible["params"] == {"a": 1}
+
+        rejected = await RBIPipeline(
+            get_strategy_fn=None, patch_strategy_fn=None,
+            optimizer=_StubOptimizer([_StubCandidate({"a": 2}, False)]),
+        ).run_revive_eligibility("turtle", "BTC", "1h")
+        assert rejected["eligible"] is False
+        assert rejected["params"] is None
+        assert rejected["metrics"]["failing_criterion"] == "oos_trades_floor"
+
+        print("rbi_pipeline.run_revive_eligibility self-check OK")
+
+    _asyncio.run(_demo())
