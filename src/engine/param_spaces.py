@@ -4,6 +4,17 @@ from typing import Any
 # Search space definition per strategy type.
 # Format: param_name -> ("float", low, high) | ("int", low, high) | ("categorical", [values])
 PARAM_SPACES: dict[str, dict[str, tuple]] = {
+    # T029(b): the validated dual-MA trend edge (THE proven OOS edge,
+    # alpha-doctrine-snowball) had no PARAM_SPACES entry -> RBI scheduler
+    # (api/main.py _supported_types) and revive-by-retune both silently
+    # skip it forever, leaving the 15 live trend_cross instances un-tunable
+    # and un-promotable. Disjoint fast/slow ranges avoid fast>=slow (which
+    # _cross_sign() treats as "no signal" -- a wasted trial, not a crash).
+    "trend_cross": {
+        "fast_period": ("int", 10, 40),
+        "slow_period": ("int", 45, 90),
+        "ma_type": ("categorical", ["sma", "ema"]),
+    },
     "mean_reversion": {
         "reversion_target_pct": ("float", 0.008, 0.025),
         "max_loss_pct": ("float", -0.020, -0.005),
