@@ -258,12 +258,22 @@ async def lifespan(app: FastAPI):
     class _DropBacktestSimLogs(logging.Filter):
         def filter(self, record):
             return not record.name.startswith("strategy.backtest-")
-    _bt_filter = _DropBacktestSimLogs()
-    _bt_handlers = list(logging.getLogger().handlers)
-    if logging.lastResort is not None:
-        _bt_handlers.append(logging.lastResort)
-    for _bt_h in _bt_handlers:
-        _bt_h.addFilter(_bt_filter)
+    # Own the "strategy" logger's output: route ALL strategy.* records through a
+    # single handler that drops backtest sims, and stop propagation so they don't
+    # also reach root/lastResort unfiltered. Robust to root-handler timing — every
+    # strategy.<name> logger propagates to this "strategy" parent. Real-strategy CB
+    # logs still emit here; only strategy.backtest-* is dropped.
+    _strat_logger = logging.getLogger("strategy")
+    _already = any(
+        f.__class__.__name__ == "_DropBacktestSimLogs"
+        for h in _strat_logger.handlers for f in h.filters
+    )
+    if not _already:
+        _bt_handler = logging.StreamHandler()
+        _bt_handler.setFormatter(logging.Formatter("%(levelname)s:%(name)s:%(message)s"))
+        _bt_handler.addFilter(_DropBacktestSimLogs())
+        _strat_logger.addHandler(_bt_handler)
+        _strat_logger.propagate = False
 
     orchestrator = None
     risk_controller = None
