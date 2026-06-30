@@ -39,23 +39,27 @@ from src.strategies.base_strategy import (
 logger = logging.getLogger(__name__)
 
 
-def significance_weighted_score(pnls: List[float], k: int = 10) -> float:
-    """Rank score for a recent-trade PnL sample (T009 conditional-edge ranker).
+def significance_weighted_score(pnls: List[float], z: float = 1.64) -> float:
+    """Lower confidence bound on per-trade realized PnL (T009 conditional-edge ranker).
 
-    t-stat-like (mean over standard error) shrunk by sample size n/(n+k), so a
-    thin lucky sample can't outrank a high-sample edge: a 4-trade +19 fluke
-    scores BELOW an 80-trade consistent +0.5 edge. Returns 0 for an empty sample.
+    A PESSIMISTIC edge estimate: mean - z*se. Thin OR noisy samples are penalised
+    hard via the standard error, so a 4-trade +19 fluke dominated by one big win
+    (large se) ranks BELOW a steady 30-trade small edge — which multiplicative
+    sample-shrinkage could not achieve (its limit ratio ~ n1/n2). n<2 has no
+    variance estimate, so it is shrunk near 0 (sign preserved) as low-confidence.
+    Empty sample -> 0.
 
-    ponytail: the +1.0 is a $-unit regularizer on the standard error (keeps a
-    near-zero-variance small sample from blowing up); k is the shrinkage
-    strength — raise k if thin samples still rank too high.
+    ponytail: z=1.64 (~one-sided 95%); raise z to distrust small/noisy samples
+    harder. Score is in $-per-trade; only relative order matters for ranking.
     """
     n = len(pnls)
     if n == 0:
         return 0.0
     mean = sum(pnls) / n
-    se = (statistics.pstdev(pnls) / math.sqrt(n)) if n >= 2 else abs(mean)
-    return (mean / (se + 1.0)) * (n / (n + k))
+    if n < 2:
+        return mean / (abs(mean) + 1.0) * 0.1  # one trade: near-zero, low confidence
+    se = statistics.pstdev(pnls) / math.sqrt(n)
+    return mean - z * se
 
 
 _OBSERVATION_FLOOR = 0.10  # fresh/edgeless strategies size at 10% until confidence accrues
@@ -1202,7 +1206,11 @@ if __name__ == "__main__":
     _fluke = [0.2, 0.3, 18.5, 0.28]  # 4 trades, +19.28 total, one big lucky win
     assert significance_weighted_score(_consistent) > significance_weighted_score(_fluke), \
         "thin fluke must not outrank high-sample edge"
+    # the exact gridfib case: a steady 30-trade small edge must outrank a noisy
+    # 4-trade big-mean sample (the bug T009 verification caught).
+    assert significance_weighted_score([0.1] * 30) > significance_weighted_score([0.0, 0.0, 19.0, 0.0]), \
+        "steady high-sample edge must outrank a noisy thin big-mean fluke"
     assert significance_weighted_score([]) == 0.0
-    assert abs(significance_weighted_score([1.0])) < 1.0  # single trade barely counts
+    assert abs(significance_weighted_score([1.0])) < 0.2  # single trade -> near zero
     assert significance_weighted_score([-0.5] * 50) < 0.0  # a real loser scores negative
     print("paper_executor self-checks OK")
