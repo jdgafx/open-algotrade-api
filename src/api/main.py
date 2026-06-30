@@ -79,6 +79,7 @@ PROVEN_REALIZED_CONF = float(os.getenv("PROVEN_REALIZED_CONF", "0.5"))  # confid
 EXPLORE_MIN_USD = float(os.getenv("EXPLORE_MIN_USD", "25.0"))        # exploration floor — never starve a maybe-edge to 0
 EXPLORE_UPSIDE_REF = float(os.getenv("EXPLORE_UPSIDE_REF", "0.8"))   # ci_high ($/trade) at which exploration reaches full non-winner size
 ALLOC_RAMP_UP_MAX = float(os.getenv("ALLOC_RAMP_UP_MAX", "1.5"))     # max size INCREASE per compound cycle (no 10x jumps); cuts apply immediately
+POSTERIOR_WINNER_PROB = float(os.getenv("POSTERIOR_WINNER_PROB", "0.9"))  # prob_edge >= this (and +mean) promotes an instance into the winner tier — the posterior is a better thin-sample filter than trades>=6 (funding-arb 4t prob 0.998 grows; gridfib 4t prob 0.59 does not). Ramp keeps the grow gradual; $500-unproven cap still bounds it.
 
 
 def _winner_cap_usd(balance: float, confidence: float,
@@ -922,6 +923,22 @@ async def lifespan(app: FastAPI):
                               else lambda _n: (0.0, 0))
                 _WINNER_SET = _defrosted_winner_set(_STATIC_WINNERS, dynamic_winners, _recent_fn)
 
+                # T010: conditional-edge posterior — drives BOTH winner promotion and
+                # per-instance sizing. A high-confidence edge the crude trades>=6 gate
+                # misses (funding-arb 4t, prob 0.998) is promoted into the winner tier;
+                # a noisy thin sample (gridfib 4t, prob 0.59) is not.
+                try:
+                    _post = _posterior_scores(executor, regime_detector, running, window=30)
+                except Exception as _pe:  # noqa: BLE001 - allocation must fall back, never crash the job
+                    logger.warning("Compounder: posterior scores unavailable (%s); flat sizing", _pe)
+                    _post = {}
+                _posterior_winners = {
+                    r.name for r in running
+                    if _post.get(r.name, {}).get("prob_edge", 0.0) >= POSTERIOR_WINNER_PROB
+                    and _post.get(r.name, {}).get("posterior_mean_edge", 0.0) > 0
+                }
+                _WINNER_SET = _WINNER_SET | _posterior_winners
+
                 # Winners-first: concentrate investable capital on proven winners,
                 # but the per-winner share is now CONFIDENCE-GOVERNED (U6 / R5), not
                 # flat. Equal-split is the upper bound (so few winners don't each
@@ -941,14 +958,6 @@ async def lifespan(app: FastAPI):
                 _COMPOUND_MIN_TRADES = 100
                 _COMPOUND_MAX_UNPROVEN = 500.0
 
-                # T010: conditional-edge posterior per instance — drives BOTH the
-                # winner tilt (prob_edge) and the non-winner exploration stake (ci_high).
-                try:
-                    _post = _posterior_scores(executor, regime_detector, running, window=30)
-                except Exception as _pe:  # noqa: BLE001 - allocation must fall back, never crash the job
-                    logger.warning("Compounder: posterior scores unavailable (%s); using flat sizing", _pe)
-                    _post = {}
-
                 for _cinst in running:
                     _p = _post.get(_cinst.name, {})
                     _prob = float(_p.get("prob_edge", 0.5))
@@ -966,10 +975,12 @@ async def lifespan(app: FastAPI):
                             _rp, _rn = executor.recent_realized_pnl(_cinst.name)
                             if _rn >= DEFREEZE_MIN_RECENT_TRADES and _rp > 0:
                                 _conf = max(_conf, PROVEN_REALIZED_CONF)
-                        # T010: tilt the winner cap by posterior confidence — a high
-                        # prob_edge winner grows toward the cap, a marginal one stays
-                        # smaller (blend, so the existing confidence machinery still holds).
-                        _conf = _conf * (0.5 + 0.5 * _prob)
+                        # T010: drive the winner cap by the POSTERIOR confidence too —
+                        # max(Wilson-LB, posterior). A high-prob thin edge (funding-arb,
+                        # prob 0.998 -> conf ~1.0) grows even when its Wilson-LB win-rate
+                        # confidence is still low on few trades; the ramp keeps it gradual
+                        # and the $500-unproven cap bounds it.
+                        _conf = max(_conf, (_prob - 0.5) / 0.5)
                         new_size = min(_equal_split, _winner_cap_usd(balance, _conf))
                     else:
                         # T010 Thompson exploration: non-winner stake ∝ UPSIDE (ci_high),
