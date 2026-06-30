@@ -169,10 +169,11 @@ def get_history():
 
 @router.post("/rollback/{strategy_type}")
 async def rollback(strategy_type: str, strategy_id: int):
-    """Revert a strategy to its params before the last RBI promotion."""
-    pipeline = _pipelines.get(strategy_type)
-    if not pipeline:
-        raise HTTPException(status_code=404, detail=f"No RBI history for {strategy_type}")
+    """Revert a strategy to its params before the last RBI promotion.
+    Uses _get_or_create_pipeline (not a raw dict lookup) so a cold boot —
+    before this type's jittered scheduler job has fired yet — still rebuilds
+    rollback params from the persistent DB instead of false-404ing."""
+    pipeline = _get_or_create_pipeline(strategy_type)
     prev_params = pipeline.get_rollback_params(strategy_type)
     if not prev_params:
         raise HTTPException(status_code=404, detail=f"No rollback params stored for {strategy_type}")
