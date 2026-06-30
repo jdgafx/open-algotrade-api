@@ -1596,7 +1596,7 @@ def get_ws_status(request: Request):
 
 
 @app.get("/orchestrator/debug/{name}")
-def get_orchestrator_debug(name: str, request: Request):
+async def get_orchestrator_debug(name: str, request: Request):
     """Ground-truth view of one strategy instance inside the LIVE orchestrator.
 
     Railway stdout is 100% drowned by backtest CB spam, so logs can't answer
@@ -1672,6 +1672,38 @@ def get_orchestrator_debug(name: str, request: Request):
             out["global"]["current_balance_error"] = str(be)
     except Exception as e:  # noqa: BLE001
         out["global_error"] = str(e)
+
+    # Executor position truth — the orchestrator's run_iteration takes the
+    # should_exit branch whenever get_position() is non-empty, so a position the
+    # executor reports but the active_positions count doesn't (keying desync)
+    # would freeze an always-in strategy in should_exit forever (never enters).
+    try:
+        ex = getattr(orch, "executor", None)
+        strat = getattr(orch, "_strategies", {}).get(name)
+        sym = getattr(getattr(strat, "config", None), "symbol", None) if strat else None
+        ex_out = {"symbol_used": sym}
+        if ex is not None and sym is not None and hasattr(ex, "get_position"):
+            pos = await ex.get_position(sym, strategy_name=name)
+            ex_out["get_position"] = pos
+            ex_out["has_position_truth"] = bool(pos and pos.get("size", 0) != 0)
+        if ex is not None and hasattr(ex, "open_position_count"):
+            ex_out["open_position_count"] = ex.open_position_count(name)
+        # Raw _positions table: key -> stored .strategy_name (exposes a key/attr
+        # mismatch where get_position finds by key but the count filters by attr).
+        raw = getattr(ex, "_positions", None)
+        if isinstance(raw, dict):
+            ex_out["positions_keys"] = {
+                k: {"strategy_name": getattr(v, "strategy_name", None),
+                    "size": getattr(v, "size", None),
+                    "symbol": getattr(v, "symbol", None)}
+                for k, v in raw.items()
+                if name in str(k) or getattr(v, "strategy_name", None) == name
+                or (sym and getattr(v, "symbol", None) == sym)
+            }
+            ex_out["positions_total"] = len(raw)
+        out["executor"] = ex_out
+    except Exception as e:  # noqa: BLE001
+        out["executor_error"] = str(e)
 
     return out
 
