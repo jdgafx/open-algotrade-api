@@ -1099,31 +1099,33 @@ class PaperTradingExecutor:
         }
 
     def get_execution_stats(self) -> Dict[str, Any]:
-        """Get paper trading execution statistics."""
-        if not self._execution_history:
-            return {
-                "mode": "paper",
-                "total_executions": 0,
-                "success_rate": 0,
-                "total_pnl": 0,
-                "balance": self.balance,
-                "initial_balance": self.initial_balance,
-            }
+        """Get paper trading execution statistics.
 
-        successes = sum(1 for r in self._execution_history if r.success)
-        total_pnl = sum(r.realized_pnl for r in self._execution_history)
+        ponytail: realized PnL / trades / positions come from DURABLE state —
+        self._trades is rehydrated from the ledger on boot (load_state:367-369)
+        and self._positions is restored too, so /health survives redeploys.
+        _execution_history is session-local and only drives success_rate (it
+        resets each boot, which is fine). Previously the whole dict was derived
+        from _execution_history, so total_realized_pnl reset to 0 every redeploy.
+        """
+        exits = [t for t in self._trades if t.action == "exit"]
+        total_realized_pnl = sum(t.pnl for t in exits)
 
         drawdown = 0
         if self.peak_balance > 0:
             drawdown = ((self.peak_balance - self.balance) / self.peak_balance) * 100
 
+        n_exec = len(self._execution_history)
+        successes = sum(1 for r in self._execution_history if r.success)
+
         return {
             "mode": "paper",
-            "total_executions": len(self._execution_history),
+            "total_executions": n_exec,
             "successful": successes,
-            "failed": len(self._execution_history) - successes,
-            "success_rate": round(successes / len(self._execution_history) * 100, 1),
-            "total_realized_pnl": round(total_pnl, 2),
+            "failed": n_exec - successes,
+            "success_rate": round(successes / n_exec * 100, 1) if n_exec else 0,
+            "total_realized_pnl": round(total_realized_pnl, 2),
+            "total_pnl": round(total_realized_pnl, 2),  # alias: legacy consumers of the old degraded shape
             "active_positions": len(self._positions),
             "balance": round(self.balance, 2),
             "initial_balance": self.initial_balance,

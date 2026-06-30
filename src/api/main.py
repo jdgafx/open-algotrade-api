@@ -160,8 +160,11 @@ def _auto_deploy_winners(db, orchestrator):
     To re-enable a strategy: add it back here AND remove from purge list below.
     """
     winners = [
-        # ── SURVIVOR: flip-flop-btc — SuperTrend always-in-market, confirmed live winner ──
-        {"name": "flip-flop-btc", "strategy_type": "flip_flop", "symbol": "BTC", "timeframe": "1h", "size_usd": 100, "leverage": 4, "params": {"atr_period": 10, "multiplier": 3.0, "cooldown_seconds": 0, "max_trades_per_hour": 24, "min_signal_strength": 0.80}},
+        # ── DE-FROZEN 2026-06-29 (T006): flip-flop-btc removed — the durable ledger
+        #    shows -82.25 total / -20.67 recent / 4-of-47 wins (8.5%). A frozen
+        #    "winner" that has decayed into the book's worst bleeder is exactly the
+        #    stale-winner problem; it is culled + disabled and must NOT reseed here.
+        #    flip-flop-btc-v2 (improved R:R + ADX filter) remains as the flip_flop bet.
         # ── SURVIVOR: vwap-btc — VWAP probability bias, confirmed live winner ──
         {"name": "vwap-btc", "strategy_type": "vwap_bot", "symbol": "BTC", "timeframe": "15m", "size_usd": 100, "leverage": 3, "params": {"vwap_bias_long": 0.7, "vwap_bias_short": 0.3, "min_vwap_distance": 0.0008, "cooldown_seconds": 300, "max_trades_per_hour": 3, "min_signal_strength": 0.5}},
         # ── SURVIVOR: closed-mkt-btc — overnight/weekend breakout, NYSE-close gate ──
@@ -246,6 +249,22 @@ def _await_xsec_task(task):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize all services on startup, clean up on shutdown."""
+    # ponytail: optimizer CPCV sims (backtest-<type>-<uuid>, backtester.py:99) trip
+    # their circuit breaker on simulated losing streaks and flood Railway at CRITICAL
+    # under logger "strategy.backtest-*" (~20/s), drowning ALL real observability.
+    # Drop them at the HANDLER level — child-logger records skip ancestor-logger
+    # filters, so a filter on the "strategy"/root logger alone wouldn't catch them.
+    # Real-strategy CB logs (strategy.<name>) still pass; does NOT throttle RBI.
+    class _DropBacktestSimLogs(logging.Filter):
+        def filter(self, record):
+            return not record.name.startswith("strategy.backtest-")
+    _bt_filter = _DropBacktestSimLogs()
+    _bt_handlers = list(logging.getLogger().handlers)
+    if logging.lastResort is not None:
+        _bt_handlers.append(logging.lastResort)
+    for _bt_h in _bt_handlers:
+        _bt_h.addFilter(_bt_filter)
+
     orchestrator = None
     risk_controller = None
     liquidation_tracker = None
