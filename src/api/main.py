@@ -992,6 +992,13 @@ async def lifespan(app: FastAPI):
                         # and the $500-unproven cap bounds it.
                         _conf = max(_conf, (_prob - 0.5) / 0.5)
                         new_size = min(_equal_split, _winner_cap_usd(balance, _conf))
+                        # T012 continuous demote: scale the winner size by where prob_edge
+                        # sits in the demote..promote band, so a band winner (conspop 0.749)
+                        # lands mid-size and full $500 is reserved for prob>=0.9 (funding-arb).
+                        # Size is now a continuous function of the posterior across the range.
+                        _pf = (_prob - POSTERIOR_DEMOTE_PROB) / (POSTERIOR_WINNER_PROB - POSTERIOR_DEMOTE_PROB)
+                        _pf = min(max(_pf, 0.0), 1.0)
+                        new_size = max(EXPLORE_MIN_USD, new_size * _pf)
                     else:
                         # T010 Thompson exploration: non-winner stake ∝ UPSIDE (ci_high),
                         # floored at EXPLORE_MIN_USD (never 0 — a real-but-young edge keeps
