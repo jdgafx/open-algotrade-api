@@ -934,6 +934,13 @@ async def lifespan(app: FastAPI):
                 except Exception as _pe:  # noqa: BLE001 - allocation must fall back, never crash the job
                     logger.warning("Compounder: posterior scores unavailable (%s); flat sizing", _pe)
                     _post = {}
+                # T012: skip sizing while regimes are COLD (e.g. the boot run right after a
+                # redeploy, before the HMM fits) — the posterior would mis-size off "unknown"
+                # pooling and could cold-promote a loser to $500 for a cycle. Keep last-good
+                # DB sizes until the detector warms; the next 15-min cycle sizes for real.
+                if _post and not any(v.get("current_regime", "unknown") != "unknown" for v in _post.values()):
+                    logger.info("Compounder: regimes cold (0 fitted) — keeping last-good sizes this cycle")
+                    return
                 _posterior_winners = {
                     r.name for r in running
                     if _post.get(r.name, {}).get("prob_edge", 0.0) >= POSTERIOR_WINNER_PROB
