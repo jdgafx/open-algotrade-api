@@ -39,6 +39,14 @@ from src.strategies.base_strategy import (
 logger = logging.getLogger(__name__)
 
 
+# Skeptical prior variance for a (strategy×symbol) with NO same-regime siblings:
+# N(0, _PRIOR_EDGE_VAR) on per-trade edge (~±0.8/trade at 90%). Anchors a thin,
+# uncorroborated, HIGH-variance sample toward "no edge" so a lucky spike can't rank
+# #1; a thin LOW-variance (consistent) sample still overrides it via its own precision.
+# ponytail: single global knob — make it regime/strategy-specific only if it bites.
+_PRIOR_EDGE_VAR = 0.25
+
+
 def posterior_edge(own_pnls: List[float], pool_pnls: List[float], kappa: float = 10.0) -> Dict[str, float]:
     """Empirical-Bayes posterior on a (strategy×symbol)'s per-trade edge (T009).
 
@@ -62,11 +70,20 @@ def posterior_edge(own_pnls: List[float], pool_pnls: List[float], kappa: float =
     own = list(own_pnls)
     pool = list(pool_pnls)
     n = len(own)
-    sigma2_pool = statistics.pvariance(pool) if len(pool) >= 2 else 1.0
-    sigma2_own = statistics.pvariance(own) if n >= 2 else sigma2_pool
+    sigma2_pool = statistics.pvariance(pool) if len(pool) >= 2 else 0.0
+    sigma2_own = statistics.pvariance(own) if n >= 2 else (sigma2_pool or 1.0)
     sigma2_eff = max(sigma2_own, 0.5 * sigma2_pool, 1e-3)  # over-confidence floor
-    mu0 = (sum(pool) / len(pool)) if pool else 0.0          # prior mean = family edge (0 if none)
-    tau2 = (sigma2_pool / kappa) if pool else 1e6           # no family -> flat prior
+    if pool:
+        mu0 = sum(pool) / len(pool)            # prior centred on the regime-family edge
+        tau2 = max(sigma2_pool, 1e-3) / kappa  # ~kappa pseudo-trades of family evidence
+    else:
+        # No same-regime siblings -> SKEPTICAL prior N(0, _PRIOR_EDGE_VAR): assume no
+        # edge until the instance's own trades prove it. A thin HIGH-variance sample
+        # (one lucky spike) then shrinks toward 0; a thin CONSISTENT sample (low
+        # variance -> high own precision) still posts a high posterior. Without this
+        # a no-family fluke trusts its raw mean and ranks #1.
+        mu0 = 0.0
+        tau2 = _PRIOR_EDGE_VAR
     xbar = (sum(own) / n) if n else mu0
     prec_prior = 1.0 / tau2
     prec_data = (n / sigma2_eff) if n else 0.0
@@ -1239,4 +1256,12 @@ if __name__ == "__main__":
     # no data + no family -> neutral.
     _none = posterior_edge([], [])
     assert abs(_none["prob_edge"] - 0.5) < 1e-9 and abs(_none["posterior_mean_edge"]) < 1e-9
+    # NO-FAMILY skeptical prior: a thin HIGH-variance lucky spike must shrink toward
+    # 0 (not rank #1), while a thin CONSISTENT edge still posts high confidence.
+    _spike = posterior_edge(_noisy4, [])          # gridfib with no same-regime siblings
+    assert _spike["posterior_mean_edge"] < 1.0 and _spike["prob_edge"] < 0.75, \
+        "uncorroborated noisy spike must not post a confident edge"
+    _steady4 = posterior_edge([1.85, 1.9, 1.8, 1.86], [])  # funding-arb-like: 4 consistent
+    assert _steady4["prob_edge"] > 0.9, "a consistent thin sample is still trustworthy"
+    assert _steady4["prob_edge"] > _spike["prob_edge"]
     print("paper_executor self-checks OK")
