@@ -776,20 +776,33 @@ async def lifespan(app: FastAPI):
         ("turtle",             9, "BTC", "1h",  8),
     ]
 
+    # Hard concurrency cap on top of start-time staggering. Staggering alone
+    # only spreads *when jobs start* -- once running, each optimize() call
+    # (100 Optuna trials, CPU-bound work offloaded to a thread) takes real
+    # wall time, so by minute ~5 of the boot window most of the ~21 staggered
+    # jobs are running *concurrently* regardless of their start offsets,
+    # which is exactly the cold-start storm stop_if warns about (proven live
+    # 2026-06-30: with no cap, self-loopback httpx calls timed out even with
+    # a 20s timeout + retry). A semaphore bounds true concurrent CPU load.
+    _RBI_BOOT_CONCURRENCY = 3
+    _rbi_semaphore = asyncio.Semaphore(_RBI_BOOT_CONCURRENCY)
+
     async def _rbi_job(strategy_type: str, strategy_id: int, symbol: str, timeframe: str):
-        pipeline = _get_or_create_pipeline(strategy_type)
-        try:
-            event = await pipeline.run_cycle(
-                strategy_type=strategy_type, strategy_id=strategy_id,
-                symbol=symbol, timeframe=timeframe, lookback_days=90, n_trials=100,
-            )
-            if event.promoted:
-                logger.info("Scheduler RBI promoted %s: %s", strategy_type, event.after_metrics)
-        except Exception as e:
-            # repr(), not str(): httpx timeout/connect exceptions stringify to
-            # "" (proven live 2026-06-30 -- "failed for X: " with no detail,
-            # making the boot-storm root cause undiagnosable from logs alone).
-            logger.error("Scheduled RBI cycle failed for %s: %r", strategy_type, e, exc_info=True)
+        async with _rbi_semaphore:
+            pipeline = _get_or_create_pipeline(strategy_type)
+            try:
+                event = await pipeline.run_cycle(
+                    strategy_type=strategy_type, strategy_id=strategy_id,
+                    symbol=symbol, timeframe=timeframe, lookback_days=90, n_trials=100,
+                )
+                if event.promoted:
+                    logger.info("Scheduler RBI promoted %s: %s", strategy_type, event.after_metrics)
+            except Exception as e:
+                # repr(), not str(): httpx timeout/connect exceptions stringify
+                # to "" (proven live 2026-06-30 -- "failed for X: " with no
+                # detail, making the boot-storm root cause undiagnosable from
+                # logs alone).
+                logger.error("Scheduled RBI cycle failed for %s: %r", strategy_type, e, exc_info=True)
 
     # Build DB-derived schedule, filtered to optimizer-supported strategy types.
     # Falls back to the hardcoded _RBI_SCHEDULE if no running instances exist.
