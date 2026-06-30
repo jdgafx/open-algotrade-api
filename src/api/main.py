@@ -1595,6 +1595,87 @@ def get_ws_status(request: Request):
     }
 
 
+@app.get("/orchestrator/debug/{name}")
+def get_orchestrator_debug(name: str, request: Request):
+    """Ground-truth view of one strategy instance inside the LIVE orchestrator.
+
+    Railway stdout is 100% drowned by backtest CB spam, so logs can't answer
+    "why is this instance flat?". This read-only surface exposes the
+    orchestrator's actual in-memory view: is the loop registered/running, what
+    strategy_type is it mapped to (the regime gate + diagnostic logs key off
+    this), its StrategyState, and the global halt/block counters. Defensive by
+    construction — returns whatever is available, never raises.
+    """
+    orch = getattr(request.app.state, "orchestrator", None)
+    if orch is None:
+        return {"error": "no live orchestrator on app.state"}
+
+    out = {"name": name}
+
+    # Registration / loop liveness
+    try:
+        task = getattr(orch, "_tasks", {}).get(name)
+        out["in_tasks"] = name in getattr(orch, "_tasks", {})
+        out["task_done"] = task.done() if task is not None else None
+        out["task_cancelled"] = task.cancelled() if task is not None else None
+        out["strategy_type_mapped"] = getattr(orch, "_strategy_types", {}).get(name)
+        out["has_strategy_obj"] = name in getattr(orch, "_strategies", {})
+        out["registered_names_sample"] = list(getattr(orch, "_strategies", {}).keys())[:30]
+    except Exception as e:  # noqa: BLE001
+        out["registration_error"] = str(e)
+
+    # In-memory StrategyState
+    try:
+        strat = getattr(orch, "_strategies", {}).get(name)
+        if strat is not None:
+            st = strat.state
+            sig = getattr(st, "last_signal", None)
+            out["state"] = {
+                "iterations": getattr(st, "iterations", None),
+                "last_iteration": str(getattr(st, "last_iteration", None)),
+                "last_signal": (sig.signal_type.value if sig is not None else None),
+                "last_signal_reason": (getattr(sig, "reason", None) if sig is not None else None),
+                "last_signal_time": (str(getattr(sig, "timestamp", None)) if sig is not None else None),
+                "circuit_breaker_triggered": getattr(st, "circuit_breaker_triggered", None),
+                "circuit_breaker_reason": getattr(st, "circuit_breaker_reason", None),
+                "consecutive_losses": getattr(st, "consecutive_losses", None),
+                "consecutive_errors": getattr(st, "consecutive_errors", None),
+                "entry_bar_count": getattr(st, "entry_bar_count", None),
+                "trades_this_hour": getattr(st, "trades_this_hour", None),
+                "last_trade_close_time": str(getattr(st, "last_trade_close_time", None)),
+            }
+            cfg = strat.config
+            out["config"] = {
+                "symbol": getattr(cfg, "symbol", None),
+                "params": getattr(cfg, "params", None),
+            }
+    except Exception as e:  # noqa: BLE001
+        out["state_error"] = str(e)
+
+    # Global halt / block counters + balances
+    try:
+        out["global"] = {
+            "daily_loss_triggered": getattr(orch, "_daily_loss_triggered", None),
+            "daily_loss_flattened": getattr(orch, "_daily_loss_flattened", None),
+            "monthly_halt_triggered": getattr(orch, "_monthly_halt_triggered", None),
+            "weekly_halved": getattr(orch, "_weekly_halved", None),
+            "daily_loss_blocks": getattr(orch, "_daily_loss_blocks", None),
+            "regime_blocks": getattr(orch, "_regime_blocks", None),
+            "rate_limit_blocks": getattr(orch, "_rate_limit_blocks", None),
+            "global_trades_this_hour": getattr(orch, "_global_trades_this_hour", None),
+            "daily_starting_balance": getattr(orch, "_daily_starting_balance", None),
+            "monthly_starting_balance": getattr(orch, "_monthly_starting_balance", None),
+        }
+        try:
+            out["global"]["current_balance"] = orch._get_current_balance()
+        except Exception as be:  # noqa: BLE001
+            out["global"]["current_balance_error"] = str(be)
+    except Exception as e:  # noqa: BLE001
+        out["global_error"] = str(e)
+
+    return out
+
+
 # ──────────────────────────────────────────────
 # Auth
 # ──────────────────────────────────────────────
