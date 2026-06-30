@@ -24,10 +24,37 @@ _trigger_results: dict[str, dict] = {}
 _trigger_running: set[str] = set()
 
 BACKEND_BASE = "http://localhost:8000"
+# Self-loopback HTTP timeout + retry: with 19-21 RBI jobs staggered across a
+# boot window, transient CPU contention from concurrent Optuna/backtest
+# threads can occasionally delay this process's own event loop past a naive
+# fixed timeout (proven live 2026-06-30: a 10s timeout self-GET to
+# /strategies failed silently -- httpx TimeoutException stringifies to "" --
+# and the whole RBI cycle for that strategy_type aborted, pushing its next
+# real attempt out to the full 4-24h interval). One short retry with a
+# slightly longer timeout absorbs that transient contention without masking
+# a genuinely-down backend.
+_HTTP_TIMEOUT_S = 20.0
+_HTTP_RETRIES = 2
+
+
+async def _retry_request(fn, *args, **kwargs):
+    last_exc: Exception | None = None
+    for attempt in range(_HTTP_RETRIES + 1):
+        try:
+            return await fn(*args, **kwargs)
+        except (httpx.TimeoutException, httpx.ConnectError) as e:
+            last_exc = e
+            if attempt < _HTTP_RETRIES:
+                logger.warning(
+                    "RBI self-HTTP call %s timed out/refused (attempt %d/%d): %r — retrying",
+                    getattr(fn, "__name__", fn), attempt + 1, _HTTP_RETRIES + 1, e,
+                )
+                await asyncio.sleep(1.0 * (attempt + 1))
+    raise last_exc
 
 
 async def _resolve_name(client: httpx.AsyncClient, strategy_id: int) -> str:
-    r = await client.get(f"{BACKEND_BASE}/strategies", timeout=10.0)
+    r = await _retry_request(client.get, f"{BACKEND_BASE}/strategies", timeout=_HTTP_TIMEOUT_S)
     r.raise_for_status()
     for s in r.json():
         if s.get("id") == strategy_id:
@@ -38,7 +65,7 @@ async def _resolve_name(client: httpx.AsyncClient, strategy_id: int) -> str:
 async def _get_strategy(strategy_id: int) -> dict:
     async with httpx.AsyncClient() as client:
         name = await _resolve_name(client, strategy_id)
-        r = await client.get(f"{BACKEND_BASE}/strategies/{name}", timeout=10.0)
+        r = await _retry_request(client.get, f"{BACKEND_BASE}/strategies/{name}", timeout=_HTTP_TIMEOUT_S)
         r.raise_for_status()
         return r.json()
 
@@ -46,9 +73,9 @@ async def _get_strategy(strategy_id: int) -> dict:
 async def _patch_strategy(strategy_id: int, updates: dict) -> dict:
     async with httpx.AsyncClient() as client:
         name = await _resolve_name(client, strategy_id)
-        r = await client.patch(
-            f"{BACKEND_BASE}/strategies/{name}",
-            json=updates, timeout=10.0,
+        r = await _retry_request(
+            client.patch, f"{BACKEND_BASE}/strategies/{name}",
+            json=updates, timeout=_HTTP_TIMEOUT_S,
         )
         r.raise_for_status()
         return r.json()

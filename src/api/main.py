@@ -786,7 +786,10 @@ async def lifespan(app: FastAPI):
             if event.promoted:
                 logger.info("Scheduler RBI promoted %s: %s", strategy_type, event.after_metrics)
         except Exception as e:
-            logger.error("Scheduled RBI cycle failed for %s: %s", strategy_type, e)
+            # repr(), not str(): httpx timeout/connect exceptions stringify to
+            # "" (proven live 2026-06-30 -- "failed for X: " with no detail,
+            # making the boot-storm root cause undiagnosable from logs alone).
+            logger.error("Scheduled RBI cycle failed for %s: %r", strategy_type, e, exc_info=True)
 
     # Build DB-derived schedule, filtered to optimizer-supported strategy types.
     # Falls back to the hardcoded _RBI_SCHEDULE if no running instances exist.
@@ -804,20 +807,33 @@ async def lifespan(app: FastAPI):
         logger.warning("RBI scheduler: DB query failed (%s); using hardcoded schedule", _dbe)
         _running_instances = []
 
-    # Per-job jitter: stagger boot-run offsets between 30s and 5 min so the
-    # ~19 RBI jobs don't thunder-herd on startup.  Each job gets a unique
-    # random offset; the compounder already uses next_run_time=_dt.now() as
-    # a pattern — we use the same idea with spread-out offsets here.
+    # Per-job stagger: spread boot-run offsets evenly across 30s-10min so the
+    # ~19-21 RBI jobs don't thunder-herd on startup. Pure random.randint draws
+    # (the old approach) can land several jobs within 1-2s of each other by
+    # chance (birthday-paradox clustering) — proven live 2026-06-30: 4 jobs
+    # landed within a 4s window, each one's optimize() Optuna-CPU burst then
+    # starved the others' self-loopback httpx calls (GET /strategies) past
+    # their timeout, so the boot-run *fired* but mostly *failed* and those
+    # jobs silently fell back to waiting their full 4-24h interval — defeating
+    # the whole point of a boot-run. Deterministic even-spacing (small random
+    # jitter only to avoid identical-tick collisions across restarts)
+    # guarantees a real minimum gap between any two jobs' boot-fire times.
     _JITTER_MIN_S = 30
-    _JITTER_MAX_S = 300
+    _JITTER_MAX_S = 600
+    _JITTER_SPAN_S = _JITTER_MAX_S - _JITTER_MIN_S
+
+    def _stagger_offset_s(index: int, total: int) -> int:
+        step = _JITTER_SPAN_S / max(total, 1)
+        base = _JITTER_MIN_S + index * step
+        return int(base + random.randint(0, 5))
 
     if _running_instances:
         _job_specs = build_rbi_job_specs(_running_instances, _supported_types)
         _skipped = [i.strategy_type for i in _running_instances if i.strategy_type not in _supported_types]
         if _skipped:
             logger.warning("RBI scheduler: skipping unsupported strategy types (not in param_spaces): %s", sorted(set(_skipped)))
-        for _spec in _job_specs:
-            _jitter = timedelta(seconds=random.randint(_JITTER_MIN_S, _JITTER_MAX_S))
+        for _i, _spec in enumerate(_job_specs):
+            _jitter = timedelta(seconds=_stagger_offset_s(_i, len(_job_specs)))
             _scheduler.add_job(
                 _rbi_job, "interval", hours=_spec["hours"],
                 args=[_spec["strategy_type"], _spec["strategy_id"], _spec["symbol"], _spec["timeframe"]],
@@ -832,10 +848,9 @@ async def lifespan(app: FastAPI):
         _fallback_skipped = [stype for stype, *_ in _RBI_SCHEDULE if stype not in _supported_types]
         if _fallback_skipped:
             logger.warning("RBI scheduler (fallback): skipping unsupported types: %s", sorted(set(_fallback_skipped)))
-        for stype, sid, sym, tf, hours in _RBI_SCHEDULE:
-            if stype not in _supported_types:
-                continue
-            _jitter = timedelta(seconds=random.randint(_JITTER_MIN_S, _JITTER_MAX_S))
+        _fallback_specs = [s for s in _RBI_SCHEDULE if s[0] in _supported_types]
+        for _i, (stype, sid, sym, tf, hours) in enumerate(_fallback_specs):
+            _jitter = timedelta(seconds=_stagger_offset_s(_i, len(_fallback_specs)))
             _scheduler.add_job(
                 _rbi_job, "interval", hours=hours,
                 args=[stype, sid, sym, tf],
@@ -845,7 +860,7 @@ async def lifespan(app: FastAPI):
             )
         logger.info(
             "RBI scheduler: empty DB — fell back to %d hardcoded jobs",
-            len([s for s, *_ in _RBI_SCHEDULE if s in _supported_types]),
+            len(_fallback_specs),
         )
 
     # ── Compounding controller: reinvest 90% of profits every 30 min ──
