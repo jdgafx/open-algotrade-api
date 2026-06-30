@@ -39,27 +39,51 @@ from src.strategies.base_strategy import (
 logger = logging.getLogger(__name__)
 
 
-def significance_weighted_score(pnls: List[float], z: float = 1.64) -> float:
-    """Lower confidence bound on per-trade realized PnL (T009 conditional-edge ranker).
+def posterior_edge(own_pnls: List[float], pool_pnls: List[float], kappa: float = 10.0) -> Dict[str, float]:
+    """Empirical-Bayes posterior on a (strategy×symbol)'s per-trade edge (T009).
 
-    A PESSIMISTIC edge estimate: mean - z*se. Thin OR noisy samples are penalised
-    hard via the standard error, so a 4-trade +19 fluke dominated by one big win
-    (large se) ranks BELOW a steady 30-trade small edge — which multiplicative
-    sample-shrinkage could not achieve (its limit ratio ~ n1/n2). n<2 has no
-    variance estimate, so it is shrunk near 0 (sign preserved) as low-confidence.
-    Empty sample -> 0.
+    Normal-Normal conjugate update. The PRIOR is the sibling pool — recent
+    per-trade PnLs of same-strategy-type instances on symbols currently in the
+    SAME regime — treated as ~kappa pseudo-trades at the pool mean. The
+    LIKELIHOOD is the instance's OWN recent trades. So a thin winner is RESOLVED:
+    a 4-trade win with a corroborating family posts a high prob_edge; the same win
+    with a flat/negative family stays near 0.5 with a wide CI — never blindly
+    shrunk to 0 (which would kill a real edge) nor trusted at face value (luck).
 
-    ponytail: z=1.64 (~one-sided 95%); raise z to distrust small/noisy samples
-    harder. Score is in $-per-trade; only relative order matters for ranking.
+    Returns prob_edge = P(per-trade edge > 0), posterior_mean_edge, a 90% credible
+    interval (ci_low/ci_high), and input sample sizes. No data + no family ->
+    prob_edge 0.5, mean 0.
+
+    ponytail: shared known variance (pooled), own-variance floored at half the
+    family variance so a tiny zero-variance sample isn't over-trusted; kappa is the
+    prior strength in pseudo-trades. Upgrade to a full hierarchical fit only if
+    this proves too coarse.
     """
-    n = len(pnls)
-    if n == 0:
-        return 0.0
-    mean = sum(pnls) / n
-    if n < 2:
-        return mean / (abs(mean) + 1.0) * 0.1  # one trade: near-zero, low confidence
-    se = statistics.pstdev(pnls) / math.sqrt(n)
-    return mean - z * se
+    own = list(own_pnls)
+    pool = list(pool_pnls)
+    n = len(own)
+    sigma2_pool = statistics.pvariance(pool) if len(pool) >= 2 else 1.0
+    sigma2_own = statistics.pvariance(own) if n >= 2 else sigma2_pool
+    sigma2_eff = max(sigma2_own, 0.5 * sigma2_pool, 1e-3)  # over-confidence floor
+    mu0 = (sum(pool) / len(pool)) if pool else 0.0          # prior mean = family edge (0 if none)
+    tau2 = (sigma2_pool / kappa) if pool else 1e6           # no family -> flat prior
+    xbar = (sum(own) / n) if n else mu0
+    prec_prior = 1.0 / tau2
+    prec_data = (n / sigma2_eff) if n else 0.0
+    post_var = 1.0 / (prec_prior + prec_data)
+    post_mean = post_var * (mu0 * prec_prior + xbar * prec_data)
+    post_sd = math.sqrt(post_var)
+    prob = (0.5 * (1.0 + math.erf(post_mean / (post_sd * math.sqrt(2.0))))
+            if post_sd > 0 else (1.0 if post_mean > 0 else 0.0))
+    z = 1.645  # 90% one-sided credible bound
+    return {
+        "prob_edge": prob,
+        "posterior_mean_edge": post_mean,
+        "ci_low": post_mean - z * post_sd,
+        "ci_high": post_mean + z * post_sd,
+        "n_own": n,
+        "n_pool": len(pool),
+    }
 
 
 _OBSERVATION_FLOOR = 0.10  # fresh/edgeless strategies size at 10% until confidence accrues
@@ -1200,17 +1224,19 @@ class PaperTradingExecutor:
 
 
 if __name__ == "__main__":
-    # significance_weighted_score: a thin lucky fluke must NOT outrank a
-    # high-sample consistent edge, and an empty/single sample stays tiny.
-    _consistent = [0.5] * 80
-    _fluke = [0.2, 0.3, 18.5, 0.28]  # 4 trades, +19.28 total, one big lucky win
-    assert significance_weighted_score(_consistent) > significance_weighted_score(_fluke), \
-        "thin fluke must not outrank high-sample edge"
-    # the exact gridfib case: a steady 30-trade small edge must outrank a noisy
-    # 4-trade big-mean sample (the bug T009 verification caught).
-    assert significance_weighted_score([0.1] * 30) > significance_weighted_score([0.0, 0.0, 19.0, 0.0]), \
-        "steady high-sample edge must outrank a noisy thin big-mean fluke"
-    assert significance_weighted_score([]) == 0.0
-    assert abs(significance_weighted_score([1.0])) < 0.2  # single trade -> near zero
-    assert significance_weighted_score([-0.5] * 50) < 0.0  # a real loser scores negative
+    # posterior_edge: a thin winner is RESOLVED by its family, not blindly shrunk.
+    _noisy4 = [0.0, 0.0, 19.0, 0.0]  # gridfib-style: 4 trades, one big lucky win
+    flat = posterior_edge(_noisy4, [0.1, -0.2, 0.0, 0.3, -0.1, 0.2])   # family flat
+    good = posterior_edge(_noisy4, [1.0, 0.8, 1.2, 0.9, 1.1, 0.7])     # family positive
+    # corroborated > uncorroborated, and uncorroborated thin win is NOT auto-#1, NOT auto-0
+    assert good["prob_edge"] > flat["prob_edge"], "family corroboration must lift prob_edge"
+    assert good["posterior_mean_edge"] > flat["posterior_mean_edge"]
+    assert 0.0 < flat["posterior_mean_edge"] < 1.0, "thin uncorroborated win: small +mean, not the raw 4.75"
+    assert flat["ci_low"] < 0.0 < flat["ci_high"], "thin sample must have a wide CI straddling 0"
+    # a steady high-sample winner posts high confidence; a high-sample loser, low.
+    assert posterior_edge([0.5] * 30, [0.1, 0.2])["prob_edge"] > 0.9
+    assert posterior_edge([-0.5] * 40, [0.0, 0.1])["prob_edge"] < 0.1
+    # no data + no family -> neutral.
+    _none = posterior_edge([], [])
+    assert abs(_none["prob_edge"] - 0.5) < 1e-9 and abs(_none["posterior_mean_edge"]) < 1e-9
     print("paper_executor self-checks OK")

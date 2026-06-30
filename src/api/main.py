@@ -2445,20 +2445,24 @@ def get_strategies_performance(request: Request, db: Session = Depends(get_db)):
 async def strategy_leaderboard(request: Request, window: int = 30):
     """Conditional-edge ranker (T009 slice 1, READ-ONLY — drives nothing yet).
 
-    Ranks RUNNING strategy×symbol instances by a SIGNIFICANCE-WEIGHTED score on
-    recent realized PnL from the durable _trades ledger — thin samples are
-    down-weighted so a 4-trade fluke can't top an 80-trade edge — annotated with
-    each symbol's CURRENT regime and whether the strategy_type is favoured there.
-    Replaces the old raw-lifetime-PnL ranking (which ranked a 4-trade fluke #1).
+    Scores each RUNNING (strategy×symbol) by a POSTERIOR P(edge) instead of raw or
+    blindly-shrunk PnL, so a thin winner is RESOLVED, not discarded. Empirical-Bayes
+    (Normal-Normal, paper_executor.posterior_edge):
+      - PRIOR  = the sibling pool — recent per-trade PnLs of same-strategy-type
+        instances on symbols CURRENTLY in the same regime (hierarchical pooling:
+        if the whole family lifts in this regime it's regime edge; if one instance
+        wins alone it's idiosyncratic/luck).
+      - LIKELIHOOD = the instance's own recent trades.
+    Output per row: current_regime, trades, raw_recent_pnl, prob_edge (P(per-trade
+    edge>0)), posterior_mean_edge, ci_low/ci_high (90% credible), family_corroboration.
+    Ranked by prob_edge × posterior_mean_edge (expected, confidence-weighted edge),
+    tie-broken by posterior_mean_edge so losers sort below untested instances.
 
-    `regime_conditional_score` is currently a STATIC regime-fit proxy
-    (REGIME_STRATEGY_MAP): significance score discounted when the strategy_type is
-    NOT recommended in the symbol's current regime. The stronger EMPIRICAL signal —
-    this instance's realized PnL in PAST windows that matched the current regime —
-    needs a per-trade regime tag the ledger does not record yet (see `_schema_gap`).
+    Slice 2 (NOT here) is the intended consumer: size allocation BY prob_edge
+    (Thompson-style — small-and-growing for high-uncertainty maybe-edges + an
+    exploration floor), so wide-CI thin winners get probed, not dropped.
     """
-    from src.execution.paper_executor import significance_weighted_score
-    from src.services.regime_detector import REGIME_STRATEGY_MAP, MarketRegime
+    from src.execution.paper_executor import posterior_edge
 
     executor = getattr(request.app.state, "executor", None)
     detector = getattr(request.app.state, "regime_detector", None)
@@ -2483,32 +2487,45 @@ async def strategy_leaderboard(request: Request, window: int = 30):
                 regime_cache[sym] = (r or {}).get("regime", "unknown")
             return regime_cache[sym]
 
-        def _recommended(stype, regime_str):
-            try:
-                return stype in REGIME_STRATEGY_MAP.get(MarketRegime(regime_str), [])
-            except ValueError:
-                return None  # unknown/uncomputed regime -> no opinion
+        # Own recent window per instance + the sibling pool keyed by (type, current regime).
+        own_map: dict = {}
+        pool_map: dict = {}  # (strategy_type, regime) -> {name: recent_pnls}
+        for s in running:
+            recent = by_strat.get(s.name, [])[-window:]
+            own_map[s.name] = recent
+            pool_map.setdefault((s.strategy_type, _regime(s.symbol)), {})[s.name] = recent
 
         rows = []
         for s in running:
-            recent = by_strat.get(s.name, [])[-window:]
-            sig = significance_weighted_score(recent)
             regime = _regime(s.symbol)
-            rec = _recommended(s.strategy_type, regime)
-            regime_fit = 0.6 if rec is False else 1.0  # off-regime discount; unknown regime = neutral
+            own = own_map[s.name]
+            # Sibling pool = same strategy_type, same CURRENT regime, EXCLUDING self.
+            siblings = pool_map.get((s.strategy_type, regime), {})
+            pool = [p for nm, pnls in siblings.items() if nm != s.name for p in pnls]
+            post = posterior_edge(own, pool)
+            pool_mean = (sum(pool) / len(pool)) if pool else 0.0
             rows.append({
                 "name": s.name,
                 "type": s.strategy_type,
                 "symbol": s.symbol,
                 "current_regime": regime,
-                "regime_recommended": rec,
-                "recent_pnl": round(sum(recent), 2),
-                "trades": len(recent),
-                "significance_weighted_score": round(sig, 4),
-                "regime_conditional_score": round(sig * regime_fit, 4),
+                "trades": post["n_own"],
+                "raw_recent_pnl": round(sum(own), 2),
+                "prob_edge": round(post["prob_edge"], 3),
+                "posterior_mean_edge": round(post["posterior_mean_edge"], 4),
+                "ci_low": round(post["ci_low"], 4),
+                "ci_high": round(post["ci_high"], 4),
+                "family_corroboration": {
+                    "n_pool": post["n_pool"],
+                    "pool_mean_pnl": round(pool_mean, 4),
+                    "positive": pool_mean > 0,
+                },
+                "rank_score": round(post["prob_edge"] * post["posterior_mean_edge"], 4),
             })
 
-        rows.sort(key=lambda r: r["regime_conditional_score"], reverse=True)
+        # Primary: confidence-weighted expected edge. Tie-break: raw posterior mean,
+        # so high-sample losers (prob~0 -> rank_score~0) still sort below untested 0s.
+        rows.sort(key=lambda r: (r["rank_score"], r["posterior_mean_edge"]), reverse=True)
         for i, r in enumerate(rows):
             r["blended_rank"] = i + 1
 
@@ -2517,11 +2534,12 @@ async def strategy_leaderboard(request: Request, window: int = 30):
             "count": len(rows),
             "rows": rows,
             "_schema_gap": (
-                "regime_conditional_score is a STATIC regime-fit proxy (REGIME_STRATEGY_MAP). "
-                "Empirical regime-conditional PnL (this instance's realized PnL in past windows "
-                "matching the current regime) needs a per-trade `regime` tag the durable ledger "
-                "does not record. Minimal add: stamp PaperTrade.regime from the live detector at "
-                "exit; forward trades then accumulate it for slice 2."
+                "The regime-conditional PRIOR here pools SIBLINGS' RECENT trades on symbols "
+                "currently in the same regime (a live proxy). The STRONGER source-1 signal — this "
+                "instance's OWN realized PnL in PAST windows that matched the current regime — needs "
+                "a per-trade `regime` tag PaperTrade does not record (regime history also resets per "
+                "redeploy). Minimal add: stamp PaperTrade.regime from the live detector at exit; "
+                "forward trades then accumulate true per-trade-regime history for a sharper prior."
             ),
         }
     finally:
