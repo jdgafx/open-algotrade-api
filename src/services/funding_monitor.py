@@ -197,14 +197,7 @@ class FundingMonitor:
 
         Returns one of: "long_crowded", "short_crowded", "neutral".
         """
-        rate = self._rates.get(symbol)
-        if rate is None:
-            return "neutral"
-        if rate > HIGH_THRESHOLD:
-            return "long_crowded"
-        if rate < -HIGH_THRESHOLD:
-            return "short_crowded"
-        return "neutral"
+        return bias_from_rate(self._rates.get(symbol))
 
     def classify_rate(self, rate: float) -> str:
         """
@@ -329,6 +322,24 @@ class FundingMonitor:
 # ------------------------------------------------------------------
 
 _monitor: Optional[FundingMonitor] = None
+
+
+def bias_from_rate(rate: Optional[float]) -> str:
+    """
+    Pure classifier: annualized funding rate -> crowd-positioning bias.
+
+    Returns one of: "long_crowded", "short_crowded", "neutral". Shared by
+    FundingMonitor.get_funding_bias (REST-cached rate) and any caller that
+    already has a fresh annualized rate from elsewhere (e.g. the ws
+    activeAssetCtx feed in orchestrator._compute_entry_adaptation, T033).
+    """
+    if rate is None:
+        return "neutral"
+    if rate > HIGH_THRESHOLD:
+        return "long_crowded"
+    if rate < -HIGH_THRESHOLD:
+        return "short_crowded"
+    return "neutral"
 
 
 def get_funding_monitor(

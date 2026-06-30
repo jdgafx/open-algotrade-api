@@ -24,7 +24,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 
 from src.engine.llm_gate import TradeContext, llm_gate
-from src.services.funding_monitor import FUNDING_LONG_SUPPRESS_THRESHOLD
+from src.services.funding_monitor import FUNDING_LONG_SUPPRESS_THRESHOLD, bias_from_rate
 from src.services.adaptation import adaptation_multiplier
 from src.execution.hl_executor import HyperliquidVaultExecutor
 from src.execution.paper_executor import DEFAULT_RUIN_GUARD_BUFFER_PCT
@@ -196,15 +196,49 @@ class StrategyOrchestrator:
             atr_pct = (vol.get(symbol) or {}).get("atr_pct")
         except Exception:
             atr_pct = None
-        funding_bias = None
-        if self.funding_monitor is not None:
-            try:
-                funding_bias = self.funding_monitor.get_funding_bias(symbol)
-            except Exception:
-                funding_bias = None
+        funding_bias = self._get_funding_bias_fresh(symbol)
         strategy_type = self._strategy_types.get(name, "")
         return adaptation_multiplier(strategy_type, side, atr_pct, current_regime,
                                      favorable_types, funding_bias)
+
+    def _get_funding_bias_fresh(self, symbol: str) -> Optional[str]:
+        """Funding-crowding bias feeding adaptation_multiplier (T033).
+
+        PRIMARY: ws activeAssetCtx funding via self.client.get_asset_ctx — the
+        same live feed the Gate 4.3 funding guard reads (sub-second freshness
+        when HL_WS_CANDLES is on), classified with funding_monitor.bias_from_rate
+        (pure classifier, no reimplemented thresholds).
+        FALLBACK: FundingMonitor's 15-min REST poll (get_funding_bias) when the
+        ws ctx is missing/stale — mirrors hyperliquid_ws_client.get_ohlcv's own
+        stale-buffer -> REST fallback pattern.
+        """
+        _get_ctx = getattr(self.client, "get_asset_ctx", None)
+        if callable(_get_ctx):
+            try:
+                ctx = _get_ctx(symbol)
+                raw_f8h = ctx.get("funding") if ctx else None
+                ts_ms = ctx.get("ts") if ctx else None
+                if raw_f8h is not None and ts_ms is not None:
+                    stale_s = float(os.getenv("FUNDING_CTX_STALE_S", "60"))
+                    age_s = (datetime.now().timestamp() * 1000 - ts_ms) / 1000.0
+                    if age_s <= stale_s:
+                        return bias_from_rate(float(raw_f8h) * 1095.0)
+                    logger.debug(
+                        "ws funding ctx stale for %s (%.0fs > %.0fs) -- falling back to REST poll",
+                        symbol, age_s, stale_s,
+                    )
+            except Exception as exc:  # noqa: BLE001 - fail open to REST fallback
+                logger.warning(
+                    "ws funding ctx read failed for %s -- falling back to REST poll: %s",
+                    symbol, exc,
+                )
+
+        if self.funding_monitor is not None:
+            try:
+                return self.funding_monitor.get_funding_bias(symbol)
+            except Exception:
+                return None
+        return None
 
     def has_open_position(self, name: str) -> bool:
         """Best-effort sync check: does strategy `name` currently hold an open position?
