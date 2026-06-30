@@ -1015,11 +1015,14 @@ class HyperliquidDataClient:
             },
         }
 
-        response = requests.post(url, headers=headers, json=data)
+        response = requests.post(
+            url, headers=headers, json=data, timeout=_HTTP_TIMEOUT_SECONDS
+        )
         response.raise_for_status()
         snapshot = response.json()
 
         if not snapshot:
+            logger.warning("get_ohlcv | %s %s | empty snapshot", symbol, interval)
             return pd.DataFrame()
 
         df = pd.DataFrame(snapshot)
@@ -1032,6 +1035,7 @@ class HyperliquidDataClient:
             if col in df.columns:
                 df[col] = df[col].astype(float)
         df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+        logger.info("get_ohlcv | %s %s | %d candles", symbol, interval, len(df))
         return df
 
     def ask_bid(self, symbol: str) -> Tuple[float, float, Dict]:
