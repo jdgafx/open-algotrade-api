@@ -298,6 +298,14 @@ def _auto_deploy_winners(db, orchestrator):
         #    many semi-independent trend bets -> smoother equity. SOL/BNB/DOGE 4h and
         #    AVAX dropped (OOS Sharpe <=0.5). Paper-first; live champion-challenger +
         #    oos_trades>=30 gate decides promotion to real capital. ──
+        #    T038 (2026-06-30): added a 30m tranche (shorter standard candle = more
+        #    qualified trades for the Optuna tuner to learn from, NOT HFT). Each 30m
+        #    (coin,tf) cleared the SAME walk-forward bar the original basket used AND
+        #    the exact live sma30/50 param cleared OOS Sharpe>0.5 (BTC 2.42 / SOL 2.36
+        #    / BNB 3.69 / XRP 4.21, ~31 OOS trades each; edge_probe methodology,
+        #    HL 30m ~104d). 15m was REJECTED: best-combo passed but sma30/50 backtests
+        #    NEGATIVE OOS at 15m for every coin (-4.7..-6.2) -> leverage-on-noise, ADR-0001.
+        #    ETH/DOGE/LINK/ARB/SUI 30m dropped (live param or best-combo <=0.5 OOS).
         *[
             {"name": f"trend-{coin.lower()}-{tf}", "strategy_type": "trend_cross",
              "symbol": coin, "timeframe": tf, "size_usd": 50, "leverage": 3,
@@ -310,6 +318,7 @@ def _auto_deploy_winners(db, orchestrator):
                 ("XRP", "1h"), ("DOGE", "1h"), ("LINK", "1h"), ("SUI", "1h"), ("ARB", "1h"),
                 ("BTC", "4h"), ("ETH", "4h"), ("SOL", "4h"), ("XRP", "4h"),
                 ("SUI", "4h"), ("ARB", "4h"),
+                ("BTC", "30m"), ("SOL", "30m"), ("BNB", "30m"), ("XRP", "30m"),
             ]
         ],
         # Formerly-running strategies (mm-eth, mm-sol, arb-eth, nw-eth, nw-sol, adx-eth,
