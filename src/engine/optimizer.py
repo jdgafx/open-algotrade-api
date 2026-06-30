@@ -25,6 +25,26 @@ from .rigor import (
 # returns series, so trial/selected Sharpes are de-annualized by this factor.
 _ANNUALIZATION = math.sqrt(252)
 
+# T032 part B: at the documented default (lookback_days=90, WALKFORWARD_SPLIT=0.6)
+# the OOS window is only ~36 calendar days. At 1h bars that's plenty of room for
+# PROMOTION_MIN_OOS_TRADES=30 to be reachable by a real edge (live evidence: rsi,
+# flip_flop, nadaraya_watson all clear 47-57 OOS trades at 1h/90d -- they get
+# correctly rejected on profit_factor instead, not starved on sample size). But
+# the SAME 36-day window is too short for a 4h/1d strategy to ever accumulate 30
+# trades, REGARDLESS of edge quality -- a structural artifact of a fixed calendar
+# window not scaling with bar granularity, not an honest "no edge" verdict.
+# Fix: scale the EFFECTIVE lookback by cadence (relative to the 1h baseline the
+# 90-day default was sized for) so slower timeframes get proportionally more
+# calendar time to reach the SAME trade-count floor. The floor itself (30) never
+# moves -- this only widens the window it's measured over. Capped at the
+# documented API lookback ceiling (rbi_optimize.py Field le=365) so this never
+# silently demands more history than the exchange is likely to have; if the
+# exchange doesn't have it, `_get_data` raises -- an honest failure, not a
+# loosened gate.
+_TIMEFRAME_HOURS = {"5m": 5 / 60, "15m": 15 / 60, "1h": 1.0, "4h": 4.0, "1d": 24.0}
+_LOOKBACK_BASELINE_TIMEFRAME = "1h"
+_MAX_LOOKBACK_DAYS = 365
+
 logger = logging.getLogger(__name__)
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
@@ -46,6 +66,11 @@ class OptimizationResult:
     # candidate with no guard evidence can never be promoted.
     out_sample_dsr: float = 0.0
     cpcv_frac_positive: float = 0.0
+    # T032 part B: the actual (cadence-scaled) lookback window this candidate
+    # was evaluated over -- observability so a reject's after_metrics can show
+    # whether the OOS-trade floor was already given a widened window before
+    # failing (a structural-gate signal) vs. failed at the unscaled default.
+    lookback_days_used: int = 0
 
 
 class OptimizationEngine:
@@ -72,6 +97,19 @@ class OptimizationEngine:
         self._initial_capital = initial_capital
         self._commission_pct = commission_pct
 
+    @staticmethod
+    def _frequency_scaled_lookback(timeframe: str, lookback_days: int) -> int:
+        """Scale the calendar lookback so the OOS window's calendar span grows
+        with bar interval (T032 part B) -- see module comment above
+        `_TIMEFRAME_HOURS`. Timeframes at or faster than the 1h baseline are
+        returned unchanged (already trade-rich at the documented default)."""
+        tf_hours = _TIMEFRAME_HOURS.get(timeframe, _TIMEFRAME_HOURS[_LOOKBACK_BASELINE_TIMEFRAME])
+        base_hours = _TIMEFRAME_HOURS[_LOOKBACK_BASELINE_TIMEFRAME]
+        if tf_hours <= base_hours:
+            return lookback_days
+        scaled = int(round(lookback_days * (tf_hours / base_hours)))
+        return min(scaled, _MAX_LOOKBACK_DAYS)
+
     async def optimize(
         self,
         strategy_type: str,
@@ -81,6 +119,7 @@ class OptimizationEngine:
         n_trials: int = 100,
         param_space_override: dict | None = None,
     ) -> list[OptimizationResult]:
+        lookback_days = self._frequency_scaled_lookback(timeframe, lookback_days)
         data = await self._get_data(symbol, timeframe, lookback_days)
         if data is None or len(data) < 50:
             raise ValueError(
@@ -191,6 +230,7 @@ class OptimizationEngine:
                     composite_score=composite,
                     passed_walkforward=self._passes_walkforward(oos),
                     out_sample_dsr=dsr,
+                    lookback_days_used=lookback_days,
                 ))
             except Exception as e:
                 logger.warning("OOS validation failed for %s params %s: %s", strategy_type, params, e)

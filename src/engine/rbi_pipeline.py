@@ -53,6 +53,10 @@ def _rejected_candidate_metrics(best: Any, failing_criterion: str) -> dict:
         "cpcv_frac_positive": best.cpcv_frac_positive,
         "composite_score": best.composite_score,
         "failing_criterion": failing_criterion,
+        # T032 part B: the actual (cadence-scaled) calendar window this reject was
+        # evaluated over, so a reader can see whether the OOS-trade floor was
+        # already given a widened window before failing.
+        "lookback_days_used": best.lookback_days_used,
     }
 
 
@@ -66,6 +70,7 @@ def _challenger_metrics(best: Any) -> dict:
         "oos_trades": best.out_sample_total_trades,
         "oos_max_drawdown": best.out_sample_max_drawdown,
         "composite_score": best.composite_score,
+        "lookback_days_used": best.lookback_days_used,
     }
 
 
