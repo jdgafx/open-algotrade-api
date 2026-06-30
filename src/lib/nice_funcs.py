@@ -42,6 +42,12 @@ logger = logging.getLogger(__name__)
 # otherwise brick all client construction on startup).
 _EMPTY_SPOT_META = {"universe": [], "tokens": []}
 
+# HL /info POST timeout (seconds). Without it a hung socket stalls the trade
+# loop indefinitely (the call runs in a to_thread, so the whole strategy's
+# next iteration never fires). ponytail: single value, lift to config if a
+# second caller ever needs a different budget.
+_HTTP_TIMEOUT_SECONDS = 15
+
 
 @dataclass
 class OrderResult:
@@ -231,7 +237,9 @@ class HyperliquidClient:
             },
         }
 
-        response = requests.post(url, headers=headers, json=data)
+        response = requests.post(
+            url, headers=headers, json=data, timeout=_HTTP_TIMEOUT_SECONDS
+        )
         response.raise_for_status()
         snapshot = response.json()
 
@@ -260,7 +268,7 @@ class HyperliquidClient:
 
         df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
 
-        logger.debug("get_ohlcv | %s %s | %d candles", symbol, interval, len(df))
+        logger.info("get_ohlcv | %s %s | %d candles", symbol, interval, len(df))
         return df
 
     def get_l2_book(self, symbol: str, n_sig_figs: Optional[int] = None) -> Dict:

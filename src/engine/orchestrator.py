@@ -716,6 +716,12 @@ class StrategyOrchestrator:
                     config.lookback_days,
                 )
 
+                # Diagnostic: surface the actual bar count for trend instances —
+                # an always-in trend_cross that stays flat is a short fetch
+                # (len < slow+2 -> _cross_sign None), invisible without this.
+                if self._strategy_types.get(name) == "trend_cross":
+                    logger.info("FETCH | %s %s | %d bars", name, interval, len(data))
+
                 if data.empty:
                     logger.warning("No data for %s %s, skipping", symbol, interval)
                     await asyncio.sleep(sleep_seconds)
