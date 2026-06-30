@@ -80,6 +80,7 @@ EXPLORE_MIN_USD = float(os.getenv("EXPLORE_MIN_USD", "25.0"))        # explorati
 EXPLORE_UPSIDE_REF = float(os.getenv("EXPLORE_UPSIDE_REF", "0.8"))   # ci_high ($/trade) at which exploration reaches full non-winner size
 ALLOC_RAMP_UP_MAX = float(os.getenv("ALLOC_RAMP_UP_MAX", "1.5"))     # max size INCREASE per compound cycle (no 10x jumps); cuts apply immediately
 POSTERIOR_WINNER_PROB = float(os.getenv("POSTERIOR_WINNER_PROB", "0.9"))  # prob_edge >= this (and +mean) promotes an instance into the winner tier — the posterior is a better thin-sample filter than trades>=6 (funding-arb 4t prob 0.998 grows; gridfib 4t prob 0.59 does not). Ramp keeps the grow gradual; $500-unproven cap still bounds it.
+POSTERIOR_CULL_PROB = float(os.getenv("POSTERIOR_CULL_PROB", "0.3"))  # prob_edge < this AND negative posterior mean (with >= CULL_MIN_TRADES) is a confident loser — cull via the existing path to shed the tail faster than the pnl-only gate. gridfib (prob 0.59) is NOT culled — it's a probe, not a loser.
 
 
 def _winner_cap_usd(balance: float, confidence: float,
@@ -1101,6 +1102,23 @@ async def lifespan(app: FastAPI):
                     min_pnl=CULL_MIN_PNL, min_trades=CULL_MIN_TRADES,
                     min_winrate=CULL_MIN_WINRATE, max_per_run=CULL_MAX_PER_RUN,
                 )
+
+                # T010: posterior cull — a confident loser (prob_edge < POSTERIOR_CULL_PROB
+                # AND negative posterior mean, with enough trades) the pnl-gate is slow to
+                # catch is unioned in, to shed the loser tail faster. Winners excluded;
+                # a wide-CI probe (gridfib, prob 0.59) is NOT a confident loser -> kept.
+                try:
+                    _cpost = _posterior_scores(executor, regime_detector, running, window=30)
+                except Exception:  # noqa: BLE001 - cull must fall back to the pnl gate, never crash
+                    _cpost = {}
+                for r in running:
+                    _pp = _cpost.get(r.name, {})
+                    if (r.name not in _WINNER_SET and r.name not in _to_cull
+                            and _pp.get("prob_edge", 1.0) < POSTERIOR_CULL_PROB
+                            and _pp.get("posterior_mean_edge", 0.0) < 0
+                            and _pp.get("n_own", 0) >= CULL_MIN_TRADES):
+                        _to_cull.append(r.name)
+
                 if not _to_cull:
                     return
 
