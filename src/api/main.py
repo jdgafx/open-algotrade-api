@@ -2442,49 +2442,87 @@ def get_strategies_performance(request: Request, db: Session = Depends(get_db)):
 
 
 @app.get("/strategies/leaderboard")
-async def strategy_leaderboard(request: Request):
-    """Get strategies ranked by PnL with profitability metrics."""
-    orchestrator = request.app.state.orchestrator
-    if orchestrator is None:
-        raise HTTPException(status_code=503, detail="Orchestrator not initialized")
+async def strategy_leaderboard(request: Request, window: int = 30):
+    """Conditional-edge ranker (T009 slice 1, READ-ONLY — drives nothing yet).
+
+    Ranks RUNNING strategy×symbol instances by a SIGNIFICANCE-WEIGHTED score on
+    recent realized PnL from the durable _trades ledger — thin samples are
+    down-weighted so a 4-trade fluke can't top an 80-trade edge — annotated with
+    each symbol's CURRENT regime and whether the strategy_type is favoured there.
+    Replaces the old raw-lifetime-PnL ranking (which ranked a 4-trade fluke #1).
+
+    `regime_conditional_score` is currently a STATIC regime-fit proxy
+    (REGIME_STRATEGY_MAP): significance score discounted when the strategy_type is
+    NOT recommended in the symbol's current regime. The stronger EMPIRICAL signal —
+    this instance's realized PnL in PAST windows that matched the current regime —
+    needs a per-trade regime tag the ledger does not record yet (see `_schema_gap`).
+    """
+    from src.execution.paper_executor import significance_weighted_score
+    from src.services.regime_detector import REGIME_STRATEGY_MAP, MarketRegime
+
+    executor = getattr(request.app.state, "executor", None)
+    detector = getattr(request.app.state, "regime_detector", None)
 
     db = next(get_db())
     try:
-        strategies = db.query(models.StrategyInstance).all()
+        running = db.query(models.StrategyInstance).filter(
+            models.StrategyInstance.status == "running"
+        ).all()
 
-        leaderboard = []
-        for s in strategies:
-            win_rate = (s.winning_trades / s.total_trades * 100) if s.total_trades > 0 else 0
-            leaderboard.append({
+        # Recent exit PnLs per strategy from the durable ledger (append order == chronological).
+        by_strat: dict = {}
+        if executor is not None and hasattr(executor, "get_trade_history"):
+            for t in executor.get_trade_history():
+                if t.get("action") == "exit":
+                    by_strat.setdefault(t.get("strategy", ""), []).append(t.get("pnl", 0.0))
+
+        regime_cache: dict = {}
+        def _regime(sym):
+            if sym not in regime_cache:
+                r = detector.get_current_regime(sym) if detector is not None else None
+                regime_cache[sym] = (r or {}).get("regime", "unknown")
+            return regime_cache[sym]
+
+        def _recommended(stype, regime_str):
+            try:
+                return stype in REGIME_STRATEGY_MAP.get(MarketRegime(regime_str), [])
+            except ValueError:
+                return None  # unknown/uncomputed regime -> no opinion
+
+        rows = []
+        for s in running:
+            recent = by_strat.get(s.name, [])[-window:]
+            sig = significance_weighted_score(recent)
+            regime = _regime(s.symbol)
+            rec = _recommended(s.strategy_type, regime)
+            regime_fit = 0.6 if rec is False else 1.0  # off-regime discount; unknown regime = neutral
+            rows.append({
                 "name": s.name,
-                "strategy_type": s.strategy_type,
-                "status": s.status,
-                "total_pnl": round(s.total_pnl, 2),
-                "total_trades": s.total_trades,
-                "winning_trades": s.winning_trades,
-                "losing_trades": s.losing_trades,
-                "win_rate": round(win_rate, 1),
-                "profitable": s.total_pnl > 0,
-                "avg_pnl_per_trade": round(s.total_pnl / s.total_trades, 2) if s.total_trades > 0 else 0,
+                "type": s.strategy_type,
+                "symbol": s.symbol,
+                "current_regime": regime,
+                "regime_recommended": rec,
+                "recent_pnl": round(sum(recent), 2),
+                "trades": len(recent),
+                "significance_weighted_score": round(sig, 4),
+                "regime_conditional_score": round(sig * regime_fit, 4),
             })
 
-        leaderboard.sort(key=lambda x: x["total_pnl"], reverse=True)
-
-        profitable = [s for s in leaderboard if s["profitable"]]
-        losing = [s for s in leaderboard if not s["profitable"] and s["total_trades"] > 0]
-        inactive = [s for s in leaderboard if s["total_trades"] == 0]
+        rows.sort(key=lambda r: r["regime_conditional_score"], reverse=True)
+        for i, r in enumerate(rows):
+            r["blended_rank"] = i + 1
 
         return {
-            "leaderboard": leaderboard,
-            "summary": {
-                "total_strategies": len(leaderboard),
-                "profitable_count": len(profitable),
-                "losing_count": len(losing),
-                "inactive_count": len(inactive),
-                "total_pnl": round(sum(s["total_pnl"] for s in leaderboard), 2),
-                "profitable_pnl": round(sum(s["total_pnl"] for s in profitable), 2),
-                "losing_pnl": round(sum(s["total_pnl"] for s in losing), 2),
-            },
+            "window": window,
+            "count": len(rows),
+            "rows": rows,
+            "_schema_gap": (
+                "regime_conditional_score is a STATIC regime-fit proxy (REGIME_STRATEGY_MAP). "
+                "Empirical regime-conditional PnL (this instance's realized PnL in past windows "
+                "matching the current regime) needs a per-trade `regime` tag the durable ledger "
+                "does not record. Minimal add: stamp PaperTrade.regime from the live detector at "
+                "exit; forward trades then accumulate it for slice 2."
+            ),
         }
     finally:
         db.close()

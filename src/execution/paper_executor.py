@@ -18,6 +18,7 @@ import json
 import logging
 import math
 import os
+import statistics
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -36,6 +37,26 @@ from src.strategies.base_strategy import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def significance_weighted_score(pnls: List[float], k: int = 10) -> float:
+    """Rank score for a recent-trade PnL sample (T009 conditional-edge ranker).
+
+    t-stat-like (mean over standard error) shrunk by sample size n/(n+k), so a
+    thin lucky sample can't outrank a high-sample edge: a 4-trade +19 fluke
+    scores BELOW an 80-trade consistent +0.5 edge. Returns 0 for an empty sample.
+
+    ponytail: the +1.0 is a $-unit regularizer on the standard error (keeps a
+    near-zero-variance small sample from blowing up); k is the shrinkage
+    strength — raise k if thin samples still rank too high.
+    """
+    n = len(pnls)
+    if n == 0:
+        return 0.0
+    mean = sum(pnls) / n
+    se = (statistics.pstdev(pnls) / math.sqrt(n)) if n >= 2 else abs(mean)
+    return (mean / (se + 1.0)) * (n / (n + k))
+
 
 _OBSERVATION_FLOOR = 0.10  # fresh/edgeless strategies size at 10% until confidence accrues
 
@@ -1172,3 +1193,16 @@ class PaperTradingExecutor:
                 })
 
         return curve
+
+
+if __name__ == "__main__":
+    # significance_weighted_score: a thin lucky fluke must NOT outrank a
+    # high-sample consistent edge, and an empty/single sample stays tiny.
+    _consistent = [0.5] * 80
+    _fluke = [0.2, 0.3, 18.5, 0.28]  # 4 trades, +19.28 total, one big lucky win
+    assert significance_weighted_score(_consistent) > significance_weighted_score(_fluke), \
+        "thin fluke must not outrank high-sample edge"
+    assert significance_weighted_score([]) == 0.0
+    assert abs(significance_weighted_score([1.0])) < 1.0  # single trade barely counts
+    assert significance_weighted_score([-0.5] * 50) < 0.0  # a real loser scores negative
+    print("paper_executor self-checks OK")
