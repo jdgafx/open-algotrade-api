@@ -1350,6 +1350,18 @@ async def lifespan(app: FastAPI):
                         logger.warning(
                             "Cull: orchestrator stop error for %s (continuing): %s", _name, _oe
                         )
+                    # xsec engines live in app.state, not the orchestrator — without
+                    # this a culled xsec instance keeps trading behind status=stopped
+                    # (live zombie: 112 re-opened legs post-cull 2026-07-01 21:14Z).
+                    _xmap = getattr(app.state, "xsec_driver_engines", {})
+                    if _name in _xmap:
+                        _xeng, _xtask = _xmap.pop(_name)
+                        try:
+                            _xeng.stop()
+                            _xtask.cancel()
+                            logger.info("Cull: stopped xsec engine %s", _name)
+                        except Exception as _xse:
+                            logger.warning("Cull: xsec engine stop error for %s: %s", _name, _xse)
                     if hasattr(executor, "close_by_strategy"):
                         try:
                             _results = await executor.close_by_strategy(_name)
@@ -1633,6 +1645,7 @@ async def lifespan(app: FastAPI):
                         per_leg_usd=float(_p.get("per_leg_usd", 50.0)),
                         rebalance_secs=int(_p.get("rebalance_secs", 3600)),
                         timeframe=_xdr.timeframe or "1h",
+                        initial_legs=_xsec_open_legs(executor, _xdr.name),
                     )
                     _task = asyncio.create_task(_eng.run())
                     app.state.xsec_driver_engines[_xdr.name] = (_eng, _task)
@@ -1868,6 +1881,17 @@ def _paper_positions_out(executor) -> List[schemas.Position]:
             leverage=pos.leverage,
         ))
     return out
+
+
+def _xsec_open_legs(executor, name: str) -> dict:
+    """{symbol: side} of the executor's live open positions for one xsec instance.
+    Seeds XsecDriverEngine._open_legs across restarts so rotation can close
+    pre-restart legs instead of orphaning them."""
+    try:
+        return {p.symbol: p.side for p in getattr(executor, "_positions", {}).values()
+                if getattr(p, "strategy_name", None) == name}
+    except Exception:
+        return {}
 
 
 def _paper_trades_out(executor, limit: int, open_only: bool) -> List[schemas.TradeOut]:
@@ -4252,7 +4276,10 @@ def market_overview(
 # XsecDriverEngine runtime management
 # ──────────────────────────────────────────────
 
-_XSEC_DRIVER_SUPPORTED = {"realized_vol_carry", "dollar_volume"}
+# Single source of truth lives in the engine module — a duplicated literal here
+# silently 400-rejected new drivers the engine already supported (amihud_illiq,
+# 2026-07-01 observe funnel).
+from src.engine.xsec_driver_engine import SUPPORTED_DRIVERS as _XSEC_DRIVER_SUPPORTED
 _XSEC_DRIVER_DEFAULT_COINS = [
     "BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "AVAX", "LINK", "SUI", "ARB"
 ]
@@ -4393,6 +4420,18 @@ async def stop_xsec_driver_instance(
         logger.info("xsec_driver(%s): stopped via API", name)
     else:
         logger.info("xsec_driver(%s): stop requested but was not in running map", name)
+
+    # Flush the instance's open legs — a stopped engine can never close them,
+    # so without this they orphan as drifting positions.
+    executor = getattr(request.app.state, "executor", None)
+    if executor is not None and hasattr(executor, "close_by_strategy"):
+        try:
+            _res = await executor.close_by_strategy(name)
+            _n = sum(1 for r in _res if r.success)
+            if _n:
+                logger.info("xsec_driver(%s): flushed %d open leg(s)", name, _n)
+        except Exception as _fe:
+            logger.warning("xsec_driver(%s): leg flush error: %s", name, _fe)
 
     row.status = "stopped"
     db.commit()

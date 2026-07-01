@@ -66,6 +66,7 @@ class XsecDriverEngine:
         per_leg_usd: float,
         rebalance_secs: int,
         timeframe: str = "1h",
+        initial_legs: Optional[Dict[str, str]] = None,
     ):
         if driver not in SUPPORTED_DRIVERS:
             raise ValueError(
@@ -86,7 +87,10 @@ class XsecDriverEngine:
         self._per_leg_usd = per_leg_usd
         self._rebalance_secs = rebalance_secs
         self._timeframe = timeframe
-        self._open_legs: Dict[str, str] = {}
+        # Seed from durable open positions on restart — a redeploy otherwise
+        # blanks this map while the paper legs persist, so rotation can never
+        # close pre-restart legs (they orphan forever).
+        self._open_legs: Dict[str, str] = dict(initial_legs or {})
         self._stop_event = asyncio.Event()
 
     # ── Driver computation ───────────────────────────────────────────────────
