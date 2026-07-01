@@ -356,3 +356,37 @@ def test_amihud_zero_volume_bars_skipped():
     eng = _make_engine(driver="amihud_illiq", sign=1, lookback=5)
     all_zero = _make_candles([100, 101, 102, 103, 104], volumes=[0] * 5)
     assert eng._compute_driver_value(all_zero) is None
+
+
+# ── return_skew driver ───────────────────────────────────────────────────────
+
+def test_return_skew_matches_pandas():
+    """Engine's manual bias-corrected skew must equal pandas rolling.skew so the
+    live signal agrees with the edge_engine backtest that gated it."""
+    import pandas as pd
+    eng = _make_engine(driver="return_skew", sign=-1, lookback=12)
+    # 12 closes -> 11 returns with a deliberate positive-skew tail
+    closes = [100, 101, 100, 101, 100, 101, 100, 101, 100, 101, 100, 130]
+    candles = _make_candles(closes)
+    got = eng._compute_driver_value(candles)
+    rets = pd.Series(closes).pct_change().dropna()
+    assert abs(got - rets.skew()) < 1e-9
+
+
+def test_return_skew_sign_convention():
+    """sign=-1 -> long LOW-skew coin, short HIGH-skew coin."""
+    eng = _make_engine(driver="return_skew", sign=-1, lookback=12)
+    hi = _make_candles([100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 140])
+    lo = _make_candles([100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 70])
+    v_hi = eng._compute_driver_value(hi)
+    v_lo = eng._compute_driver_value(lo)
+    assert v_hi > v_lo
+    scores = {"HI": -(-1) * v_hi, "LO": -(-1) * v_lo,
+              "A": 0.0, "B": 0.001, "C": -0.001}
+    lo_bskt, sh_bskt = rank_basket(scores, 0.3)
+    assert "LO" in lo_bskt and "HI" in sh_bskt
+
+
+def test_return_skew_flat_returns_none():
+    eng = _make_engine(driver="return_skew", sign=-1, lookback=12)
+    assert eng._compute_driver_value(_make_candles([100] * 12)) is None

@@ -25,7 +25,8 @@ from .xsec_engine import _StratShim, rank_basket  # reuse proven pure helpers
 
 logger = logging.getLogger(__name__)
 
-SUPPORTED_DRIVERS = {"realized_vol_carry", "dollar_volume", "st_reversal", "amihud_illiq"}
+SUPPORTED_DRIVERS = {"realized_vol_carry", "dollar_volume", "st_reversal",
+                     "amihud_illiq", "return_skew"}
 
 # candle duration per supported timeframe; the fetch window is lookback bars of
 # THIS size (was hardcoded 1h — a 4h instance then fetched ~lookback/4 bars,
@@ -122,6 +123,21 @@ class XsecDriverEngine:
             # trailing cumulative return (matches edge_engine rolling-sum backtest);
             # sign=-1 -> long recent losers / short recent winners
             return sum(returns)
+
+        if self._driver == "return_skew":
+            # sample skewness of returns (matches pandas rolling.skew, which is the
+            # bias-corrected G1); sign=-1 -> long low-skew / short high-skew.
+            n = len(returns)
+            if n < 3:
+                return None
+            mean_r = sum(returns) / n
+            m2 = sum((r - mean_r) ** 2 for r in returns) / n
+            if m2 <= 0:
+                return None
+            m3 = sum((r - mean_r) ** 3 for r in returns) / n
+            g1 = m3 / (m2 ** 1.5)
+            # bias correction to match pandas .skew()
+            return g1 * ((n * (n - 1)) ** 0.5) / (n - 2)
 
         if self._driver == "amihud_illiq":
             # Amihud (2002) price-impact proxy: mean |ret| per dollar traded
