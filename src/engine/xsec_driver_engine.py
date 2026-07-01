@@ -27,6 +27,15 @@ logger = logging.getLogger(__name__)
 
 SUPPORTED_DRIVERS = {"realized_vol_carry", "dollar_volume"}
 
+# candle duration per supported timeframe; the fetch window is lookback bars of
+# THIS size (was hardcoded 1h — a 4h instance then fetched ~lookback/4 bars,
+# _compute_driver_value returned None for every coin, and the instance skipped
+# every tick forever: live 0-trade bug on disc_realized_vol_carry_4h_lb96)
+BAR_MS = {
+    "1m": 60_000, "5m": 300_000, "15m": 900_000,
+    "1h": 3_600_000, "4h": 14_400_000, "1d": 86_400_000,
+}
+
 DEFAULT_COINS = [
     "BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "AVAX", "LINK", "SUI", "ARB"
 ]
@@ -61,6 +70,10 @@ class XsecDriverEngine:
         if driver not in SUPPORTED_DRIVERS:
             raise ValueError(
                 f"Unknown driver '{driver}'. Supported: {sorted(SUPPORTED_DRIVERS)}"
+            )
+        if timeframe not in BAR_MS:
+            raise ValueError(
+                f"Unknown timeframe '{timeframe}'. Supported: {sorted(BAR_MS)}"
             )
         self._executor = executor
         self._client = client
@@ -113,7 +126,7 @@ class XsecDriverEngine:
         """
         end_ms = int(time.time() * 1000)
         # +2 bars of slack so the last bar is always a closed bar
-        bar_ms = 3_600_000  # 1h candles; matches HL default cadence
+        bar_ms = BAR_MS[self._timeframe]
         start_ms = end_ms - (self._lookback + 2) * bar_ms
 
         scores: Dict[str, float] = {}

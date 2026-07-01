@@ -285,3 +285,42 @@ def test_lifespan_sets_executor_and_client_on_app_state():
         assert getattr(app.state, "executor", None) is not None, "lifespan did not set app.state.executor"
         assert getattr(app.state, "client", None) is not None, "lifespan did not set app.state.client"
         assert hasattr(app.state, "loop"), "lifespan did not capture app.state.loop"
+
+
+# ── Timeframe → fetch-window tests (4h 0-trade bug) ─────────────────────────
+
+def test_fetch_window_scales_with_timeframe(monkeypatch):
+    """4h instance must request lookback bars of 4h, not 1h (live bug: window
+    covered lookback/4 bars -> insufficient data -> skipped every tick)."""
+    import time as _t
+    from src.engine.xsec_driver_engine import BAR_MS
+    captured = {}
+
+    class _Resp:
+        def raise_for_status(self): pass
+        def json(self): return []
+
+    def _fake_post(url, headers=None, json=None, timeout=None):
+        captured.update(json["req"])
+        return _Resp()
+
+    for tf in ("1h", "4h"):
+        eng = XsecDriverEngine(
+            executor=_FakeExecutor(), client=_FakeClient(), name="t",
+            driver="dollar_volume", lookback=96, q=0.3, sign=1,
+            coins=["BTC"], per_leg_usd=25.0, rebalance_secs=3600, timeframe=tf,
+        )
+        monkeypatch.setattr("src.engine.xsec_driver_engine.requests.post", _fake_post)
+        eng._fetch_coin_scores()
+        span_ms = captured["endTime"] - captured["startTime"]
+        assert span_ms == (96 + 2) * BAR_MS[tf], f"{tf}: wrong fetch window"
+        assert captured["interval"] == tf
+
+
+def test_unknown_timeframe_rejected():
+    with pytest.raises(ValueError, match="timeframe"):
+        XsecDriverEngine(
+            executor=_FakeExecutor(), client=_FakeClient(), name="t",
+            driver="dollar_volume", lookback=5, q=0.3, sign=1,
+            coins=["BTC"], per_leg_usd=25.0, rebalance_secs=3600, timeframe="7h",
+        )
