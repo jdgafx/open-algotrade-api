@@ -607,3 +607,4 @@ class XsecDriverInstanceOut(BaseModel):
     rebalance_secs: int
     timeframe: str
     running: bool
+    open_legs: Optional[Dict[str, str]] = None

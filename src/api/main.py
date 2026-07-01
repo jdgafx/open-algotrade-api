@@ -4352,6 +4352,7 @@ def list_xsec_driver_instances(request: Request, db: Session = Depends(get_db)):
     result = []
     for row in rows:
         p = row.params or {}
+        is_running = row.name in running_map and not running_map[row.name][1].done()
         result.append(schemas.XsecDriverInstanceOut(
             name=row.name,
             driver=p.get("driver", ""),
@@ -4362,7 +4363,8 @@ def list_xsec_driver_instances(request: Request, db: Session = Depends(get_db)):
             per_leg_usd=float(p.get("per_leg_usd", 50.0)),
             rebalance_secs=int(p.get("rebalance_secs", 3600)),
             timeframe=row.timeframe or "1h",
-            running=row.name in running_map and not running_map[row.name][1].done(),
+            running=is_running,
+            open_legs=dict(running_map[row.name][0]._open_legs) if is_running else None,
         ))
     return result
 

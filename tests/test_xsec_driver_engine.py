@@ -324,3 +324,35 @@ def test_unknown_timeframe_rejected():
             driver="dollar_volume", lookback=5, q=0.3, sign=1,
             coins=["BTC"], per_leg_usd=25.0, rebalance_secs=3600, timeframe="7h",
         )
+
+
+# ── New driver value tests (st_reversal, amihud_illiq) ───────────────────────
+
+def test_st_reversal_driver_value():
+    """Trailing cumulative return; falling coin scores negative, rising positive."""
+    eng = _make_engine(driver="st_reversal", sign=-1, lookback=5)
+    falling = _make_candles([100, 98, 96, 94, 92])
+    rising = _make_candles([100, 102, 104, 106, 108])
+    v_fall = eng._compute_driver_value(falling)
+    v_rise = eng._compute_driver_value(rising)
+    assert v_fall < 0 < v_rise
+    # sign=-1 -> score = +value -> rank_basket longs the bottom = the loser
+    scores = {"FALL": -(-1) * v_fall, "RISE": -(-1) * v_rise,
+              "A": 0.001, "B": 0.002, "C": 0.003}
+    lo, sh = rank_basket(scores, 0.3)
+    assert "FALL" in lo and "RISE" in sh
+
+
+def test_amihud_illiq_driver_value():
+    """|ret| per dollar traded: thin coin scores higher than deep coin."""
+    eng = _make_engine(driver="amihud_illiq", sign=1, lookback=5)
+    closes = [100, 101, 100, 101, 100]
+    thin = _make_candles(closes, volumes=[1] * 5)
+    deep = _make_candles(closes, volumes=[1000] * 5)
+    assert eng._compute_driver_value(thin) > eng._compute_driver_value(deep)
+
+
+def test_amihud_zero_volume_bars_skipped():
+    eng = _make_engine(driver="amihud_illiq", sign=1, lookback=5)
+    all_zero = _make_candles([100, 101, 102, 103, 104], volumes=[0] * 5)
+    assert eng._compute_driver_value(all_zero) is None

@@ -25,7 +25,7 @@ from .xsec_engine import _StratShim, rank_basket  # reuse proven pure helpers
 
 logger = logging.getLogger(__name__)
 
-SUPPORTED_DRIVERS = {"realized_vol_carry", "dollar_volume"}
+SUPPORTED_DRIVERS = {"realized_vol_carry", "dollar_volume", "st_reversal", "amihud_illiq"}
 
 # candle duration per supported timeframe; the fetch window is lookback bars of
 # THIS size (was hardcoded 1h — a 4h instance then fetched ~lookback/4 bars,
@@ -101,17 +101,32 @@ class XsecDriverEngine:
             return None
         bars = candles[-self._lookback:]
 
+        closes = [float(c["c"]) for c in bars]
+        if len(closes) < 2:
+            return None
+        returns = [
+            (closes[i] - closes[i - 1]) / closes[i - 1]
+            for i in range(1, len(closes))
+        ]
+
         if self._driver == "realized_vol_carry":
-            closes = [float(c["c"]) for c in bars]
-            if len(closes) < 2:
-                return None
-            returns = [
-                (closes[i] - closes[i - 1]) / closes[i - 1]
-                for i in range(1, len(closes))
-            ]
             mean_r = sum(returns) / len(returns)
             variance = sum((r - mean_r) ** 2 for r in returns) / len(returns)
             return variance ** 0.5
+
+        if self._driver == "st_reversal":
+            # trailing cumulative return (matches edge_engine rolling-sum backtest);
+            # sign=-1 -> long recent losers / short recent winners
+            return sum(returns)
+
+        if self._driver == "amihud_illiq":
+            # Amihud (2002) price-impact proxy: mean |ret| per dollar traded
+            ratios = []
+            for i in range(1, len(bars)):
+                dv = float(bars[i]["c"]) * float(bars[i]["v"])
+                if dv > 0:
+                    ratios.append(abs(returns[i - 1]) / dv)
+            return sum(ratios) / len(ratios) if ratios else None
 
         # driver == "dollar_volume"
         dvols = [float(c["c"]) * float(c["v"]) for c in bars]
