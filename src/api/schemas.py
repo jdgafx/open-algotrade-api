@@ -594,6 +594,8 @@ class XsecDriverCreate(BaseModel):
     timeframe: str = "1h"
     rebalance_secs: int = 3600
     enabled: bool = True
+    # driver == "ensemble" only: [{"driver": ..., "lookback": ..., "sign": ...}]
+    members: Optional[List[dict]] = None
 
 
 class XsecDriverInstanceOut(BaseModel):

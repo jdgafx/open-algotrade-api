@@ -182,6 +182,82 @@ def test_unknown_driver_raises():
 def test_supported_drivers_set():
     assert "realized_vol_carry" in SUPPORTED_DRIVERS
     assert "dollar_volume" in SUPPORTED_DRIVERS
+    assert "ensemble" in SUPPORTED_DRIVERS
+
+
+# ── Ensemble driver ───────────────────────────────────────────────────────────
+
+def test_ensemble_requires_members():
+    with pytest.raises(ValueError, match="requires non-empty members"):
+        XsecDriverEngine(
+            executor=_FakeExecutor(), client=_FakeClient(),
+            name="ens", driver="ensemble",
+            lookback=10, q=0.3, sign=1, coins=None,
+            per_leg_usd=50.0, rebalance_secs=3600,
+        )
+
+
+def test_ensemble_rejects_unknown_member_driver():
+    with pytest.raises(ValueError, match="unknown drivers"):
+        XsecDriverEngine(
+            executor=_FakeExecutor(), client=_FakeClient(),
+            name="ens", driver="ensemble",
+            lookback=10, q=0.3, sign=1, coins=None,
+            per_leg_usd=50.0, rebalance_secs=3600,
+            members=[{"driver": "made_up", "lookback": 5, "sign": -1}],
+        )
+
+
+def test_blend_member_scores_rank_average():
+    """Blend = mean of normalized ascending ranks; lower = more long-attractive."""
+    from src.engine.xsec_driver_engine import blend_member_scores
+    # member 1 ranks A<B<C (0, .5, 1); member 2 ranks C<B<A (1, .5, 0)
+    m1 = {"A": 1.0, "B": 2.0, "C": 3.0}
+    m2 = {"A": 9.0, "B": 5.0, "C": 1.0}
+    blended = blend_member_scores([m1, m2])
+    assert blended["B"] == pytest.approx(0.5)
+    assert blended["A"] == pytest.approx(0.5)
+    assert blended["C"] == pytest.approx(0.5)
+    # agreeing members separate the ranks
+    blended2 = blend_member_scores([m1, m1])
+    assert blended2["A"] < blended2["B"] < blended2["C"]
+
+
+def test_blend_member_scores_common_coins_only():
+    from src.engine.xsec_driver_engine import blend_member_scores
+    m1 = {"A": 1.0, "B": 2.0}
+    m2 = {"B": 1.0, "C": 2.0}
+    blended = blend_member_scores([m1, m2])
+    assert set(blended) == {"B"}
+
+
+def test_ensemble_fetch_scores_blends(monkeypatch):
+    """Ensemble _fetch_coin_scores: flat coin longs vol-carry member, high-dv
+    coin longs dollar-volume member; blend reflects both."""
+    eng = XsecDriverEngine(
+        executor=_FakeExecutor(), client=_FakeClient(),
+        name="ens", driver="ensemble",
+        lookback=5, q=0.3, sign=1,
+        coins=["FLAT", "SWING", "BIGDV", "TINY"],
+        per_leg_usd=50.0, rebalance_secs=3600,
+        members=[
+            {"driver": "realized_vol_carry", "lookback": 5, "sign": -1},
+            {"driver": "dollar_volume", "lookback": 5, "sign": 1},
+        ],
+    )
+    candle_map = {
+        "FLAT":  _make_candles([100.0] * 6, volumes=[10.0] * 6),
+        "SWING": _make_candles([100, 130, 70, 140, 60, 120], volumes=[10.0] * 6),
+        "BIGDV": _make_candles([100, 101, 100, 101, 100, 101], volumes=[9999.0] * 6),
+        "TINY":  _make_candles([100, 102, 99, 103, 98, 102], volumes=[0.1] * 6),
+    }
+    monkeypatch.setattr(eng, "_fetch_coin_candles", lambda: candle_map)
+    scores = eng._fetch_coin_scores()
+    assert scores is not None and set(scores) == set(candle_map)
+    # FLAT: best vol-carry rank; BIGDV: best dollar-volume rank — both should
+    # beat SWING+TINY (bad on both dimensions)
+    assert scores["FLAT"] < scores["SWING"]
+    assert scores["BIGDV"] < scores["TINY"]
 
 
 # ── FastAPI endpoint test ─────────────────────────────────────────────────────

@@ -1646,6 +1646,7 @@ async def lifespan(app: FastAPI):
                         rebalance_secs=int(_p.get("rebalance_secs", 3600)),
                         timeframe=_xdr.timeframe or "1h",
                         initial_legs=_xsec_open_legs(executor, _xdr.name),
+                        members=_p.get("members") or None,
                     )
                     _task = asyncio.create_task(_eng.run())
                     app.state.xsec_driver_engines[_xdr.name] = (_eng, _task)
@@ -4301,6 +4302,15 @@ def create_xsec_driver_instance(
             status_code=400,
             detail=f"Unknown driver '{data.driver}'. Supported: {sorted(_XSEC_DRIVER_SUPPORTED)}",
         )
+    if data.driver == "ensemble":
+        from src.engine.xsec_driver_engine import BASE_DRIVERS as _XSEC_BASE
+        bad = [m.get("driver") for m in (data.members or [])
+               if m.get("driver") not in _XSEC_BASE]
+        if not data.members or bad:
+            raise HTTPException(
+                status_code=400,
+                detail=f"ensemble requires members with drivers in {sorted(_XSEC_BASE)}; got {data.members}",
+            )
 
     existing = db.query(models.StrategyInstance).filter(
         models.StrategyInstance.name == data.name
@@ -4328,6 +4338,7 @@ def create_xsec_driver_instance(
             "coins": coins,
             "per_leg_usd": data.per_leg_usd,
             "rebalance_secs": data.rebalance_secs,
+            "members": data.members,
         },
     )
     db.add(instance)
@@ -4351,6 +4362,7 @@ def create_xsec_driver_instance(
                 per_leg_usd=data.per_leg_usd,
                 rebalance_secs=data.rebalance_secs,
                 timeframe=data.timeframe,
+                members=data.members,
             )
             import asyncio as _aio
             loop = getattr(request.app.state, "loop", None)

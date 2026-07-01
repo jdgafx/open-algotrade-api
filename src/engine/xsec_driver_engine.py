@@ -25,8 +25,12 @@ from .xsec_engine import _StratShim, rank_basket  # reuse proven pure helpers
 
 logger = logging.getLogger(__name__)
 
-SUPPORTED_DRIVERS = {"realized_vol_carry", "dollar_volume", "st_reversal",
-                     "amihud_illiq", "return_skew"}
+BASE_DRIVERS = {"realized_vol_carry", "dollar_volume", "st_reversal",
+                "amihud_illiq", "return_skew"}
+# "ensemble" blends several base drivers cross-sectionally (params.members);
+# the whole point is diversification: members too weak to pass the discovery
+# gate individually can pass it combined, and trade live as ONE pnl stream.
+SUPPORTED_DRIVERS = BASE_DRIVERS | {"ensemble"}
 
 # candle duration per supported timeframe; the fetch window is lookback bars of
 # THIS size (was hardcoded 1h — a 4h instance then fetched ~lookback/4 bars,
@@ -40,6 +44,87 @@ BAR_MS = {
 DEFAULT_COINS = [
     "BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "AVAX", "LINK", "SUI", "ARB"
 ]
+
+
+def compute_driver_value(candles: list, driver: str, lookback: int) -> Optional[float]:
+    """Base-driver value for one coin from its closed candle list.
+
+    No lookahead: uses only closed bars (last `lookback` candles).
+    Returns None if insufficient data. Matches edge_engine backtest math.
+    """
+    if len(candles) < lookback:
+        return None
+    bars = candles[-lookback:]
+
+    closes = [float(c["c"]) for c in bars]
+    if len(closes) < 2:
+        return None
+    returns = [
+        (closes[i] - closes[i - 1]) / closes[i - 1]
+        for i in range(1, len(closes))
+    ]
+
+    if driver == "realized_vol_carry":
+        mean_r = sum(returns) / len(returns)
+        variance = sum((r - mean_r) ** 2 for r in returns) / len(returns)
+        return variance ** 0.5
+
+    if driver == "st_reversal":
+        # trailing cumulative return (matches edge_engine rolling-sum backtest);
+        # sign=-1 -> long recent losers / short recent winners
+        return sum(returns)
+
+    if driver == "return_skew":
+        # sample skewness of returns (matches pandas rolling.skew, which is the
+        # bias-corrected G1); sign=-1 -> long low-skew / short high-skew.
+        n = len(returns)
+        if n < 3:
+            return None
+        mean_r = sum(returns) / n
+        m2 = sum((r - mean_r) ** 2 for r in returns) / n
+        if m2 <= 0:
+            return None
+        m3 = sum((r - mean_r) ** 3 for r in returns) / n
+        g1 = m3 / (m2 ** 1.5)
+        # bias correction to match pandas .skew()
+        return g1 * ((n * (n - 1)) ** 0.5) / (n - 2)
+
+    if driver == "amihud_illiq":
+        # Amihud (2002) price-impact proxy: mean |ret| per dollar traded
+        ratios = []
+        for i in range(1, len(bars)):
+            dv = float(bars[i]["c"]) * float(bars[i]["v"])
+            if dv > 0:
+                ratios.append(abs(returns[i - 1]) / dv)
+        return sum(ratios) / len(ratios) if ratios else None
+
+    if driver == "dollar_volume":
+        dvols = [float(c["c"]) * float(c["v"]) for c in bars]
+        return sum(dvols) / len(dvols)
+
+    return None
+
+
+def blend_member_scores(member_scores: List[Dict[str, float]]) -> Dict[str, float]:
+    """Equal-weight rank blend of per-member score dicts ({coin: score}, lower =
+    more long-attractive). Only coins scored by EVERY member participate — a
+    partial blend silently tilts the basket toward whichever members had data.
+    Returns {coin: avg_normalized_rank} with the same lower=long convention."""
+    if not member_scores:
+        return {}
+    common = set(member_scores[0])
+    for s in member_scores[1:]:
+        common &= set(s)
+    if not common:
+        return {}
+    total: Dict[str, float] = {c: 0.0 for c in common}
+    denom = max(1, len(common) - 1)
+    for s in member_scores:
+        ranked = sorted(common, key=lambda c: s[c])
+        for r, coin in enumerate(ranked):
+            total[coin] += r / denom
+    n = len(member_scores)
+    return {c: v / n for c, v in total.items()}
 
 
 class XsecDriverEngine:
@@ -68,6 +153,7 @@ class XsecDriverEngine:
         rebalance_secs: int,
         timeframe: str = "1h",
         initial_legs: Optional[Dict[str, str]] = None,
+        members: Optional[List[dict]] = None,
     ):
         if driver not in SUPPORTED_DRIVERS:
             raise ValueError(
@@ -77,10 +163,20 @@ class XsecDriverEngine:
             raise ValueError(
                 f"Unknown timeframe '{timeframe}'. Supported: {sorted(BAR_MS)}"
             )
+        if driver == "ensemble":
+            if not members:
+                raise ValueError("driver 'ensemble' requires non-empty members")
+            bad = [m.get("driver") for m in members if m.get("driver") not in BASE_DRIVERS]
+            if bad:
+                raise ValueError(f"ensemble members use unknown drivers: {bad}")
         self._executor = executor
         self._client = client
         self._name = name
         self._driver = driver
+        self._members: List[dict] = list(members or [])
+        # candle fetch window must cover the deepest member
+        self._fetch_lookback = (max(int(m["lookback"]) for m in self._members)
+                                if self._members else lookback)
         self._lookback = lookback
         self._q = q
         self._sign = sign
@@ -97,74 +193,17 @@ class XsecDriverEngine:
     # ── Driver computation ───────────────────────────────────────────────────
 
     def _compute_driver_value(self, candles: list) -> Optional[float]:
-        """Compute driver value for one coin from its closed candle list.
+        """Base-driver value using this instance's driver/lookback (delegates)."""
+        return compute_driver_value(candles, self._driver, self._lookback)
 
-        No lookahead: uses only closed bars (last N candles, index -lookback onwards).
-        Returns None if insufficient data.
-        """
-        if len(candles) < self._lookback:
-            return None
-        bars = candles[-self._lookback:]
-
-        closes = [float(c["c"]) for c in bars]
-        if len(closes) < 2:
-            return None
-        returns = [
-            (closes[i] - closes[i - 1]) / closes[i - 1]
-            for i in range(1, len(closes))
-        ]
-
-        if self._driver == "realized_vol_carry":
-            mean_r = sum(returns) / len(returns)
-            variance = sum((r - mean_r) ** 2 for r in returns) / len(returns)
-            return variance ** 0.5
-
-        if self._driver == "st_reversal":
-            # trailing cumulative return (matches edge_engine rolling-sum backtest);
-            # sign=-1 -> long recent losers / short recent winners
-            return sum(returns)
-
-        if self._driver == "return_skew":
-            # sample skewness of returns (matches pandas rolling.skew, which is the
-            # bias-corrected G1); sign=-1 -> long low-skew / short high-skew.
-            n = len(returns)
-            if n < 3:
-                return None
-            mean_r = sum(returns) / n
-            m2 = sum((r - mean_r) ** 2 for r in returns) / n
-            if m2 <= 0:
-                return None
-            m3 = sum((r - mean_r) ** 3 for r in returns) / n
-            g1 = m3 / (m2 ** 1.5)
-            # bias correction to match pandas .skew()
-            return g1 * ((n * (n - 1)) ** 0.5) / (n - 2)
-
-        if self._driver == "amihud_illiq":
-            # Amihud (2002) price-impact proxy: mean |ret| per dollar traded
-            ratios = []
-            for i in range(1, len(bars)):
-                dv = float(bars[i]["c"]) * float(bars[i]["v"])
-                if dv > 0:
-                    ratios.append(abs(returns[i - 1]) / dv)
-            return sum(ratios) / len(ratios) if ratios else None
-
-        # driver == "dollar_volume"
-        dvols = [float(c["c"]) * float(c["v"]) for c in bars]
-        return sum(dvols) / len(dvols)
-
-    def _fetch_coin_scores(self) -> Optional[Dict[str, float]]:
-        """Fetch candleSnapshot for all coins, compute driver values, apply sign.
-
-        Returns {coin: score} where score = -sign * driver_value, or None on
-        insufficient data (<4 coins).  rank_basket(score) then gives long=bottom-q
-        matching the intended sign convention.
-        """
+    def _fetch_coin_candles(self) -> Dict[str, list]:
+        """Fetch candleSnapshot per coin, window sized for the deepest lookback."""
         end_ms = int(time.time() * 1000)
         # +2 bars of slack so the last bar is always a closed bar
         bar_ms = BAR_MS[self._timeframe]
-        start_ms = end_ms - (self._lookback + 2) * bar_ms
+        start_ms = end_ms - (self._fetch_lookback + 2) * bar_ms
 
-        scores: Dict[str, float] = {}
+        out: Dict[str, list] = {}
         for coin in self._coins:
             try:
                 r = requests.post(
@@ -182,14 +221,46 @@ class XsecDriverEngine:
                     timeout=10,
                 )
                 r.raise_for_status()
-                candles = r.json()
-                val = self._compute_driver_value(candles)
-                if val is not None:
-                    scores[coin] = -self._sign * val  # ponytail: sign inversion; see module docstring
+                out[coin] = r.json()
             except Exception as exc:
                 logger.debug(
                     "xsec_driver(%s): candle fetch %s failed — %s", self._name, coin, exc
                 )
+        return out
+
+    def _fetch_coin_scores(self) -> Optional[Dict[str, float]]:
+        """Fetch candles, compute driver scores ({coin: score}, lower = long).
+
+        Base driver: score = -sign * driver_value, so rank_basket(score, q)
+        gives long=bottom-q matching the module docstring sign convention.
+        Ensemble: equal-weight rank blend of member scores (same convention).
+        Returns None on insufficient data (<4 coins).
+        """
+        candles_by_coin = self._fetch_coin_candles()
+
+        if self._driver == "ensemble":
+            member_scores: List[Dict[str, float]] = []
+            for m in self._members:
+                s: Dict[str, float] = {}
+                for coin, candles in candles_by_coin.items():
+                    val = compute_driver_value(candles, m["driver"], int(m["lookback"]))
+                    if val is not None:
+                        s[coin] = -int(m.get("sign", -1)) * val
+                if s:
+                    member_scores.append(s)
+            if len(member_scores) < len(self._members):
+                logger.warning(
+                    "xsec_driver(%s): only %d/%d ensemble members scored — skipping",
+                    self._name, len(member_scores), len(self._members),
+                )
+                return None
+            scores = blend_member_scores(member_scores)
+        else:
+            scores = {}
+            for coin, candles in candles_by_coin.items():
+                val = compute_driver_value(candles, self._driver, self._lookback)
+                if val is not None:
+                    scores[coin] = -self._sign * val  # ponytail: sign inversion; see module docstring
 
         return scores if len(scores) >= 4 else None
 
