@@ -1647,6 +1647,7 @@ async def lifespan(app: FastAPI):
                         timeframe=_xdr.timeframe or "1h",
                         initial_legs=_xsec_open_legs(executor, _xdr.name),
                         members=_p.get("members") or None,
+                        trail_days=int(_p.get("trail_days", 14)),
                     )
                     _task = asyncio.create_task(_eng.run())
                     app.state.xsec_driver_engines[_xdr.name] = (_eng, _task)
@@ -4339,6 +4340,7 @@ def create_xsec_driver_instance(
             "per_leg_usd": data.per_leg_usd,
             "rebalance_secs": data.rebalance_secs,
             "members": data.members,
+            "trail_days": data.trail_days,
         },
     )
     db.add(instance)
@@ -4363,6 +4365,7 @@ def create_xsec_driver_instance(
                 rebalance_secs=data.rebalance_secs,
                 timeframe=data.timeframe,
                 members=data.members,
+                trail_days=data.trail_days,
             )
             import asyncio as _aio
             loop = getattr(request.app.state, "loop", None)

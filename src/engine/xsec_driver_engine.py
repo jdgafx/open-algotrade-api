@@ -27,10 +27,14 @@ logger = logging.getLogger(__name__)
 
 BASE_DRIVERS = {"realized_vol_carry", "dollar_volume", "st_reversal",
                 "amihud_illiq", "return_skew"}
-# "ensemble" blends several base drivers cross-sectionally (params.members);
-# the whole point is diversification: members too weak to pass the discovery
-# gate individually can pass it combined, and trade live as ONE pnl stream.
+# "ensemble" = factor-momentum blend of base drivers (params.members): each
+# member's cross-sectional rank is flipped when its own trailing trail_days
+# gross return is negative (Gupta-Kelly factor momentum), then ranks average
+# and the basket is top/bottom-q of the blend. Members too weak to pass the
+# discovery gate individually can pass it combined, and the combined unit
+# trades live as ONE pnl stream. Mirrors edge_engine._eval_xsec_ensemble.
 SUPPORTED_DRIVERS = BASE_DRIVERS | {"ensemble"}
+DEFAULT_TRAIL_DAYS = 14
 
 # candle duration per supported timeframe; the fetch window is lookback bars of
 # THIS size (was hardcoded 1h — a 4h instance then fetched ~lookback/4 bars,
@@ -105,26 +109,108 @@ def compute_driver_value(candles: list, driver: str, lookback: int) -> Optional[
     return None
 
 
-def blend_member_scores(member_scores: List[Dict[str, float]]) -> Dict[str, float]:
-    """Equal-weight rank blend of per-member score dicts ({coin: score}, lower =
-    more long-attractive). Only coins scored by EVERY member participate — a
-    partial blend silently tilts the basket toward whichever members had data.
-    Returns {coin: avg_normalized_rank} with the same lower=long convention."""
-    if not member_scores:
-        return {}
-    common = set(member_scores[0])
-    for s in member_scores[1:]:
-        common &= set(s)
-    if not common:
-        return {}
-    total: Dict[str, float] = {c: 0.0 for c in common}
-    denom = max(1, len(common) - 1)
-    for s in member_scores:
-        ranked = sorted(common, key=lambda c: s[c])
-        for r, coin in enumerate(ranked):
-            total[coin] += r / denom
-    n = len(member_scores)
-    return {c: v / n for c, v in total.items()}
+def _normalized_ranks(scores: Dict[str, float]) -> Dict[str, float]:
+    """Ascending normalized rank in [0,1] of a {coin: value} dict (higher value
+    = higher rank)."""
+    denom = max(1, len(scores) - 1)
+    ranked = sorted(scores, key=lambda c: scores[c])
+    return {coin: r / denom for r, coin in enumerate(ranked)}
+
+
+def ensemble_scores(candles_by_coin: Dict[str, list],
+                    members: List[dict],
+                    bars_per_day: int,
+                    trail_days: int,
+                    q: float) -> Optional[Dict[str, float]]:
+    """Factor-momentum signed-rank blend over HL candle lists ({t,c,v} dicts).
+
+    Pure function (unit-testable, no I/O). Mirrors edge_engine's
+    _eval_xsec_ensemble: daily member rebalance grid anchored at the latest
+    bar, member trailing gross over trail_days decides each member's rank
+    direction, blend = mean of (rank | 1-rank), returned with LOWER = more
+    long-attractive so rank_basket(scores, q) picks long = bottom-q.
+    Returns None on insufficient data.
+
+    Coins are TIMESTAMP-aligned (HL omits empty bars — raw index alignment
+    skews every rank and return): grid = last `need` timestamps of the densest
+    coin; a coin participates only if it has every grid bar.
+    """
+    if not members or not candles_by_coin:
+        return None
+    max_lb = max(int(m["lookback"]) for m in members)
+    trail = trail_days * bars_per_day
+    need = max_lb + trail + 1
+    dense = max(candles_by_coin, key=lambda c: len(candles_by_coin[c]))
+    grid_ts = [int(b["t"]) for b in candles_by_coin[dense]][-need:]
+    if len(grid_ts) < need:
+        return None
+    cl: Dict[str, List[float]] = {}
+    vol: Dict[str, List[float]] = {}
+    for coin, candles in candles_by_coin.items():
+        by_t = {int(b["t"]): b for b in candles}
+        if all(t in by_t for t in grid_ts):
+            cl[coin] = [float(by_t[t]["c"]) for t in grid_ts]
+            vol[coin] = [float(by_t[t]["v"]) for t in grid_ts]
+    coins = sorted(cl)
+    if len(coins) < 4:
+        return None
+    L = need
+
+    def member_value(coin: str, m: dict, t: int) -> Optional[float]:
+        lb = int(m["lookback"])
+        candles = [{"c": cl[coin][i], "v": vol[coin][i]} for i in range(t - lb + 1, t + 1)]
+        return compute_driver_value(candles, m["driver"], lb)
+
+    # rebalance grid: latest bar and every bars_per_day back through the trail
+    grid = [L - 1 - j * bars_per_day for j in range(trail_days, -1, -1)]
+    if grid[0] < max_lb:
+        return None
+
+    # per-member basket weights at each grid point + gross over each span
+    trailing_gross: List[float] = [0.0] * len(members)
+    member_now_ranks: List[Dict[str, float]] = []
+    for mi, m in enumerate(members):
+        sign = int(m.get("sign", -1))
+        for gi, t in enumerate(grid):
+            vals = {}
+            for coin in coins:
+                v = member_value(coin, m, t)
+                if v is not None:
+                    vals[coin] = sign * v          # higher = long-attractive
+            if len(vals) < 4:
+                return None
+            ranks = _normalized_ranks(vals)
+            if gi == len(grid) - 1:
+                member_now_ranks.append(ranks)
+                break                              # current bar: rank only, no span after it
+            ranked = sorted(vals, key=lambda c: vals[c])
+            k = max(1, int(len(ranked) * q))
+            w = {c: 0.0 for c in coins}
+            for c in ranked[-k:]: w[c] =  1.0 / k
+            for c in ranked[:k]:  w[c] = -1.0 / k
+            # gross over (t, next grid point], weights applied from t+1 (no lookahead)
+            t_next = grid[gi + 1]
+            g = 0.0
+            for b in range(t + 1, t_next + 1):
+                for c in coins:
+                    if w[c]:
+                        g += w[c] * (cl[c][b] / cl[c][b - 1] - 1.0)
+            trailing_gross[mi] += g
+
+    common = set(member_now_ranks[0])
+    for r in member_now_ranks[1:]:
+        common &= set(r)
+    if len(common) < 4:
+        return None
+    blended: Dict[str, float] = {}
+    for coin in common:
+        acc = 0.0
+        for mi, ranks in enumerate(member_now_ranks):
+            r = ranks[coin]
+            acc += r if trailing_gross[mi] >= 0 else 1.0 - r
+        blended[coin] = acc / len(members)
+    # backtest longs TOP of blended; rank_basket longs BOTTOM of score
+    return {c: -v for c, v in blended.items()}
 
 
 class XsecDriverEngine:
@@ -154,6 +240,7 @@ class XsecDriverEngine:
         timeframe: str = "1h",
         initial_legs: Optional[Dict[str, str]] = None,
         members: Optional[List[dict]] = None,
+        trail_days: int = DEFAULT_TRAIL_DAYS,
     ):
         if driver not in SUPPORTED_DRIVERS:
             raise ValueError(
@@ -174,9 +261,17 @@ class XsecDriverEngine:
         self._name = name
         self._driver = driver
         self._members: List[dict] = list(members or [])
-        # candle fetch window must cover the deepest member
-        self._fetch_lookback = (max(int(m["lookback"]) for m in self._members)
-                                if self._members else lookback)
+        self._trail_days = int(trail_days)
+        self._bars_per_day = max(1, 86_400_000 // BAR_MS[timeframe])
+        # candle fetch window must cover the deepest member PLUS the factor-
+        # momentum trail (member gross is reconstructed from candles each tick);
+        # +5%+10 slack because HL omits empty bars and the window is time-based
+        if self._members:
+            base = (max(int(m["lookback"]) for m in self._members)
+                    + self._trail_days * self._bars_per_day)
+            self._fetch_lookback = int(base * 1.05) + 10
+        else:
+            self._fetch_lookback = lookback
         self._lookback = lookback
         self._q = q
         self._sign = sign
@@ -239,22 +334,14 @@ class XsecDriverEngine:
         candles_by_coin = self._fetch_coin_candles()
 
         if self._driver == "ensemble":
-            member_scores: List[Dict[str, float]] = []
-            for m in self._members:
-                s: Dict[str, float] = {}
-                for coin, candles in candles_by_coin.items():
-                    val = compute_driver_value(candles, m["driver"], int(m["lookback"]))
-                    if val is not None:
-                        s[coin] = -int(m.get("sign", -1)) * val
-                if s:
-                    member_scores.append(s)
-            if len(member_scores) < len(self._members):
+            scores = ensemble_scores(candles_by_coin, self._members,
+                                     self._bars_per_day, self._trail_days, self._q)
+            if scores is None:
                 logger.warning(
-                    "xsec_driver(%s): only %d/%d ensemble members scored — skipping",
-                    self._name, len(member_scores), len(self._members),
+                    "xsec_driver(%s): insufficient aligned history for ensemble — skipping",
+                    self._name,
                 )
                 return None
-            scores = blend_member_scores(member_scores)
         else:
             scores = {}
             for coin, candles in candles_by_coin.items():

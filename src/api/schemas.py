@@ -596,6 +596,7 @@ class XsecDriverCreate(BaseModel):
     enabled: bool = True
     # driver == "ensemble" only: [{"driver": ..., "lookback": ..., "sign": ...}]
     members: Optional[List[dict]] = None
+    trail_days: int = 14  # ensemble factor-momentum trailing window
 
 
 class XsecDriverInstanceOut(BaseModel):

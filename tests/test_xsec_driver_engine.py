@@ -208,56 +208,73 @@ def test_ensemble_rejects_unknown_member_driver():
         )
 
 
-def test_blend_member_scores_rank_average():
-    """Blend = mean of normalized ascending ranks; lower = more long-attractive."""
-    from src.engine.xsec_driver_engine import blend_member_scores
-    # member 1 ranks A<B<C (0, .5, 1); member 2 ranks C<B<A (1, .5, 0)
-    m1 = {"A": 1.0, "B": 2.0, "C": 3.0}
-    m2 = {"A": 9.0, "B": 5.0, "C": 1.0}
-    blended = blend_member_scores([m1, m2])
-    assert blended["B"] == pytest.approx(0.5)
-    assert blended["A"] == pytest.approx(0.5)
-    assert blended["C"] == pytest.approx(0.5)
-    # agreeing members separate the ranks
-    blended2 = blend_member_scores([m1, m1])
-    assert blended2["A"] < blended2["B"] < blended2["C"]
+def test_ensemble_scores_insufficient_history_returns_none():
+    from src.engine.xsec_driver_engine import ensemble_scores
+    candles = {c: _make_candles([100.0, 101.0]) for c in "ABCD"}
+    members = [{"driver": "st_reversal", "lookback": 2, "sign": -1}]
+    assert ensemble_scores(candles, members, bars_per_day=1,
+                           trail_days=2, q=0.3) is None
 
 
-def test_blend_member_scores_common_coins_only():
-    from src.engine.xsec_driver_engine import blend_member_scores
-    m1 = {"A": 1.0, "B": 2.0}
-    m2 = {"B": 1.0, "C": 2.0}
-    blended = blend_member_scores([m1, m2])
-    assert set(blended) == {"B"}
+def test_ensemble_scores_factor_momentum_flips_losing_member():
+    """In a persistent-momentum market, a long-losers member bleeds over the
+    trail, so factor momentum flips it: the RISING coin gets the LOWEST
+    (most long-attractive) score."""
+    from src.engine.xsec_driver_engine import ensemble_scores
+    n = 12
+    candles = {
+        "UP":    _make_candles([100.0 * (1.04 ** i) for i in range(n)]),
+        "DOWN":  _make_candles([100.0 * (0.96 ** i) for i in range(n)]),
+        "FLAT1": _make_candles([100.0 + 0.1 * (i % 2) for i in range(n)]),
+        "FLAT2": _make_candles([100.0 - 0.1 * (i % 2) for i in range(n)]),
+    }
+    members = [{"driver": "st_reversal", "lookback": 2, "sign": -1}]
+    scores = ensemble_scores(candles, members, bars_per_day=1,
+                             trail_days=4, q=0.3)
+    assert scores is not None and set(scores) == set(candles)
+    # member (long losers) shorts UP/longs DOWN and loses every span → flip →
+    # UP becomes the most long-attractive (lowest score)
+    assert scores["UP"] == min(scores.values())
+    assert scores["DOWN"] == max(scores.values())
 
 
-def test_ensemble_fetch_scores_blends(monkeypatch):
-    """Ensemble _fetch_coin_scores: flat coin longs vol-carry member, high-dv
-    coin longs dollar-volume member; blend reflects both."""
+def test_ensemble_scores_timestamp_alignment_drops_gappy_coin():
+    """A coin missing grid bars is excluded rather than index-shifted."""
+    from src.engine.xsec_driver_engine import ensemble_scores
+    n = 12
+    candles = {c: _make_candles([100.0 + i * (1 if c == "UP" else -1)
+                                 for i in range(n)]) for c in ["UP", "DOWN", "F1", "F2", "GAPPY"]}
+    candles["GAPPY"] = [b for b in candles["GAPPY"] if b["t"] != n - 3]  # hole in grid
+    members = [{"driver": "st_reversal", "lookback": 2, "sign": -1}]
+    scores = ensemble_scores(candles, members, bars_per_day=1, trail_days=4, q=0.3)
+    assert scores is not None
+    assert "GAPPY" not in scores
+    assert set(scores) == {"UP", "DOWN", "F1", "F2"}
+
+
+def test_ensemble_fetch_scores_end_to_end(monkeypatch):
+    """Engine-level: ensemble path from candles to scores (1d bars → bars_per_day=1)."""
     eng = XsecDriverEngine(
         executor=_FakeExecutor(), client=_FakeClient(),
         name="ens", driver="ensemble",
-        lookback=5, q=0.3, sign=1,
-        coins=["FLAT", "SWING", "BIGDV", "TINY"],
-        per_leg_usd=50.0, rebalance_secs=3600,
-        members=[
-            {"driver": "realized_vol_carry", "lookback": 5, "sign": -1},
-            {"driver": "dollar_volume", "lookback": 5, "sign": 1},
-        ],
+        lookback=2, q=0.3, sign=1,
+        coins=["UP", "DOWN", "FLAT1", "FLAT2"],
+        per_leg_usd=50.0, rebalance_secs=86400, timeframe="1d",
+        members=[{"driver": "st_reversal", "lookback": 2, "sign": -1}],
+        trail_days=4,
     )
+    n = 12
     candle_map = {
-        "FLAT":  _make_candles([100.0] * 6, volumes=[10.0] * 6),
-        "SWING": _make_candles([100, 130, 70, 140, 60, 120], volumes=[10.0] * 6),
-        "BIGDV": _make_candles([100, 101, 100, 101, 100, 101], volumes=[9999.0] * 6),
-        "TINY":  _make_candles([100, 102, 99, 103, 98, 102], volumes=[0.1] * 6),
+        "UP":    _make_candles([100.0 * (1.04 ** i) for i in range(n)], volumes=[10.0] * n),
+        "DOWN":  _make_candles([100.0 * (0.96 ** i) for i in range(n)], volumes=[10.0] * n),
+        "FLAT1": _make_candles([100.0 + 0.1 * (i % 2) for i in range(n)], volumes=[10.0] * n),
+        "FLAT2": _make_candles([100.0 - 0.1 * (i % 2) for i in range(n)], volumes=[10.0] * n),
     }
     monkeypatch.setattr(eng, "_fetch_coin_candles", lambda: candle_map)
     scores = eng._fetch_coin_scores()
     assert scores is not None and set(scores) == set(candle_map)
-    # FLAT: best vol-carry rank; BIGDV: best dollar-volume rank — both should
-    # beat SWING+TINY (bad on both dimensions)
-    assert scores["FLAT"] < scores["SWING"]
-    assert scores["BIGDV"] < scores["TINY"]
+    long_set, short_set = rank_basket(scores, q=0.3)
+    assert "UP" in long_set and "DOWN" in short_set
 
 
 # ── FastAPI endpoint test ─────────────────────────────────────────────────────
