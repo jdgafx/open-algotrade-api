@@ -351,6 +351,11 @@ class TestPaperExecutorStats:
         assert stats["total_trades"] == 2
         assert stats["balance"] > 10000.0  # Profitable trade
         assert stats["total_return_pct"] > 0
+        # Regression 2026-07-01: total_realized_pnl must be balance-delta, not
+        # a sum over self._trades — that undercounts vs true lifetime balance
+        # once the trade ledger is older than the durable JSONL seed point.
+        assert stats["total_realized_pnl"] == round(stats["balance"] - stats["initial_balance"], 2)
+        assert stats["total_pnl"] == stats["total_realized_pnl"]
 
 
 class TestPaperExecutorOrphanFlush:

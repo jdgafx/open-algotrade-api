@@ -1188,9 +1188,17 @@ class PaperTradingExecutor:
         _execution_history is session-local and only drives success_rate (it
         resets each boot, which is fine). Previously the whole dict was derived
         from _execution_history, so total_realized_pnl reset to 0 every redeploy.
+
+        total_realized_pnl is balance-delta, not summed from self._trades: the
+        JSONL ledger only holds trades since the F5 seed point (2026-06-23-ish),
+        so a sum-of-exits undercounts every dollar of pre-seed history and is
+        gross of commission on top of that. balance is debited/credited on
+        every fill (entry commission + exit pnl-minus-commission) in real time
+        and never loses history, so balance-delta is the only number that
+        matches reality. Mirrors the pattern already used at main.py's
+        portfolio/health routes ("Use balance-delta as canonical PnL").
         """
-        exits = [t for t in self._trades if t.action == "exit"]
-        total_realized_pnl = sum(t.pnl for t in exits)
+        total_realized_pnl = self.balance - self.initial_balance
 
         drawdown = 0
         if self.peak_balance > 0:
