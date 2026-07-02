@@ -50,7 +50,7 @@ _ALL_STRATEGIES = [
     "liquidation_adx", "liquidation_momentum", "liquidation_revisit",
     "flip_flop", "gap_up_momentum", "capitulation_reversal",
     "timeinality", "consecutive_down", "day_of_week_bias",
-    "donchian_channel", "closed_market_overnight",
+    "donchian_channel", "closed_market_overnight", "trend_cross",
     "xsec_carry",   # market-neutral carry — regime-agnostic
     "xsec_driver",  # market-neutral driver engine — regime-agnostic
 ]
