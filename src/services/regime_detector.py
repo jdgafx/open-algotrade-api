@@ -55,78 +55,74 @@ _ALL_STRATEGIES = [
     "xsec_driver",  # market-neutral driver engine — regime-agnostic
 ]
 
+# Sharpened 2026-07-02: each regime allows its NATIVE family + event-driven +
+# market-neutral types, and BLOCKS the family whose failure mode IS that regime
+# (mean-reversion knife-catches in trends; trend-following whipsaws in ranges;
+# grids get run over in high vol). The old map recommended ~39/40 types in
+# trending regimes — a rubber stamp that let the whole correlated trend cluster
+# and its mirror bleed everywhere. The gate hard-blocks entries per symbol
+# (orchestrator._check_regime_gate), so these lists are allocation policy.
+_NEUTRAL_ALWAYS = [
+    # Market-neutral / time-based / service strategies — regime-agnostic
+    "vwap_bot", "funding_arb", "market_maker", "pivot_lines",
+    "correlation", "quarter_theory", "timeinality",
+    "day_of_week_bias", "closed_market_overnight", "xsec_carry", "xsec_driver",
+]
+
 REGIME_STRATEGY_MAP = {
     MarketRegime.TRENDING_UP: [
-        # Trend-following thrives here
+        # Trend-following natives
         "turtle", "sma_crossover", "macd", "ichimoku", "adx",
         "ema_bollinger", "vwma", "sma_adx_bb_vol", "donchian_channel", "trend_cross",
-        # Momentum + volatility plays
-        "consolidation_pop", "elliott_wave", "elliott_pivot",
-        "gap_up_momentum", "consecutive_down",
+        "elliott_wave", "elliott_pivot",
+        # Momentum / pullback-in-trend
+        "gap_up_momentum", "consecutive_down", "consolidation_pop",
         # Liquidation-event strategies — fire on vol spikes within trends
         "liquidation_adx", "liquidation_momentum", "liquidation_revisit", "liquidation_dip",
-        # Reversal/mean-reversion at trend extremes
-        "mean_reversion", "rsi", "bollinger", "rsi_vwap",
-        "nadaraya_watson", "supply_demand_zone", "grid_fibonacci",
-        "flip_flop", "capitulation_reversal",
-        # Market-neutral / time-based (always allowed)
-        "vwap_bot", "funding_arb", "market_maker", "pivot_lines",
-        "correlation", "quarter_theory", "timeinality",
-        "day_of_week_bias", "closed_market_overnight", "xsec_carry", "xsec_driver",
+        *_NEUTRAL_ALWAYS,
+        # BLOCKED here: mean-reversion/range family (rsi, bollinger, mean_reversion,
+        # rsi_vwap, nadaraya_watson, supply_demand_zone, grid_fibonacci, flip_flop,
+        # capitulation_reversal) — fading a trend is its failure mode.
     ],
     MarketRegime.TRENDING_DOWN: [
         # Trend-following works short
         "turtle", "sma_crossover", "macd", "ichimoku", "adx",
         "ema_bollinger", "vwma", "sma_adx_bb_vol", "donchian_channel", "trend_cross",
-        # Momentum plays
-        "consolidation_pop", "elliott_wave", "elliott_pivot",
-        "consecutive_down",
+        "elliott_wave", "elliott_pivot",
+        # Momentum / continuation
+        "consecutive_down", "consolidation_pop",
         # Liquidation cascades common in down-trends
         "liquidation_adx", "liquidation_momentum", "liquidation_revisit", "liquidation_dip",
-        # Reversal / capitulation catching
-        "mean_reversion", "rsi", "bollinger", "rsi_vwap",
-        "nadaraya_watson", "supply_demand_zone", "grid_fibonacci",
-        "flip_flop", "capitulation_reversal",
-        # Market-neutral / time-based (always allowed)
-        "vwap_bot", "funding_arb", "market_maker", "pivot_lines",
-        "correlation", "quarter_theory", "timeinality",
-        "day_of_week_bias", "closed_market_overnight", "xsec_carry", "xsec_driver",
+        # Designated extreme-reversal catcher (NOT the whole meanrev family)
+        "capitulation_reversal",
+        *_NEUTRAL_ALWAYS,
+        # BLOCKED here: dip-buying meanrev family — knife-catching in a downtrend.
     ],
     MarketRegime.MEAN_REVERTING: [
-        # Mean reversion strategies thrive here
+        # Mean reversion natives
         "mean_reversion", "rsi", "bollinger", "rsi_vwap",
         "nadaraya_watson", "supply_demand_zone", "grid_fibonacci",
         "flip_flop", "capitulation_reversal",
-        # Consolidation pop: tight ranges ARE mean-reverting conditions
+        # Range strategies: tight ranges ARE mean-reverting conditions
         "consolidation_pop", "consecutive_down",
-        # Trend-following catches regime breakouts
-        "turtle", "sma_crossover", "macd", "ichimoku", "adx",
-        "ema_bollinger", "vwma", "sma_adx_bb_vol", "donchian_channel", "trend_cross",
-        # Liquidation dips in ranging markets are mean-reversion opportunities
-        "liquidation_adx", "liquidation_dip", "liquidation_revisit",
-        # Market-neutral / time-based (always allowed)
-        "vwap_bot", "funding_arb", "market_maker", "pivot_lines",
-        "correlation", "quarter_theory", "timeinality",
-        "day_of_week_bias", "closed_market_overnight", "xsec_carry", "xsec_driver",
+        # Liquidation dips in ranging markets mean-revert
+        "liquidation_dip", "liquidation_revisit",
+        *_NEUTRAL_ALWAYS,
+        # BLOCKED here: the whole trend family — buying "breakouts" inside a
+        # range is the whipsaw that bled the trend cluster.
     ],
     MarketRegime.HIGH_VOLATILITY: [
-        # Volatility strategies
-        "consolidation_pop", "grid_fibonacci",
-        "elliott_wave", "elliott_pivot",
         # Liquidation events cluster in high-vol — prime territory
         "liquidation_adx", "liquidation_momentum", "liquidation_revisit", "liquidation_dip",
-        # Gap and momentum
+        # Vol-native momentum / reversal-at-extremes
         "gap_up_momentum", "consecutive_down", "capitulation_reversal",
-        # Trend-following works in vol (big directional moves)
-        "turtle", "sma_crossover", "macd", "ichimoku", "adx",
-        "ema_bollinger", "vwma", "sma_adx_bb_vol", "donchian_channel", "trend_cross",
-        # RSI/mean-rev at extremes during vol spikes
-        "mean_reversion", "rsi", "bollinger", "rsi_vwap",
-        "nadaraya_watson", "quarter_theory", "flip_flop",
-        # Market-neutral / time-based (always allowed)
-        "vwap_bot", "funding_arb", "market_maker",
-        "correlation", "pivot_lines", "timeinality",
-        "day_of_week_bias", "closed_market_overnight", "xsec_carry", "xsec_driver",
+        "consolidation_pop", "flip_flop", "rsi", "rsi_vwap",
+        # Breakout-style trend types only (slow crosses whipsaw in vol)
+        "turtle", "donchian_channel", "adx", "sma_adx_bb_vol",
+        *_NEUTRAL_ALWAYS,
+        # BLOCKED here: grid_fibonacci (grids get run over), slow trend crosses
+        # (sma/macd/ichimoku/ema_bollinger/vwma/trend_cross/elliott), slow
+        # meanrev (mean_reversion, bollinger, nadaraya_watson, supply_demand_zone).
     ],
     MarketRegime.LOW_VOLATILITY: [
         # Mean reversion + range strategies
@@ -135,10 +131,8 @@ REGIME_STRATEGY_MAP = {
         "flip_flop", "capitulation_reversal",
         # Consolidation pop: compressed low-vol ranges precede the breakout it trades
         "consolidation_pop", "consecutive_down",
-        # Market-neutral / time-based (always allowed)
-        "vwap_bot", "funding_arb", "market_maker", "pivot_lines",
-        "correlation", "quarter_theory", "timeinality",
-        "day_of_week_bias", "closed_market_overnight", "xsec_carry", "xsec_driver",
+        *_NEUTRAL_ALWAYS,
+        # BLOCKED here: trend family + liquidation family (no fuel in low vol).
     ],
     MarketRegime.UNKNOWN: _ALL_STRATEGIES,  # Unknown regime = allow all
 }
