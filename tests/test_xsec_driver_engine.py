@@ -483,3 +483,26 @@ def test_return_skew_sign_convention():
 def test_return_skew_flat_returns_none():
     eng = _make_engine(driver="return_skew", sign=-1, lookback=12)
     assert eng._compute_driver_value(_make_candles([100] * 12)) is None
+
+
+# ── Failed-tick retry interval (2026-07-02: 429-failed daily tick must not wait 24h)
+
+def test_failed_tick_retries_sooner():
+    from src.engine.xsec_driver_engine import TICK_RETRY_SECS
+
+    eng = _make_engine()
+    eng._rebalance_secs = 86_400          # daily ensemble cadence
+    assert eng._sleep_secs(True) == 86_400
+    assert eng._sleep_secs(False) == TICK_RETRY_SECS
+
+    # retry never exceeds the rebalance interval itself
+    eng._rebalance_secs = 60
+    assert eng._sleep_secs(False) == 60
+
+
+def test_tick_returns_false_on_insufficient_data():
+    import asyncio as _aio
+
+    eng = _make_engine()
+    eng._fetch_coin_scores = lambda: None
+    assert _aio.get_event_loop_policy().new_event_loop().run_until_complete(eng._tick()) is False

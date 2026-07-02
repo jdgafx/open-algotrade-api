@@ -16,6 +16,7 @@ Standalone class — NOT a BaseStrategy subclass.
 
 import asyncio
 import logging
+import os
 import time
 from typing import Dict, List, Optional
 
@@ -24,6 +25,11 @@ import requests
 from .xsec_engine import _StratShim, rank_basket  # reuse proven pure helpers
 
 logger = logging.getLogger(__name__)
+
+# A failed tick (insufficient data — HL 429 burst) retries after this many
+# seconds instead of the full rebalance interval; a daily-rebalance ensemble
+# must not sit dark for 24h because one fetch window got rate-limited.
+TICK_RETRY_SECS = int(os.getenv("XSEC_TICK_RETRY_SECS", "900"))
 
 BASE_DRIVERS = {"realized_vol_carry", "dollar_volume", "st_reversal",
                 "amihud_illiq", "return_skew"}
@@ -405,14 +411,17 @@ class XsecDriverEngine:
                 "xsec_driver(%s): close %s %s — %s", self._name, side, coin, result.error
             )
 
-    async def _tick(self) -> None:
-        """One rebalance tick: fetch driver values, rank, diff basket, execute."""
+    async def _tick(self) -> bool:
+        """One rebalance tick: fetch driver values, rank, diff basket, execute.
+        Returns False when the tick could not rebalance (insufficient data,
+        e.g. an HL 429 burst) so the run loop retries sooner than the full
+        rebalance interval — a failed daily-ensemble tick must not wait 24h."""
         scores = await asyncio.to_thread(self._fetch_coin_scores)
         if scores is None:
             logger.warning(
                 "xsec_driver(%s): insufficient coin data — skipping tick", self._name
             )
-            return
+            return False
 
         want_long, want_short = rank_basket(scores, self._q)
 
@@ -443,6 +452,12 @@ class XsecDriverEngine:
                 logger.warning(
                     "xsec_driver(%s): open %s %s error — %s", self._name, side, coin, exc
                 )
+        return True
+
+    def _sleep_secs(self, tick_ok: bool) -> int:
+        """Full rebalance interval after a good tick; the (never longer) retry
+        interval after a failed one."""
+        return self._rebalance_secs if tick_ok else min(TICK_RETRY_SECS, self._rebalance_secs)
 
     # ── Public interface ─────────────────────────────────────────────────────
 
@@ -457,15 +472,17 @@ class XsecDriverEngine:
         try:
             while not self._stop_event.is_set():
                 try:
-                    await self._tick()
+                    ok = await self._tick()
                 except Exception as exc:
+                    ok = False
                     logger.error(
                         "xsec_driver(%s): tick unhandled — %s", self._name, exc
                     )
-                # Sleep for rebalance interval, wake immediately on stop()
+                # Sleep for rebalance interval (short retry after a failed
+                # tick), wake immediately on stop()
                 try:
                     await asyncio.wait_for(
-                        self._stop_event.wait(), timeout=self._rebalance_secs
+                        self._stop_event.wait(), timeout=self._sleep_secs(ok)
                     )
                 except asyncio.TimeoutError:
                     pass
