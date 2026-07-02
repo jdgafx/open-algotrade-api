@@ -16,7 +16,8 @@ CPCV_EMBARGO_FRAC = 0.01          # embargo 1% of samples after each test block
 CPCV_GAP_BARS = 5                 # purge gap ~ max holding period in bars
 
 # Deflated Sharpe promotion threshold — block live promotion if DSR < this.
-DSR_MIN = 0.85
+# Never lower: a relaxed gate is proven to ship money-losing overfit noise.
+DSR_MIN = 0.95
 
 # Net-of-cost fitness penalty weights.
 FITNESS_LAMBDA_DD = 1.0           # weight on max-drawdown fraction

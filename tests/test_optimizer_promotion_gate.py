@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 import pytest
 from src.engine.optimizer import OptimizationEngine
+from src.engine.rigor import DSR_MIN
 
 
 def _result(trades, pf, wr, dd, sharpe=1.5, dsr=0.99, cpcv=0.8):
@@ -45,11 +46,11 @@ def test_promotion_gate_passes_at_all_thresholds():
 
 def test_promotion_gate_rejects_low_dsr():
     """A candidate clearing every classic threshold but with a Deflated Sharpe
-    below 0.85 (edge indistinguishable from the luckiest of N tries) is rejected."""
+    below DSR_MIN (edge indistinguishable from the luckiest of N tries) is rejected."""
     eng = OptimizationEngine()
     strong = dict(trades=40, pf=1.6, wr=45.0, dd=8.0, sharpe=1.5)
-    assert eng._passes_promotion_gate(_result(**strong, dsr=0.84)) is False
-    assert eng._passes_promotion_gate(_result(**strong, dsr=0.85)) is True
+    assert eng._passes_promotion_gate(_result(**strong, dsr=DSR_MIN - 0.01)) is False
+    assert eng._passes_promotion_gate(_result(**strong, dsr=DSR_MIN)) is True
 
 
 def test_promotion_gate_rejects_unstable_cpcv():
