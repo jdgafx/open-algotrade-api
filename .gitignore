@@ -7,3 +7,5 @@ __pycache__/
 .ruff_cache/
 .sisyphus/
 sql_app.db
+.omc/
+.claude-flow/
