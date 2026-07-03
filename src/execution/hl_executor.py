@@ -625,7 +625,9 @@ class HyperliquidVaultExecutor:
     def get_active_positions(self) -> Dict[str, Dict]:
         return dict(self._active_positions)
 
-    def get_execution_stats(self) -> Dict[str, Any]:
+    def get_execution_stats(self, live_strategies=None) -> Dict[str, Any]:
+        # live_strategies: interface parity with PaperExecutor; no durable
+        # trade ledger in live mode, so the sunk/live split is paper-only
         if not self._execution_history:
             return {"total_executions": 0, "success_rate": 0, "total_pnl": 0}
 

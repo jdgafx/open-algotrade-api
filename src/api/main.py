@@ -1996,7 +1996,11 @@ def health(request: Request):
         registry_ok=registry_ok,
         orchestrator_ok=orchestrator is not None,
         execution_stats=(
-            executor.get_execution_stats()
+            executor.get_execution_stats(
+                live_strategies=(
+                    set(orchestrator._strategies.keys()) if orchestrator else None
+                )
+            )
             if executor and hasattr(executor, "get_execution_stats")
             else None
         ),

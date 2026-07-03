@@ -1179,8 +1179,15 @@ class PaperTradingExecutor:
             for k, v in self._positions.items()
         }
 
-    def get_execution_stats(self) -> Dict[str, Any]:
+    def get_execution_stats(self, live_strategies: Optional[set] = None) -> Dict[str, Any]:
         """Get paper trading execution statistics.
+
+        live_strategies: names of strategies currently in the orchestrator
+        roster. When given, ledgered realized PnL is split into live-book vs
+        sunk (culled/retired strategies). The split covers only trades in the
+        JSONL ledger (post F5-seed); the residual vs canonical balance-delta
+        (pre-seed history + entry commissions) lands in
+        realized_pnl_unattributed so live+sunk+unattributed == total.
 
         ponytail: realized PnL / trades / positions come from DURABLE state —
         self._trades is rehydrated from the ledger on boot (load_state:367-369)
@@ -1200,6 +1207,23 @@ class PaperTradingExecutor:
         """
         total_realized_pnl = self.balance - self.initial_balance
 
+        # Unrealized MTM off the shared allMids cache (one bulk fetch, 2s TTL,
+        # 5s timeout worst case — /health is sync-def so it runs in the
+        # threadpool and can't starve the event loop).
+        unrealized = 0.0
+        positions_marked = 0
+        for pos in self._positions.values():
+            try:
+                mid = self._fetch_mid_price(pos.symbol)
+            except Exception:
+                continue
+            abs_size = abs(pos.size)
+            if pos.side == "long":
+                unrealized += (mid - pos.entry_price) * abs_size
+            else:
+                unrealized += (pos.entry_price - mid) * abs_size
+            positions_marked += 1
+
         drawdown = 0
         if self.peak_balance > 0:
             drawdown = ((self.peak_balance - self.balance) / self.peak_balance) * 100
@@ -1207,7 +1231,8 @@ class PaperTradingExecutor:
         n_exec = len(self._execution_history)
         successes = sum(1 for r in self._execution_history if r.success)
 
-        return {
+        equity = self.balance + unrealized
+        stats: Dict[str, Any] = {
             "mode": "paper",
             "total_executions": n_exec,
             "successful": successes,
@@ -1225,7 +1250,30 @@ class PaperTradingExecutor:
             "max_drawdown_pct": round(drawdown, 2),
             "total_trades": len(self._trades),
             "vault_address": "paper-trading",
+            "unrealized_pnl": round(unrealized, 2),
+            "equity": round(equity, 2),
+            "equity_return_pct": round(
+                ((equity - self.initial_balance) / self.initial_balance) * 100, 2
+            ),
+            # < active_positions when a mid price was unavailable
+            "positions_marked": positions_marked,
         }
+
+        if live_strategies is not None:
+            live_pnl = 0.0
+            sunk_pnl = 0.0
+            for t in self._trades:
+                if t.strategy_name in live_strategies:
+                    live_pnl += t.pnl
+                else:
+                    sunk_pnl += t.pnl
+            stats["realized_pnl_live_book"] = round(live_pnl, 2)
+            stats["realized_pnl_sunk"] = round(sunk_pnl, 2)
+            stats["realized_pnl_unattributed"] = round(
+                total_realized_pnl - live_pnl - sunk_pnl, 2
+            )
+
+        return stats
 
     def get_trade_history(self) -> List[Dict]:
         """Get all paper trades as dicts."""
