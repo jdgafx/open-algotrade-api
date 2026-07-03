@@ -110,6 +110,35 @@ REVIVE_LOOKBACK_DAYS = int(os.getenv("REVIVE_LOOKBACK_DAYS", "90"))
 REVIVE_N_TRIALS = int(os.getenv("REVIVE_N_TRIALS", "100"))
 
 
+FAMILY_UNLOCK_OWN_MIN_TRADES = int(os.getenv("FAMILY_UNLOCK_OWN_MIN_TRADES", "10"))  # an instance must carry SOME of its own live evidence (and be net positive) before it may ride the family's pooled evidence
+
+
+def _family_unlock_ok(own_trades: int, own_pnl: float,
+                      fam_trades: int, fam_pnl: float,
+                      fam_min: int, own_min: int = None) -> bool:
+    """Family-pooled unlock for the >$500 compounding governor (2026-07-03).
+
+    The 100-trade requirement exists to prove the EDGE is real before uncapped
+    compounding. Instances of the same strategy_type on different coins/TFs
+    share that edge hypothesis, so their completed trades are pooled evidence:
+    conspop-{btc,sol} at 18+32 trades says more about the conspop edge than
+    either does alone. Pooling widens the evidence SET without lowering the
+    evidence BAR — the same 100-trade N is required, just family-wide.
+
+    Guardrails (all must hold, else the per-instance rule stands):
+      - family pooled trades >= fam_min (the unchanged 100-trade bar)
+      - family pooled realized PnL > 0 (a bleeding family unlocks nothing)
+      - the instance itself has >= own_min trades AND own PnL > 0 (a losing
+        sibling may not ride its family's winners into uncapped size)
+
+    Posterior sizing, the confidence-scaled winner cap, and the 1.5x/cycle
+    ramp still govern HOW FAST size actually grows after the unlock.
+    """
+    own_min = FAMILY_UNLOCK_OWN_MIN_TRADES if own_min is None else own_min
+    return (fam_trades >= fam_min and fam_pnl > 0
+            and own_trades >= own_min and own_pnl > 0)
+
+
 def _winner_cap_usd(balance: float, confidence: float,
                     obs_pct: float = None, max_pct: float = None) -> float:
     """U6 (R5): per-winner allocation ceiling (USD) that scales with EARNED live
@@ -1113,6 +1142,22 @@ async def lifespan(app: FastAPI):
                 _COMPOUND_MIN_TRADES = 100
                 _COMPOUND_MAX_UNPROVEN = 500.0
 
+                # Family-pooled evidence (2026-07-03): pooled trades/PnL per
+                # strategy_type across ALL instances ever traded (culled siblings
+                # included — their losses pull the pooled PnL down, honestly).
+                # Used by _family_unlock_ok to open the >$500 governor.
+                _type_of = dict(_cdb.query(
+                    models.StrategyInstance.name,
+                    models.StrategyInstance.strategy_type).all())
+                _fam_stats: dict = {}
+                for _nm, _s in _live_stats.items():
+                    _ft = _type_of.get(_nm)
+                    if not _ft:
+                        continue
+                    _f = _fam_stats.setdefault(_ft, {"trades": 0, "pnl": 0.0})
+                    _f["trades"] += _s["trades"]
+                    _f["pnl"] += _s["pnl"]
+
                 for _cinst in running:
                     _p = _post.get(_cinst.name, {})
                     _prob = float(_p.get("prob_edge", 0.5))
@@ -1151,13 +1196,25 @@ async def lifespan(app: FastAPI):
                         # to the floor, freeing the loser-tail capital the flat $100 wasted.
                         _upside = min(max(_ci_high, 0.0) / EXPLORE_UPSIDE_REF, 1.0)
                         new_size = EXPLORE_MIN_USD + (_OTHER_SIZE - EXPLORE_MIN_USD) * _upside
-                    _trade_count = _live_stats.get(_cinst.name, {}).get("trades", 0)
+                    _own = _live_stats.get(_cinst.name, {"pnl": 0.0, "trades": 0})
+                    _trade_count = _own["trades"]
                     if new_size > _COMPOUND_MAX_UNPROVEN and _trade_count < _COMPOUND_MIN_TRADES:
-                        logger.warning(
-                            "compounder suppressed for %s: only %d trades, need %d before scaling above $%.0f (capping at $%.0f)",
-                            _cinst.name, _trade_count, _COMPOUND_MIN_TRADES, _COMPOUND_MAX_UNPROVEN, _COMPOUND_MAX_UNPROVEN,
-                        )
-                        new_size = _COMPOUND_MAX_UNPROVEN
+                        _f = _fam_stats.get(_cinst.strategy_type, {"trades": 0, "pnl": 0.0})
+                        if _family_unlock_ok(_own["trades"], _own["pnl"],
+                                             _f["trades"], _f["pnl"],
+                                             _COMPOUND_MIN_TRADES):
+                            logger.info(
+                                "compounder family-unlock for %s: own %d trades $%.2f | family '%s' %d trades $%.2f >= %d",
+                                _cinst.name, _own["trades"], _own["pnl"],
+                                _cinst.strategy_type, _f["trades"], _f["pnl"], _COMPOUND_MIN_TRADES,
+                            )
+                        else:
+                            logger.warning(
+                                "compounder suppressed for %s: own %d trades (need %d) | family '%s' %d trades $%.2f — capping at $%.0f",
+                                _cinst.name, _trade_count, _COMPOUND_MIN_TRADES,
+                                _cinst.strategy_type, _f["trades"], _f["pnl"], _COMPOUND_MAX_UNPROVEN,
+                            )
+                            new_size = _COMPOUND_MAX_UNPROVEN
                     # T010 ramp: grow gradually (no >ALLOC_RAMP_UP_MAX× jump per cycle);
                     # cuts apply immediately so the bleed stops fast.
                     _prev = float(_cinst.size_usd or _OTHER_SIZE)
