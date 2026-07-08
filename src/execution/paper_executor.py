@@ -508,6 +508,19 @@ class PaperTradingExecutor:
             raise ValueError(f"No price data for {symbol}")
         return price
 
+    def _net_pnl(self, pos, realized_pnl: float, exit_usd: float) -> float:
+        """Realized PnL net of round-trip commission (entry + exit).
+
+        Recorded on every exit trade so the ledger matches balance-delta and
+        cull/Kelly/live-edge stats stop flattering strategies by their fee
+        share. entry_usd = |size| * entry_price is exact: size was derived
+        from notional/fill_price at entry. Balance math elsewhere is already
+        net (entry fee debited at fill, exit fee at close) — this only fixes
+        what gets *recorded*.
+        """
+        entry_usd = abs(pos.size) * pos.entry_price
+        return realized_pnl - (entry_usd + exit_usd) * self.commission_pct
+
     def _get_fill_price(self, symbol: str, is_buy: bool) -> float:
         """Get simulated fill price with slippage."""
         mid = self._fetch_mid_price(symbol)
@@ -800,8 +813,10 @@ class PaperTradingExecutor:
             if self.balance > self.peak_balance:
                 self.peak_balance = self.balance
 
-            # Record trade
-            strategy.record_trade(realized_pnl)
+            # Record trade net of round-trip fees — ledger/cull/sizing see
+            # what the balance actually saw
+            net_pnl = self._net_pnl(pos, realized_pnl, exit_usd)
+            strategy.record_trade(net_pnl)
 
             self._trade_counter += 1
             trade = PaperTrade(
@@ -812,7 +827,7 @@ class PaperTradingExecutor:
                 price=fill_price,
                 size=abs_size,
                 size_usd=exit_usd,
-                pnl=realized_pnl,
+                pnl=net_pnl,
                 pnl_pct=pnl_pct,
                 reason=signal.reason,
                 strategy_name=config.name,
@@ -832,7 +847,7 @@ class PaperTradingExecutor:
                     strategy=config.name,
                     symbol=symbol,
                     signal=pos.side.upper(),
-                    pnl=realized_pnl,
+                    pnl=net_pnl,
                     regime="unknown",
                     params=config.params,
                     price=fill_price,
@@ -848,7 +863,7 @@ class PaperTradingExecutor:
             result = ExecutionResult(
                 success=True,
                 order_result=order_result,
-                realized_pnl=realized_pnl,
+                realized_pnl=net_pnl,
             )
             self._execution_history.append(result)
 
@@ -859,7 +874,7 @@ class PaperTradingExecutor:
                 symbol,
                 abs_size,
                 fill_price,
-                realized_pnl,
+                net_pnl,
                 pnl_pct,
                 self.balance,
             )
@@ -989,19 +1004,20 @@ class PaperTradingExecutor:
                 if self.balance > self.peak_balance:
                     self.peak_balance = self.balance
                 pnl_pct = (realized_pnl / (pos.entry_price * abs_size)) * 100 if abs_size > 0 else 0
+                net_pnl = self._net_pnl(pos, realized_pnl, abs_size * fill_price)
                 self._trade_counter += 1
                 trade = PaperTrade(
                     id=self._trade_counter, symbol=symbol, side=pos.side,
                     action="exit", price=fill_price, size=abs_size,
-                    size_usd=abs_size * fill_price, pnl=realized_pnl,
+                    size_usd=abs_size * fill_price, pnl=net_pnl,
                     pnl_pct=pnl_pct, reason="risk_stop",
                     strategy_name=pos.strategy_name,
                 )
                 self._trades.append(trade)
                 self._append_ledger(trade)  # durable realized exit (F5/R11)
                 del self._positions[pos_key]
-                results.append(ExecutionResult(success=True, realized_pnl=realized_pnl))
-                logger.info("[PAPER] Risk close | %s | pnl=$%.2f (%.2f%%)", symbol, realized_pnl, pnl_pct)
+                results.append(ExecutionResult(success=True, realized_pnl=net_pnl))
+                logger.info("[PAPER] Risk close | %s | pnl=$%.2f (%.2f%%)", symbol, net_pnl, pnl_pct)
             except Exception as e:
                 logger.error("[PAPER] close_by_symbol error | %s | %s", symbol, e)
                 results.append(ExecutionResult(success=False, error=str(e)))
@@ -1036,21 +1052,22 @@ class PaperTradingExecutor:
                 if self.balance > self.peak_balance:
                     self.peak_balance = self.balance
                 pnl_pct = (realized_pnl / (pos.entry_price * abs_size)) * 100 if abs_size > 0 else 0
+                net_pnl = self._net_pnl(pos, realized_pnl, abs_size * fill_price)
                 self._trade_counter += 1
                 trade = PaperTrade(
                     id=self._trade_counter, symbol=pos.symbol, side=pos.side,
                     action="exit", price=fill_price, size=abs_size,
-                    size_usd=abs_size * fill_price, pnl=realized_pnl,
+                    size_usd=abs_size * fill_price, pnl=net_pnl,
                     pnl_pct=pnl_pct, reason="strategy_disabled",
                     strategy_name=pos.strategy_name,
                 )
                 self._trades.append(trade)
                 self._append_ledger(trade)  # durable realized exit (F5/R11)
                 del self._positions[pos_key]
-                results.append(ExecutionResult(success=True, realized_pnl=realized_pnl))
+                results.append(ExecutionResult(success=True, realized_pnl=net_pnl))
                 logger.info(
                     "[PAPER] Orphan close | %s | %s | pnl=$%.2f (%.2f%%)",
-                    strategy_name, pos.symbol, realized_pnl, pnl_pct,
+                    strategy_name, pos.symbol, net_pnl, pnl_pct,
                 )
             except Exception as e:
                 logger.error("[PAPER] close_by_strategy error | %s | %s | %s", strategy_name, pos.symbol, e)
@@ -1082,11 +1099,12 @@ class PaperTradingExecutor:
                 if self.balance > self.peak_balance:
                     self.peak_balance = self.balance
 
+                net_pnl = self._net_pnl(pos, realized_pnl, abs_size * fill_price)
                 self._trade_counter += 1
                 trade = PaperTrade(
                     id=self._trade_counter, symbol=pos.symbol, side=pos.side,
                     action="exit", price=fill_price, size=abs_size,
-                    size_usd=abs_size * fill_price, pnl=realized_pnl,
+                    size_usd=abs_size * fill_price, pnl=net_pnl,
                     pnl_pct=pnl_pct, reason="emergency_close",
                     strategy_name=pos.strategy_name,
                 )
@@ -1094,8 +1112,8 @@ class PaperTradingExecutor:
                 self._append_ledger(trade)  # durable realized exit (F5/R11)
                 del self._positions[pos_key]
 
-                results.append(ExecutionResult(success=True, realized_pnl=realized_pnl))
-                logger.info("[PAPER] Emergency close | %s | pnl=$%.2f (%.2f%%)", pos.symbol, realized_pnl, pnl_pct)
+                results.append(ExecutionResult(success=True, realized_pnl=net_pnl))
+                logger.info("[PAPER] Emergency close | %s | pnl=$%.2f (%.2f%%)", pos.symbol, net_pnl, pnl_pct)
             except Exception as e:
                 results.append(ExecutionResult(success=False, error=str(e)))
         return results
@@ -1186,8 +1204,10 @@ class PaperTradingExecutor:
         roster. When given, ledgered realized PnL is split into live-book vs
         sunk (culled/retired strategies). The split covers only trades in the
         JSONL ledger (post F5-seed); the residual vs canonical balance-delta
-        (pre-seed history + entry commissions) lands in
-        realized_pnl_unattributed so live+sunk+unattributed == total.
+        lands in realized_pnl_unattributed so live+sunk+unattributed == total.
+        Since 2026-07-08 exit trades record pnl net of round-trip commission
+        (_net_pnl), so unattributed = pre-seed history + fees on pre-fix
+        trades only — a constant, not a growing bucket.
 
         ponytail: realized PnL / trades / positions come from DURABLE state —
         self._trades is rehydrated from the ledger on boot (load_state:367-369)

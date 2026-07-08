@@ -58,7 +58,7 @@ logger = logging.getLogger(__name__)
 # be genuinely losing before a PnL or win-rate trigger fires, confirmed winners
 # are never culled, and a running-book floor (CULL_MIN_RUNNING) caps how much the
 # more-aggressive thresholds can remove per book.
-CULL_MIN_PNL = float(os.getenv("CULL_MIN_PNL", "-10.0"))        # cull if cumulative PnL <= this (2026-06-05: -15 -> -10)
+CULL_MIN_PNL = float(os.getenv("CULL_MIN_PNL", "-5.0"))        # cull if cumulative PnL <= this (2026-07-08: -10 -> -5; bleed diagnosis showed long tail of small losers never reaching -10)
 CULL_MIN_TRADES = int(os.getenv("CULL_MIN_TRADES", "4"))         # need this many closed trades first (2026-06-05: 6 -> 4)
 CULL_MIN_WINRATE = float(os.getenv("CULL_MIN_WINRATE", "0.25"))  # cull if win-rate below this (guarded by pnl<0)
 CULL_MAX_PER_RUN = int(os.getenv("CULL_MAX_PER_RUN", "6"))       # cap culls per run (2026-06-05: 3 -> 6, clear backlog faster)
@@ -71,7 +71,7 @@ CULL_MIN_RUNNING = int(os.getenv("CULL_MIN_RUNNING", "12"))      # floor: never 
 # confidence (half-Kelly edge_confidence on the live Wilson-lower-bound win
 # rate); a long, edgeless sample is culled even though pnl > CULL_MIN_PNL.
 CULL_ZOMBIE_MIN_TRADES = int(os.getenv("CULL_ZOMBIE_MIN_TRADES", "20"))  # need a real sample before declaring "no edge" (not early variance)
-CULL_ZOMBIE_MAX_CONF = float(os.getenv("CULL_ZOMBIE_MAX_CONF", "0.03"))  # edge_confidence_score <= this after the trade floor = zombie
+CULL_ZOMBIE_MAX_CONF = float(os.getenv("CULL_ZOMBIE_MAX_CONF", "0.05"))  # edge_confidence_score <= this after the trade floor = zombie (2026-07-08: 0.03 -> 0.05, shed edgeless tail faster)
 
 # U6 — confidence-governed allocation + winner-set de-freeze (T027 + F3 + F4).
 WINNER_OBS_PCT = float(os.getenv("WINNER_OBS_PCT", "0.10"))      # per-winner share at ZERO earned confidence (observation-small)
