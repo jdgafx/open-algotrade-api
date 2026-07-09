@@ -568,7 +568,10 @@ class PaperTradingExecutor:
         if not rates:
             return 0.0
         total = 0.0
-        for pos in self._positions.values():
+        # snapshot: the awaits below yield to the event loop, where the
+        # orchestrator opens/closes positions concurrently — iterating the
+        # live dict raises "dictionary changed size during iteration"
+        for pos in list(self._positions.values()):
             rate = rates.get(pos.symbol)
             if rate is None:
                 continue
