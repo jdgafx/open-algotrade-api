@@ -584,3 +584,78 @@ class TestLeveragePnLInvariant:
             f"Unrealized={unrealized_delta:.4f} != Realized={realized_delta:.4f}. "
             "Divergence means ruin guard reads wrong account value."
         )
+
+
+class TestFundingAccrual:
+    """Hourly funding accrual: longs pay positive funding, shorts receive it;
+    accrued funding lands in the recorded exit pnl exactly once (balance is
+    credited hourly, the exit re-books it into the trade, not the balance)."""
+
+    @pytest.fixture
+    def fx(self):
+        ex = PaperTradingExecutor(
+            base_url="https://api.hyperliquid.xyz",
+            default_slippage=0.0,
+            max_position_usd=10000.0,
+            initial_balance=10000.0,
+            commission_pct=0.0,
+        )
+        ex._mid_prices = {"BTC": 50000.0, "ETH": 3000.0}
+        ex._last_price_fetch = 9999999999.0
+        ex._funding_rates = {"BTC": 0.0001, "ETH": -0.0002}  # BTC longs pay, ETH longs receive
+        ex._last_funding_fetch = 9999999999.0  # cache always valid, no network
+        return ex
+
+    @pytest.mark.asyncio
+    async def test_long_pays_positive_funding(self, fx, strategy):
+        sig = Signal(signal_type=SignalType.LONG, symbol="BTC", size_usd=1000.0, reason="enter")
+        await fx.execute_signal(sig, strategy)
+        pos = next(iter(fx._positions.values()))
+        bal_before = fx.balance
+        applied = await fx.accrue_funding()
+        expected = -0.0001 * abs(pos.size) * 50000.0  # long pays
+        assert abs(applied - expected) < 1e-9
+        assert abs(fx.balance - (bal_before + expected)) < 1e-9
+        assert abs(pos.funding_accrued - expected) < 1e-9
+
+    @pytest.mark.asyncio
+    async def test_short_receives_positive_funding(self, fx, strategy):
+        sig = Signal(signal_type=SignalType.SHORT, symbol="BTC", size_usd=1000.0, reason="enter")
+        await fx.execute_signal(sig, strategy)
+        pos = next(iter(fx._positions.values()))
+        applied = await fx.accrue_funding()
+        expected = 0.0001 * abs(pos.size) * 50000.0  # short receives
+        assert applied > 0
+        assert abs(pos.funding_accrued - expected) < 1e-9
+
+    @pytest.mark.asyncio
+    async def test_funding_in_exit_pnl_no_double_count(self, fx, strategy):
+        """Exit trade pnl includes accrued funding; balance delta over the whole
+        round trip equals price pnl + funding (funding credited hourly, exit
+        credits only price pnl — one count total)."""
+        sig = Signal(signal_type=SignalType.LONG, symbol="BTC", size_usd=1000.0, reason="enter")
+        await fx.execute_signal(sig, strategy)
+        bal_after_entry = fx.balance
+        await fx.accrue_funding()
+        funding = next(iter(fx._positions.values())).funding_accrued
+        assert funding < 0  # long paid
+        exit_sig = Signal(signal_type=SignalType.CLOSE_LONG, symbol="BTC", reason="exit")
+        await fx.execute_signal(exit_sig, strategy)
+        trade = fx._trades[-1]
+        assert trade.action == "exit"
+        # price unchanged, zero fees/slippage -> exit pnl should equal funding alone
+        assert abs(trade.pnl - funding) < 1e-9
+        assert abs(fx.balance - (bal_after_entry + funding)) < 1e-9
+
+    @pytest.mark.asyncio
+    async def test_funding_accrued_survives_state_roundtrip(self, fx, strategy, tmp_path, monkeypatch):
+        monkeypatch.setattr(fx, "_state_path", lambda: tmp_path / "paper_state.json")
+        sig = Signal(signal_type=SignalType.LONG, symbol="BTC", size_usd=1000.0, reason="enter")
+        await fx.execute_signal(sig, strategy)
+        await fx.accrue_funding()
+        accrued = next(iter(fx._positions.values())).funding_accrued
+        assert accrued != 0
+        fx.save_state()
+        fx._positions.clear()
+        assert fx.load_state()
+        assert abs(next(iter(fx._positions.values())).funding_accrued - accrued) < 1e-12

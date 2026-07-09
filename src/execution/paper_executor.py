@@ -177,6 +177,7 @@ class PaperPosition:
     strategy_name: str = ""
     unrealized_pnl: float = 0.0
     regime: Optional[str] = None  # market regime at entry (T010 regime-conditional history)
+    funding_accrued: float = 0.0  # cumulative funding paid(-)/received(+) while open
 
 
 @dataclass
@@ -256,6 +257,8 @@ class PaperTradingExecutor:
         # Price cache (refreshed on each call)
         self._mid_prices: Dict[str, float] = {}
         self._last_price_fetch: float = 0
+        self._funding_rates: Dict[str, float] = {}
+        self._last_funding_fetch: float = 0
 
         # For compatibility with orchestrator
         self.vault_address = "paper-trading"
@@ -386,6 +389,7 @@ class PaperTradingExecutor:
                         "strategy_name": p.strategy_name,
                         "unrealized_pnl": p.unrealized_pnl,
                         "regime": p.regime,
+                        "funding_accrued": p.funding_accrued,
                     }
                     for k, p in self._positions.items()
                 },
@@ -420,6 +424,7 @@ class PaperTradingExecutor:
                     strategy_name=p.get("strategy_name", ""),
                     unrealized_pnl=p.get("unrealized_pnl", 0),
                     regime=p.get("regime"),
+                    funding_accrued=p.get("funding_accrued", 0.0),
                 )
 
             self._trades.clear()
@@ -519,7 +524,70 @@ class PaperTradingExecutor:
         what gets *recorded*.
         """
         entry_usd = abs(pos.size) * pos.entry_price
-        return realized_pnl - (entry_usd + exit_usd) * self.commission_pct
+        return (realized_pnl
+                - (entry_usd + exit_usd) * self.commission_pct
+                + getattr(pos, "funding_accrued", 0.0))
+
+    def _fetch_funding_rates(self) -> Dict[str, float]:
+        """Current hourly funding rate per coin from HL metaAndAssetCtxs.
+
+        One bulk POST, 5-min TTL cache (funding only changes hourly). Returns
+        {} on failure so accrual skips a beat instead of raising."""
+        now = time.time()
+        if now - self._last_funding_fetch > 300:
+            try:
+                resp = requests.post(
+                    f"{self.base_url}/info",
+                    headers={"Content-Type": "application/json"},
+                    json={"type": "metaAndAssetCtxs"},
+                    timeout=10,
+                )
+                resp.raise_for_status()
+                meta, ctxs = resp.json()
+                self._funding_rates = {
+                    u["name"]: float(c.get("funding", 0.0))
+                    for u, c in zip(meta.get("universe", []), ctxs)
+                }
+                self._last_funding_fetch = now
+            except Exception as e:
+                logger.warning("[PAPER] Failed to fetch funding rates: %s", e)
+        return self._funding_rates
+
+    async def accrue_funding(self) -> float:
+        """Apply one hour of funding to every open position (call hourly).
+
+        HL convention: positive funding rate -> longs PAY shorts. Payment is
+        credited/debited to balance immediately (as the exchange would) and
+        accumulated on the position; _net_pnl folds the accumulated funding
+        into the recorded exit pnl so carry strategies' ledgered evidence
+        finally includes the carry itself (pre-fix, live xsec_carry earned
+        zero funding while its backtest counted it). Returns total applied."""
+        if not self._positions:
+            return 0.0
+        rates = await asyncio.to_thread(self._fetch_funding_rates)
+        if not rates:
+            return 0.0
+        total = 0.0
+        for pos in self._positions.values():
+            rate = rates.get(pos.symbol)
+            if rate is None:
+                continue
+            try:
+                mark = await asyncio.to_thread(self._fetch_mid_price, pos.symbol)
+            except Exception:
+                mark = pos.entry_price  # stale but bounded; next hour corrects
+            sign = 1.0 if pos.side == "long" else -1.0
+            payment = -sign * rate * abs(pos.size) * mark
+            pos.funding_accrued += payment
+            self.balance += payment
+            total += payment
+        if self.balance > self.peak_balance:
+            self.peak_balance = self.balance
+        if abs(total) > 0.005:
+            logger.info("[PAPER] Funding accrual | %d positions | net=$%.4f | balance=$%.2f",
+                        len(self._positions), total, self.balance)
+        self.save_state()
+        return total
 
     def _get_fill_price(self, symbol: str, is_buy: bool) -> float:
         """Get simulated fill price with slippage."""

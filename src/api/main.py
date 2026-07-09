@@ -1624,12 +1624,31 @@ async def lifespan(app: FastAPI):
         except Exception as _rve:
             logger.error("Revive job error: %s", _rve)
 
+    async def _funding_accrual_job():
+        """Hourly: apply HL funding to open paper positions (carry realism).
+
+        Without this, live paper evidence for carry strategies (xsec_carry)
+        systematically excludes the funding cashflow their backtests count —
+        the gate then starves them of the very evidence they earn."""
+        try:
+            _ex = getattr(app.state, "paper_executor", None) or executor
+            if _ex is not None and hasattr(_ex, "accrue_funding"):
+                await _ex.accrue_funding()
+        except Exception as _fe:
+            logger.error("Funding accrual job error: %s", _fe)
+
     from datetime import datetime as _dt
     _scheduler.add_job(
         _compound_job, "interval", minutes=15,
         id="compounder",
         replace_existing=True,
         next_run_time=_dt.now(),
+    )
+    _scheduler.add_job(
+        _funding_accrual_job, "interval", minutes=60,
+        id="funding_accrual",
+        replace_existing=True,
+        next_run_time=_dt.now() + timedelta(minutes=1),
     )
     # Stagger the cull a few minutes after the compounder so the two jobs don't
     # contend on the same DB session / executor state on the first tick.
