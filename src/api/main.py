@@ -1649,6 +1649,7 @@ async def lifespan(app: FastAPI):
         id="funding_accrual",
         replace_existing=True,
         next_run_time=_dt.now() + timedelta(minutes=1),
+        misfire_grace_time=300,  # boot burst starves the loop; run late rather than skip the hour
     )
     # Stagger the cull a few minutes after the compounder so the two jobs don't
     # contend on the same DB session / executor state on the first tick.
