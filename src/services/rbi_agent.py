@@ -87,6 +87,14 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 
+# OAuth shim base URL — exposes the local Anthropic OAuth shim (127.0.0.1:8787)
+# to Railway via a tunnel (ngrok/cloudflared). When set, the anthropic branch
+# routes through the shim instead of hitting api.anthropic.com directly.
+# The shim injects the real rotating Max-sub token from ~/.claude/.credentials.json;
+# the x-api-key header is ignored by the shim but must be non-empty.
+SHIM_BASE_URL = os.getenv("SHIM_BASE_URL", "").rstrip("/")
+ANTHROPIC_BASE_URL = SHIM_BASE_URL or "https://api.anthropic.com"
+
 COMMISSION_2X = 0.001  # 0.1% commission * 2 for slippage buffer
 
 SYMBOLS = ["BTC", "ETH", "SOL"]
@@ -192,10 +200,13 @@ class RBIAgentService:
         """Call AI provider (Anthropic or OpenAI compatible) and return text response."""
         async with httpx.AsyncClient(timeout=120.0) as client:
             if self.ai_provider == "anthropic" and ANTHROPIC_API_KEY:
+                # ponytail: SHIM_BASE_URL routes through the local OAuth shim
+                # (127.0.0.1:8787 via tunnel). Shim ignores x-api-key; injects
+                # its own rotating Max-sub token. Header must be non-empty.
                 resp = await client.post(
-                    "https://api.anthropic.com/v1/messages",
+                    f"{ANTHROPIC_BASE_URL}/v1/messages",
                     headers={
-                        "x-api-key": ANTHROPIC_API_KEY,
+                        "x-api-key": ANTHROPIC_API_KEY or "shim-managed",
                         "anthropic-version": "2023-06-01",
                         "content-type": "application/json",
                     },
