@@ -24,13 +24,26 @@ import requests
 logger = logging.getLogger(__name__)
 
 # ── Constants (env-overridable, no magic hardcode) ───────────────────────────
-REBALANCE_INTERVAL: int = int(os.getenv("XSEC_REBALANCE_SECS", "3600"))  # 1h
+REBALANCE_INTERVAL: int = int(os.getenv("XSEC_REBALANCE_SECS", "3600"))  # 1h between full rebalances
+RETRY_INTERVAL: int = int(os.getenv("XSEC_RETRY_SECS", "120"))  # short backoff when a tick skips (fetch fail / warm-up) — never go dark for a full hour on a transient miss
 XSEC_Q: float = 0.30         # bottom/top 30% each
 LB: int = 24                 # smoothing window (bars @ 1h = 24h)
 PER_LEG_USD: float = float(os.getenv("XSEC_PER_LEG_USD", "50"))
+# Liquidity floor: a coin must have >= this 24h notional volume to enter the
+# basket on a given tick, so legs fill/exit cleanly. Sized to exclude only dead/
+# delisted markets — HL is a smaller venue, so real majors (BNB/LINK/DOGE) run
+# ~$1.5-3M/day here with deep OI, and a $150 leg is <0.4% of even that flow.
+# $1M keeps every live market, cuts only the truly illiquid. Env-overridable.
+MIN_DAY_VOL_USD: float = float(os.getenv("XSEC_MIN_DAY_VOL_USD", "1000000"))  # $1M
 
-# Same coin universe as edge_probe.py:COINS
-DEFAULT_COINS = ["BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "AVAX", "LINK", "SUI", "ARB"]
+# Universe = majors (one correlated cluster, near-zero funding dispersion) +
+# liquid alts that carry genuine funding dispersion (the tails where carry pays:
+# e.g. kBONK deeply negative, CASHCAT/ZEC/VVV/XMR elevated). The MIN_DAY_VOL_USD
+# floor in _fetch_all_funding keeps fills clean even as an alt's liquidity moves.
+_MAJORS = ["BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "AVAX", "LINK", "SUI", "ARB"]
+_LIQUID_ALTS = ["HYPE", "ZEC", "CASHCAT", "kBONK", "ONDO", "LIT", "FARTCOIN",
+                "WLD", "NEAR", "LTC", "VVV", "AAVE", "XMR", "TRUMP"]
+DEFAULT_COINS = _MAJORS + _LIQUID_ALTS
 
 
 # ── Pure ranking logic (isolated for testing) ────────────────────────────────
@@ -54,6 +67,22 @@ def rank_basket(
     ordered = sorted(coins, key=lambda c: smoothed[c])
     k = max(1, int(n * q))
     return set(ordered[:k]), set(ordered[-k:])
+
+
+def liquid_snapshot(
+    name_to_rate: Dict[str, float],
+    name_to_vol: Dict[str, float],
+    coins,
+    min_vol: float = MIN_DAY_VOL_USD,
+) -> Dict[str, float]:
+    """Funding snapshot for `coins`, keeping only names with 24h notional
+    volume >= min_vol (clean fills). Pure function — no side effects, testable.
+    """
+    return {
+        c: name_to_rate[c]
+        for c in coins
+        if c in name_to_rate and name_to_vol.get(c, 0.0) >= min_vol
+    }
 
 
 # ── Shim: minimal duck-type for PaperTradingExecutor.execute_signal ─────────
@@ -119,13 +148,22 @@ class XsecCarryEngine:
                 return None
             universe = result[0]["universe"]
             ctxs = result[1]
-            name_to_rate: Dict[str, float] = {
-                asset["name"]: float(ctxs[i].get("funding", 0.0))
-                for i, asset in enumerate(universe)
-                if i < len(ctxs)
-            }
-            snapshot = {c: name_to_rate[c] for c in self._coins if c in name_to_rate}
-            return snapshot if snapshot else None
+            name_to_rate: Dict[str, float] = {}
+            name_to_vol: Dict[str, float] = {}
+            for i, asset in enumerate(universe):
+                if i >= len(ctxs):
+                    break
+                name = asset["name"]
+                name_to_rate[name] = float(ctxs[i].get("funding", 0.0) or 0.0)
+                name_to_vol[name] = float(ctxs[i].get("dayNtlVlm", 0.0) or 0.0)
+            snapshot = liquid_snapshot(name_to_rate, name_to_vol, self._coins, MIN_DAY_VOL_USD)
+            if len(snapshot) < 4:
+                logger.warning(
+                    "xsec_carry: only %d coins cleared the $%.0fM liquidity floor",
+                    len(snapshot), MIN_DAY_VOL_USD / 1e6,
+                )
+                return None
+            return snapshot
         except Exception as exc:
             logger.warning("xsec_carry: funding fetch failed — %s", exc)
             return None
@@ -222,11 +260,17 @@ class XsecCarryEngine:
             self._open_legs.pop(coin, None)
             logger.debug("xsec_carry: close %s %s — %s", side, coin, result.error)
 
-    async def _tick(self) -> None:
-        """One rebalance tick: fetch funding, smooth, diff basket, execute."""
+    async def _tick(self) -> bool:
+        """One rebalance tick: fetch funding, smooth, diff basket, execute.
+
+        Returns True only if it actually evaluated & rebalanced the basket.
+        Returns False when the tick is skipped (fetch failed or still warming
+        up) so the caller can retry after a SHORT backoff rather than staying
+        dark for a full rebalance interval.
+        """
         snapshot = await asyncio.to_thread(self._fetch_all_funding)
         if snapshot is None:
-            return  # error already logged; skip this tick
+            return False  # error already logged; retry soon
 
         self._history.append(snapshot)
 
@@ -234,12 +278,12 @@ class XsecCarryEngine:
             logger.info(
                 "xsec_carry: warming up (%d/%d bars)", len(self._history), LB
             )
-            return
+            return False  # not yet rebalancing — retry soon, don't sleep the full hour
 
         smoothed = self._smoothed()
         if not smoothed or len(smoothed) < 4:
             logger.warning("xsec_carry: insufficient coin data (%d coins)", len(smoothed or {}))
-            return
+            return False
 
         want_long, want_short = rank_basket(smoothed)
 
@@ -267,26 +311,31 @@ class XsecCarryEngine:
             except Exception as exc:
                 logger.warning("xsec_carry: open %s %s error — %s", side, coin, exc)
 
+        return True  # full rebalance evaluated — caller sleeps the full interval
+
     # ── Public interface ─────────────────────────────────────────────────────
 
     async def run(self) -> None:
         """Main loop — run as asyncio.create_task(engine.run())."""
         logger.info(
-            "XsecCarryEngine started | coins=%s | interval=%ds | lb=%d | q=%.0f%% | per_leg=$%.0f",
-            self._coins, REBALANCE_INTERVAL, LB, XSEC_Q * 100, PER_LEG_USD,
+            "XsecCarryEngine started | coins=%d | interval=%ds | lb=%d | q=%.0f%% | per_leg=$%.0f | min_vol=$%.0fM",
+            len(self._coins), REBALANCE_INTERVAL, LB, XSEC_Q * 100, PER_LEG_USD, MIN_DAY_VOL_USD / 1e6,
         )
         # Seed lb24 history up-front so the first tick trades with full smoothing.
         await asyncio.to_thread(self._seed_history)
         try:
             while not self._stop_event.is_set():
+                did_rebalance = False
                 try:
-                    await self._tick()
+                    did_rebalance = await self._tick()
                 except Exception as exc:
                     logger.error("xsec_carry: tick unhandled error — %s", exc)
-                # Sleep for REBALANCE_INTERVAL, but wake immediately on stop()
+                # Full interval after a real rebalance; short retry after a skip
+                # (fetch fail / warm-up) so a transient miss never goes dark for 1h.
+                timeout = REBALANCE_INTERVAL if did_rebalance else RETRY_INTERVAL
                 try:
                     await asyncio.wait_for(
-                        self._stop_event.wait(), timeout=REBALANCE_INTERVAL
+                        self._stop_event.wait(), timeout=timeout
                     )
                 except asyncio.TimeoutError:
                     pass
