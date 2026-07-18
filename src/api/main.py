@@ -494,7 +494,9 @@ async def lifespan(app: FastAPI):
                 regime_detector=regime_detector,
                 liquidation_guard=liquidation_guard,
                 hlp_gate=hlp_gate,
-                max_global_trades_per_hour=100,
+                # 2026-07-18: reverted 100→20 (matches orchestrator default; 100 was
+                # undocumented drift — a loose runaway valve, never a PnL knob).
+                max_global_trades_per_hour=20,
                 daily_loss_limit_pct=2.0,
                 max_portfolio_exposure_pct=80.0,
             )
@@ -1527,8 +1529,11 @@ async def lifespan(app: FastAPI):
 
             db = _RSL()
             try:
+                # enabled==False is the durable off-switch (verdict→allocation
+                # guardrail): operator/gate-disabled strategies must never revive.
                 stopped = db.query(models.StrategyInstance).filter(
-                    models.StrategyInstance.status == "stopped"
+                    models.StrategyInstance.status == "stopped",
+                    models.StrategyInstance.enabled == True,
                 ).all()
                 if not stopped:
                     return
