@@ -224,6 +224,10 @@ class XsecCarryEngine:
             strength=1.0,
             size_usd=PER_LEG_USD,
             reason=f"xsec_carry {side} | funding={funding_val:.6f}",
+            # Dollar-neutral structural sleeve: exempt from the directional
+            # half-Kelly observation-floor haircut so legs trade at PER_LEG_USD,
+            # not 10% of it. See paper_executor sizing.
+            metadata={"market_neutral": True},
         )
         cfg = StrategyConfig(
             name="xsec_carry",

@@ -697,18 +697,30 @@ class PaperTradingExecutor:
             # tail noise is already bounded by the _NO_LOSS_PAYOFF cap).
             win_rate, payoff, n_trades, wr_lower_90, _ = self._live_edge_stats(config.name)
             sizing_wr = wr_lower_90
-            effective_leverage = ladder_leverage(symbol, n_trades, sizing_wr, payoff)
-
-            # Realtime adaptation (ADR-0002): scale ladder leverage by the per-entry multiplier
-            # the orchestrator computed from live regime/vol/funding. Default 1.0 if absent —
-            # so existing callers that don't set it are unaffected.
             _meta = getattr(signal, "metadata", None) or {}
-            _adapt = float(_meta.get("adaptation_multiplier", 1.0))
-            _lev_cap = HL_MAX_LEVERAGE.get(symbol.upper(), 5)
-            effective_leverage = max(1, min(int(round(effective_leverage * _adapt)), _lev_cap))
 
-            hk = half_kelly_fraction(sizing_wr, payoff)
-            kelly_mult = max(_OBSERVATION_FLOOR, min(hk / STRONG_EDGE_HK, 1.0)) if hk > 0 else _OBSERVATION_FLOOR
+            if _meta.get("market_neutral"):
+                # Dollar-neutral structural sleeves (e.g. xsec_carry funding carry)
+                # do NOT earn from a directional win-rate, so the confidence-ladder
+                # half-Kelly observation-floor haircut does not apply to them — it
+                # would throttle a validated market-neutral basket to 10% forever.
+                # Trade the configured leg size at 1x; real risk stays bounded by
+                # max_position_usd + the drawdown-tier cascade below.
+                effective_leverage = 1
+                kelly_mult = 1.0
+            else:
+                effective_leverage = ladder_leverage(symbol, n_trades, sizing_wr, payoff)
+
+                # Realtime adaptation (ADR-0002): scale ladder leverage by the per-entry multiplier
+                # the orchestrator computed from live regime/vol/funding. Default 1.0 if absent —
+                # so existing callers that don't set it are unaffected.
+                _adapt = float(_meta.get("adaptation_multiplier", 1.0))
+                _lev_cap = HL_MAX_LEVERAGE.get(symbol.upper(), 5)
+                effective_leverage = max(1, min(int(round(effective_leverage * _adapt)), _lev_cap))
+
+                hk = half_kelly_fraction(sizing_wr, payoff)
+                kelly_mult = max(_OBSERVATION_FLOOR, min(hk / STRONG_EDGE_HK, 1.0)) if hk > 0 else _OBSERVATION_FLOOR
+
             size_usd = size_usd * kelly_mult
             logger.debug(
                 "[PAPER] Sizing %s | point_wr=%.2f lower_wr=%.2f payoff=%.2f n=%d "

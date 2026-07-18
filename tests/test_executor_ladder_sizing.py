@@ -125,3 +125,46 @@ async def test_ramp_tier_caps_leverage_at_half_asset_cap():
         f"Ramp tier should lift leverage above 1 but cap at half the asset cap "
         f"({HL_MAX_LEVERAGE['BTC'] // 2}), got {pos.leverage}"
     )
+
+
+@pytest.mark.asyncio
+async def test_market_neutral_signal_skips_observation_floor():
+    """A market-neutral sleeve (e.g. xsec_carry) must trade at its configured
+    leg size, NOT the 10% directional observation floor. A fresh directional
+    strategy with identical config sizes at 10%; the market-neutral one at 100%."""
+    from src.strategies.base_strategy import Signal, SignalType, StrategyConfig, StrategyTier
+    from src.strategies.registry import create_strategy
+
+    def _fresh_exec():
+        ex = PaperTradingExecutor(initial_balance=50000.0)
+        ex._mid_prices = {"BTC": 50000.0}
+        ex._last_price_fetch = 9999999999.0
+        return ex
+
+    cfg = StrategyConfig(name="mn-test", symbol="BTC", tier=StrategyTier.E, size_usd=1000.0)
+    strat = create_strategy("rsi", cfg)
+
+    # Directional fresh: observation floor => ~10% of configured size
+    ex_dir = _fresh_exec()
+    r_dir = await ex_dir.execute_signal(
+        Signal(signal_type=SignalType.LONG, symbol="BTC", size_usd=1000.0, reason="dir"), strat
+    )
+    assert r_dir.success, r_dir.error
+    dir_size = ex_dir._positions["mn-test:BTC"].size_usd
+
+    # Market-neutral fresh: full configured size, 1x
+    ex_mn = _fresh_exec()
+    r_mn = await ex_mn.execute_signal(
+        Signal(signal_type=SignalType.LONG, symbol="BTC", size_usd=1000.0,
+               reason="mn", metadata={"market_neutral": True}), strat
+    )
+    assert r_mn.success, r_mn.error
+    mn_pos = ex_mn._positions["mn-test:BTC"]
+
+    assert mn_pos.size_usd == pytest.approx(1000.0, rel=0.01), (
+        f"market-neutral leg should trade full size, got {mn_pos.size_usd}"
+    )
+    assert mn_pos.leverage == 1
+    assert mn_pos.size_usd > dir_size * 5, (
+        f"market-neutral ({mn_pos.size_usd}) must be >>  directional floor ({dir_size})"
+    )
