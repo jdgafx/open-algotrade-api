@@ -317,6 +317,39 @@ class XsecCarryEngine:
 
         return True  # full rebalance evaluated — caller sleeps the full interval
 
+    async def _reconcile_open_legs(self) -> None:
+        """Adopt pre-existing executor positions at boot.
+
+        _open_legs is in-memory only, so before this every redeploy orphaned the
+        live basket: the engine could neither rotate nor close legs a previous
+        boot had opened (observed live 2026-07-18: $5 legs from the $50/leg era
+        still open weeks later). Legs whose notional no longer matches
+        PER_LEG_USD (config changed between boots) are closed here; the next
+        tick reopens the ranked basket at the configured size.
+        """
+        try:
+            positions = await self._executor.get_all_positions()
+        except Exception as exc:
+            logger.warning("xsec_carry: reconcile skipped (non-fatal) — %s", exc)
+            return
+        for p in positions:
+            if p.get("strategy_name") != "xsec_carry":
+                continue
+            coin, side = p["symbol"], p["side"]
+            size_usd = float(p.get("size_usd") or 0.0)
+            if abs(size_usd - PER_LEG_USD) > PER_LEG_USD * 0.2:
+                logger.info(
+                    "xsec_carry: closing stale-size leg %s %s ($%.0f, config $%.0f)",
+                    side, coin, size_usd, PER_LEG_USD,
+                )
+                await self._close_leg(coin, side)
+            else:
+                self._open_legs[coin] = side
+        if self._open_legs:
+            logger.info(
+                "xsec_carry: reconciled %d open legs from executor", len(self._open_legs)
+            )
+
     # ── Public interface ─────────────────────────────────────────────────────
 
     async def run(self) -> None:
@@ -325,6 +358,8 @@ class XsecCarryEngine:
             "XsecCarryEngine started | coins=%d | interval=%ds | lb=%d | q=%.0f%% | per_leg=$%.0f | min_vol=$%.0fM",
             len(self._coins), REBALANCE_INTERVAL, LB, XSEC_Q * 100, PER_LEG_USD, MIN_DAY_VOL_USD / 1e6,
         )
+        # Adopt any legs a previous boot left open BEFORE trading decisions.
+        await self._reconcile_open_legs()
         # Seed lb24 history up-front so the first tick trades with full smoothing.
         await asyncio.to_thread(self._seed_history)
         try:

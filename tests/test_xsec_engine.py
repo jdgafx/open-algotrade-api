@@ -135,3 +135,53 @@ if __name__ == "__main__":
         t()
         print(f"PASS  {t.__name__}")
     print(f"\n{len(tests)} tests passed.")
+
+
+# ── Boot reconciliation (redeploy must not orphan the basket) ────────────────
+
+import asyncio
+
+from src.engine.xsec_engine import XsecCarryEngine, PER_LEG_USD
+
+
+class _FakeExecutor:
+    def __init__(self, positions):
+        self._pos = positions
+        self.closed = []
+
+    async def get_all_positions(self):
+        return self._pos
+
+    async def execute_signal(self, sig, strat):
+        class R:
+            success = True
+            error = None
+        self.closed.append(sig.symbol)
+        return R()
+
+
+def test_reconcile_adopts_matching_legs_and_closes_stale_sizes():
+    """At boot: legs at the configured size are adopted into _open_legs;
+    legs whose notional drifted >20% from PER_LEG_USD (config changed
+    between boots) are closed, not adopted."""
+    positions = [
+        {"strategy_name": "xsec_carry", "symbol": "ONDO", "side": "short", "size_usd": PER_LEG_USD},
+        {"strategy_name": "xsec_carry", "symbol": "WLD", "side": "long", "size_usd": PER_LEG_USD * 0.99},
+        {"strategy_name": "xsec_carry", "symbol": "ETH", "side": "long", "size_usd": PER_LEG_USD * 0.1},
+        {"strategy_name": "trend_cross", "symbol": "BTC", "side": "long", "size_usd": PER_LEG_USD},
+    ]
+    ex = _FakeExecutor(positions)
+    eng = XsecCarryEngine(ex, client=None)
+    asyncio.run(eng._reconcile_open_legs())
+    assert eng._open_legs == {"ONDO": "short", "WLD": "long"}
+    assert ex.closed == ["ETH"]  # stale-size leg closed, other strategies untouched
+
+
+def test_reconcile_survives_executor_error():
+    class _Boom:
+        async def get_all_positions(self):
+            raise RuntimeError("db locked")
+
+    eng = XsecCarryEngine(_Boom(), client=None)
+    asyncio.run(eng._reconcile_open_legs())
+    assert eng._open_legs == {}
