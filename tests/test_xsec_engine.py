@@ -185,3 +185,45 @@ def test_reconcile_survives_executor_error():
     eng = XsecCarryEngine(_Boom(), client=None)
     asyncio.run(eng._reconcile_open_legs())
     assert eng._open_legs == {}
+
+
+# ── Disable gate (decertified 2026-07-24) ───────────────────────────────────
+
+from src.engine.xsec_engine import CARRY_ENABLED
+
+
+def test_carry_disabled_by_default():
+    """The sleeve is off unless XSEC_CARRY_ENABLED is explicitly truthy.
+
+    Its promotion evidence was computed on stale (unpaginated) funding data and
+    was never re-validated; allocation follows gate verdicts, so the default
+    must be OFF until it re-certifies.
+    """
+    assert CARRY_ENABLED is False, (
+        "xsec_carry must default to disabled — re-enable only after "
+        "xsec_funding_carry re-clears the honest gate on paginated funding"
+    )
+
+
+def test_flush_closes_every_carry_leg_regardless_of_size():
+    """Disabling must CLOSE the basket, not orphan it. Unlike reconcile, flush
+    closes legs at any notional, and never touches other strategies."""
+    positions = [
+        {"strategy_name": "xsec_carry", "symbol": "ONDO", "side": "short", "size_usd": PER_LEG_USD},
+        {"strategy_name": "xsec_carry", "symbol": "WLD", "side": "long", "size_usd": PER_LEG_USD * 0.1},
+        {"strategy_name": "trend_cross", "symbol": "BTC", "side": "long", "size_usd": PER_LEG_USD},
+    ]
+    ex = _FakeExecutor(positions)
+    eng = XsecCarryEngine(ex, client=None)
+    closed = asyncio.run(eng.flush_all_legs())
+    assert closed == 2
+    assert sorted(ex.closed) == ["ONDO", "WLD"]  # trend_cross untouched
+
+
+def test_flush_survives_executor_error():
+    """A flush failure must never block application startup."""
+    class _Boom:
+        async def get_all_positions(self):
+            raise RuntimeError("db locked")
+
+    assert asyncio.run(XsecCarryEngine(_Boom(), client=None).flush_all_legs()) == 0

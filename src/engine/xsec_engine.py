@@ -36,6 +36,19 @@ PER_LEG_USD: float = float(os.getenv("XSEC_PER_LEG_USD", "50"))
 # $1M keeps every live market, cuts only the truly illiquid. Env-overridable.
 MIN_DAY_VOL_USD: float = float(os.getenv("XSEC_MIN_DAY_VOL_USD", "1000000"))  # $1M
 
+# Master on/off. Defaults OFF as of 2026-07-24: the sleeve was decertified.
+# Its promotion evidence (OOS Sharpe 1.89 / 53 trades) was computed BEFORE the
+# edge_probe funding-pagination fix (2026-07-02), i.e. on stale forward-filled
+# rates, and was never re-validated. Live it lost -0.589% of $8,290 turnover
+# over 72 legs (2026-07-18..24) with funding income already folded into exit
+# pnl — the same ~-0.5%/turnover rate it had lost since inception at $5 legs,
+# only visible once sizing went 30x. Allocation follows gate verdicts: this
+# stays off until xsec_funding_carry re-clears the honest gate on paginated
+# funding data, at which point set XSEC_CARRY_ENABLED=1.
+CARRY_ENABLED: bool = os.getenv("XSEC_CARRY_ENABLED", "0").strip().lower() in (
+    "1", "true", "yes", "on",
+)
+
 # Universe = majors (one correlated cluster, near-zero funding dispersion) +
 # liquid alts that carry genuine funding dispersion (the tails where carry pays:
 # e.g. kBONK deeply negative, CASHCAT/ZEC/VVV/XMR elevated). The MIN_DAY_VOL_USD
@@ -349,6 +362,35 @@ class XsecCarryEngine:
             logger.info(
                 "xsec_carry: reconciled %d open legs from executor", len(self._open_legs)
             )
+
+    async def flush_all_legs(self) -> int:
+        """Close every live xsec_carry leg and return how many were closed.
+
+        Used when the sleeve is disabled: without this, gating the engine off
+        would orphan its open basket in the executor with no owner left to
+        close it (the exact failure 3bcb46a fixed for redeploys — $5 legs from
+        the $50/leg era sat open for weeks). Unlike _reconcile_open_legs this
+        closes regardless of leg notional. Never raises: a flush failure must
+        not block application startup.
+        """
+        closed = 0
+        try:
+            positions = await self._executor.get_all_positions()
+        except Exception as exc:
+            logger.warning("xsec_carry: flush skipped (non-fatal) — %s", exc)
+            return 0
+        for p in positions:
+            if p.get("strategy_name") != "xsec_carry":
+                continue
+            try:
+                await self._close_leg(p["symbol"], p["side"])
+                closed += 1
+            except Exception as exc:
+                logger.warning("xsec_carry: flush close %s failed — %s",
+                               p.get("symbol"), exc)
+        if closed:
+            logger.warning("xsec_carry: flushed %d open legs (sleeve disabled)", closed)
+        return closed
 
     # ── Public interface ─────────────────────────────────────────────────────
 

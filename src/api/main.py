@@ -1683,14 +1683,24 @@ async def lifespan(app: FastAPI):
     xsec_engine = None
     xsec_task = None
     try:
-        if executor is not None and client is not None:
-            from src.engine.xsec_engine import XsecCarryEngine
+        from src.engine.xsec_engine import CARRY_ENABLED, XsecCarryEngine
+        if executor is None or client is None:
+            logger.warning("XsecCarryEngine skipped — no executor/client")
+        elif not CARRY_ENABLED:
+            # Decertified 2026-07-24 (stale-funding certification, -0.589% of
+            # turnover live). Flush rather than merely skip, so the basket the
+            # previous boot opened is closed instead of orphaned.
+            xsec_task = asyncio.create_task(
+                XsecCarryEngine(executor=executor, client=client).flush_all_legs()
+            )
+            logger.warning(
+                "XsecCarryEngine DISABLED (XSEC_CARRY_ENABLED unset/0) — flushing any open legs"
+            )
+        else:
             xsec_engine = XsecCarryEngine(executor=executor, client=client)
             xsec_task = asyncio.create_task(xsec_engine.run())
             app.state.xsec_engine = xsec_engine
             logger.info("XsecCarryEngine started")
-        else:
-            logger.warning("XsecCarryEngine skipped — no executor/client")
     except Exception as _xe:
         logger.warning("XsecCarryEngine failed to start (non-fatal): %s", _xe)
 
